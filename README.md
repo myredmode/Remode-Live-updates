@@ -1,11 +1,10 @@
-<div align="center">
+# RedMode - Contemporary Fashion & Apparel Store
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+Official web application for RedMode (https://redmode.in).
 
-  <h1>Built with AI Studio</h2>
-
-  <p>The fastest path from prompt to production with Gemini.</p>
-
-  <a href="https://aistudio.google.com/apps">Start building</a>
-
-</div>
+## Features
+- E-commerce storefront with curated collections (Kurtis, Embroidery, Trousers, Jewellery)
+- Cart & Wishlist management
+- Custom brand branding & high-resolution assets
+- Optimized for desktop & mobile
+- Fast static build deployed via Vercel CI/CD

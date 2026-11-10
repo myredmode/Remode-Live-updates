@@ -1,0 +1,6 @@
+{
+  "name": "REDMODE",
+  "description": "REDMODE - Modern Ethnic Wear Customer Storefront & Management Admin Panel",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

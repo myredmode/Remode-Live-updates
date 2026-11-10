@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none">
+  <defs>
+    <linearGradient id="redmode-top-wing" x1="20" y1="40" x2="260" y2="70" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#DE1B24" />
+      <stop offset="35%" stop-color="#E5232A" />
+      <stop offset="70%" stop-color="#DE1B24" />
+      <stop offset="100%" stop-color="#CB121B" />
+    </linearGradient>
+    <linearGradient id="redmode-bottom-tail" x1="30" y1="90" x2="240" y2="155" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#C4131C" />
+      <stop offset="45%" stop-color="#B30E16" />
+      <stop offset="100%" stop-color="#8F0910" />
+    </linearGradient>
+    <linearGradient id="redmode-fold-shadow" x1="50" y1="80" x2="160" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#A80B13" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#7E060D" stop-opacity="0.3" />
+    </linearGradient>
+  </defs>
+  <!-- Center emblem: Bounding box is ~ [28, 28] to [266, 156] (w: 238, h: 128). Scale & center nicely -->
+  <g transform="translate(8, 64)">
+    <path d="M 28 88 C 45 106, 75 148, 126 156 C 162 161, 204 153, 238 128 C 214 135, 178 132, 148 116 C 122 102, 94 88, 64 85 C 50 83, 37 85, 28 88 Z" fill="url(#redmode-bottom-tail)" />
+    <path d="M 28 88 C 45 98, 70 106, 102 105 C 130 104, 155 96, 178 86 C 152 92, 122 93, 92 88 C 65 84, 45 84, 28 88 Z" fill="url(#redmode-fold-shadow)" />
+    <path d="M 28 88 C 38 68, 62 40, 104 36 C 144 32, 185 58, 222 55 C 244 53, 258 41, 266 28 C 264 42, 255 58, 240 71 C 215 90, 175 92, 142 84 C 106 75, 68 76, 28 88 Z" fill="url(#redmode-top-wing)" />
+  </g>
+</svg>

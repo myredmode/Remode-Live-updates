@@ -1,0 +1,78 @@
+{
+  "entities": {
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Registered administrators and staff members",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "email": { "type": "string", "format": "email" },
+        "mobile": { "type": "string", "minLength": 10, "maxLength": 20 },
+        "role": { "type": "string", "enum": ["Super Admin", "Listing + Label Admin", "Label Admin"] },
+        "status": { "type": "string", "enum": ["active", "disabled"] },
+        "lastLogin": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "name", "email", "role", "status"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Catalog products and updated listings",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "price": { "type": "number" },
+        "category": { "type": "string" },
+        "mainImage": { "type": "string" }
+      },
+      "required": ["id", "name", "price"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Security audit trail for critical admin actions like product updates, user status changes, and settings modifications",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "adminId": { "type": "string" },
+        "adminName": { "type": "string" },
+        "role": { "type": "string" },
+        "action": { "type": "string" },
+        "entity": { "type": "string" },
+        "entityId": { "type": "string" },
+        "oldValue": { "type": "string" },
+        "newValue": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "action", "entity", "entityId", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": "AdminUser",
+      "description": "Registered administrators and staff members"
+    },
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Catalog products and updated listings"
+    },
+    "/categories/{categoryId}": {
+      "schema": "Category",
+      "description": "Store categories and subcategories"
+    },
+    "/banners/{bannerId}": {
+      "schema": "Banner",
+      "description": "Storefront promotional and hero banners"
+    },
+    "/settings/{settingId}": {
+      "schema": "StoreSettings",
+      "description": "Global store settings and payment configurations"
+    },
+    "/AuditLog/{logId}": {
+      "schema": "AuditLog",
+      "description": "Critical administrative security audit logs"
+    }
+  }
+}
