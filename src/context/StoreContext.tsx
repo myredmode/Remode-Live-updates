@@ -89,11 +89,110 @@ function toIsoTimestamp(val: any): string | undefined {
  * Deduplicates product images before saving to Cloud Firestore so the document
  * never exceeds Firestore's 1,048,576-byte (1 MB) limit even with multiple base64 photos.
  */
+function isRealUploadedImage(u?: string): boolean {
+  if (!u || typeof u !== 'string') return false;
+  if (u.startsWith('data:image/')) return true;
+  if (u.includes('images.unsplash.com') || u.startsWith('/uploads/')) return false;
+  return u.startsWith('http://') || u.startsWith('https://');
+}
+
+function productHasRealImage(p?: Partial<Product>): boolean {
+  if (!p) return false;
+  if (isRealUploadedImage(p.mainImage)) return true;
+  if (Array.isArray(p.images) && p.images.some((u) => isRealUploadedImage(u))) return true;
+  if (
+    Array.isArray(p.colorOptions) &&
+    p.colorOptions.some(
+      (co) => isRealUploadedImage(co?.image) || (Array.isArray(co?.images) && co.images.some((u) => isRealUploadedImage(u)))
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+async function compressSingleDataUrl(dataUrl: string, maxChars = 85000): Promise<string> {
+  if (!dataUrl || !dataUrl.startsWith('data:image/') || dataUrl.length <= maxChars) {
+    return dataUrl;
+  }
+  if (typeof document === 'undefined' || typeof Image === 'undefined') {
+    return dataUrl;
+  }
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const MAX_W = 640;
+        const MAX_H = 850;
+        let w = img.width || 640;
+        let h = img.height || 850;
+        if (w > MAX_W || h > MAX_H) {
+          const ratio = Math.min(MAX_W / w, MAX_H / h);
+          w = Math.round(w * ratio);
+          h = Math.round(h * ratio);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, w, h);
+          ctx.drawImage(img, 0, 0, w, h);
+          let out = canvas.toDataURL('image/jpeg', 0.56);
+          if (out.length > maxChars) {
+            out = canvas.toDataURL('image/jpeg', 0.42);
+          }
+          resolve(out);
+          return;
+        }
+      } catch {}
+      resolve(dataUrl);
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+async function ensureCompactProductForFirestore(product: Product): Promise<Product> {
+  const cache = new Map<string, string>();
+  const compactUrl = async (u?: string): Promise<string> => {
+    if (!u || typeof u !== 'string') return '';
+    if (cache.has(u)) return cache.get(u)!;
+    const res = await compressSingleDataUrl(u);
+    cache.set(u, res);
+    return res;
+  };
+
+  const mainImage = await compactUrl(product.mainImage);
+  const images = Array.isArray(product.images)
+    ? (await Promise.all(product.images.map((u) => compactUrl(u)))).filter(Boolean)
+    : [];
+  const colorOptions = Array.isArray(product.colorOptions)
+    ? await Promise.all(
+        product.colorOptions.map(async (co) => ({
+          ...co,
+          image: await compactUrl(co.image),
+          images: Array.isArray(co.images)
+            ? (await Promise.all(co.images.map((u) => compactUrl(u)))).filter(Boolean)
+            : [],
+        }))
+      )
+    : product.colorOptions;
+
+  return {
+    ...product,
+    mainImage,
+    images,
+    colorOptions,
+  };
+}
+
 function prepareProductForFirestore(product: Product): Record<string, any> {
-  const priorityUrls: string[] = [];
+  const allCandidateUrls: string[] = [];
   const pushUnique = (u?: string) => {
-    if (u && typeof u === 'string' && !u.startsWith('__img_ref:') && !priorityUrls.includes(u)) {
-      priorityUrls.push(u);
+    if (u && typeof u === 'string' && !u.startsWith('__img_ref:') && !allCandidateUrls.includes(u)) {
+      allCandidateUrls.push(u);
     }
   };
 
@@ -112,6 +211,12 @@ function prepareProductForFirestore(product: Product): Record<string, any> {
       }
     });
   }
+
+  // If real uploaded images exist, strip out any leftover Unsplash / ephemeral /uploads/ URLs
+  const hasReal = allCandidateUrls.some((u) => isRealUploadedImage(u));
+  const priorityUrls = hasReal
+    ? allCandidateUrls.filter((u) => isRealUploadedImage(u))
+    : allCandidateUrls;
 
   // Cap total base64 image payload at ~720KB so total Firestore document stays safely below 1MB
   const MAX_IMAGE_CHARS = 720000;
@@ -138,27 +243,37 @@ function prepareProductForFirestore(product: Product): Record<string, any> {
   const dedupedColorOptions = Array.isArray(product.colorOptions)
     ? product.colorOptions.map((co) => {
         const rawImgs = Array.isArray(co.images) && co.images.length > 0 ? co.images : co.image ? [co.image] : [];
+        const cleanRawImgs = hasReal ? rawImgs.filter((u) => isRealUploadedImage(u)) : rawImgs;
         const mappedImgs = Array.from(
           new Set(
-            rawImgs
+            cleanRawImgs
               .filter((u) => u && (allowedImages.includes(u) || !u.startsWith('data:image/')))
               .map((u) => toRefOrUrl(u))
               .filter(Boolean)
           )
         );
+        const primaryCandidate =
+          hasReal && !isRealUploadedImage(co.image)
+            ? cleanRawImgs[0] || allowedImages[0]
+            : co.image || cleanRawImgs[0] || product.mainImage;
         return {
           ...co,
-          image: toRefOrUrl(co.image || rawImgs[0] || product.mainImage),
-          images: mappedImgs,
+          image: toRefOrUrl(primaryCandidate),
+          images: mappedImgs.length > 0 ? mappedImgs : allowedImages[0] ? [toRefOrUrl(allowedImages[0])] : [],
         };
       })
     : [];
+
+  const mainCandidate =
+    hasReal && !isRealUploadedImage(product.mainImage)
+      ? allowedImages[0] || ''
+      : product.mainImage || allowedImages[0] || '';
 
   return cleanForFirestore({
     ...product,
     published: product.published !== false,
     inStock: product.inStock !== false,
-    mainImage: toRefOrUrl(product.mainImage || allowedImages[0] || ''),
+    mainImage: toRefOrUrl(mainCandidate),
     images: allowedImages,
     colorOptions: dedupedColorOptions,
     createdAt: toIsoTimestamp(product.createdAt) || new Date().toISOString(),
@@ -1675,6 +1790,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       incomingList: Product[],
       blacklist: string[]
     ): Product[] => {
+      const initialIdSet = new Set(INITIAL_PRODUCTS.map((ip) => ip.id));
       const map = new Map<string, Product>();
       for (const item of currentList) {
         if (item && item.id && item.name && !blacklist.includes(item.id)) {
@@ -1687,9 +1803,23 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (!existing) {
           map.set(incoming.id, incoming);
         } else {
+          const existingHasReal = !initialIdSet.has(existing.id) && productHasRealImage(existing);
+          const incomingHasReal = !initialIdSet.has(incoming.id) && productHasRealImage(incoming);
+
+          // Never let a placeholder/Unsplash image overwrite a real uploaded photo on a custom product
+          if (existingHasReal && !incomingHasReal) {
+            map.set(incoming.id, {
+              ...incoming,
+              mainImage: existing.mainImage,
+              images: existing.images,
+              colorOptions: existing.colorOptions,
+            });
+            continue;
+          }
+
           const existingTime = getProductTimeMs(existing);
           const incomingTime = getProductTimeMs(incoming);
-          if (incomingTime >= existingTime) {
+          if (incomingTime >= existingTime || (incomingHasReal && !existingHasReal)) {
             map.set(incoming.id, incoming);
           }
         }
@@ -1752,6 +1882,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
             const fsProducts: Product[] = [];
             const fsIds = new Set<string>();
+            const fsMap = new Map<string, Product>();
             snap.forEach((d) => {
               const data = d.data();
               const docId = data?.id || d.id;
@@ -1759,7 +1890,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               if (data && docId && typeof data.name === 'string' && data.name.trim().length > 0) {
                 fsIds.add(docId);
                 if (!fullBlacklist.includes(docId)) {
-                  fsProducts.push({ ...(data as Product), id: docId });
+                  const rehydrated = rehydrateProductFromFirestore({ ...(data as Product), id: docId }) as Product;
+                  fsProducts.push(rehydrated);
+                  fsMap.set(docId, rehydrated);
                 }
               }
             });
@@ -1772,7 +1905,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 localStorage.setItem('redmode_products', JSON.stringify(merged));
               } catch {}
 
-              // Auto-sync any custom local product that failed to reach Firestore earlier
+              // Auto-sync any custom local product that failed to reach Firestore earlier OR has a real photo while Firestore only has a placeholder
               const initialIdSet = new Set(INITIAL_PRODUCTS.map((ip) => ip.id));
               merged.forEach((localProd) => {
                 if (
@@ -1780,16 +1913,25 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   localProd.id &&
                   localProd.name &&
                   !fullBlacklist.includes(localProd.id) &&
-                  !initialIdSet.has(localProd.id) &&
-                  !fsIds.has(localProd.id)
+                  !initialIdSet.has(localProd.id)
                 ) {
-                  setDoc(
-                    doc(db, 'products', localProd.id),
-                    prepareProductForFirestore(localProd),
-                    { merge: true }
-                  ).catch((syncErr) => {
-                    console.warn('Auto-sync local product to Firestore warning:', syncErr);
-                  });
+                  const fsDoc = fsMap.get(localProd.id);
+                  const needsSync =
+                    !fsIds.has(localProd.id) ||
+                    (productHasRealImage(localProd) && !productHasRealImage(fsDoc));
+                  if (needsSync) {
+                    ensureCompactProductForFirestore(localProd)
+                      .then((compactProd) =>
+                        setDoc(
+                          doc(db, 'products', localProd.id),
+                          prepareProductForFirestore(compactProd),
+                          { merge: true }
+                        )
+                      )
+                      .catch((syncErr) => {
+                        console.warn('Auto-sync local product to Firestore warning:', syncErr);
+                      });
+                  }
                 }
               });
 
@@ -2735,24 +2877,24 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     // 2. Immediately sync the deduplicated, self-contained product record to Cloud Firestore
     // so it goes live across all devices in real time without waiting on local server calls
-    try {
-      const firestorePayload = prepareProductForFirestore(newProduct);
-      setDoc(doc(db, 'products', newProduct.id), firestorePayload, {
-        merge: true,
-      }).catch((err) => {
+    ensureCompactProductForFirestore(newProduct)
+      .then((compactProd) => {
+        const firestorePayload = prepareProductForFirestore(compactProd);
+        return setDoc(doc(db, 'products', newProduct.id), firestorePayload, {
+          merge: true,
+        });
+      })
+      .catch((err) => {
         console.error('Firestore product create sync error:', err);
       });
-      setDoc(
-        doc(db, 'settings', 'system_deletions'),
-        {
-          deletedProductIds: arrayRemove(newProduct.id),
-          updatedAt: new Date().toISOString(),
-        },
-        { merge: true }
-      ).catch(() => {});
-    } catch (err) {
-      console.error('Failed preparing product for Firestore:', err);
-    }
+    setDoc(
+      doc(db, 'settings', 'system_deletions'),
+      {
+        deletedProductIds: arrayRemove(newProduct.id),
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    ).catch(() => {});
 
     // 3. Also persist to optional backend API (/api/products) if running
     fetch('/api/products', {
@@ -2796,14 +2938,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
 
     // Immediately sync the deduplicated product to Cloud Firestore across all devices
-    try {
-      const firestorePayload = prepareProductForFirestore(updatedProd);
-      setDoc(doc(db, 'products', id), firestorePayload, { merge: true }).catch((err) => {
+    ensureCompactProductForFirestore(updatedProd)
+      .then((compactProd) => {
+        const firestorePayload = prepareProductForFirestore(compactProd);
+        return setDoc(doc(db, 'products', id), firestorePayload, { merge: true });
+      })
+      .catch((err) => {
         console.error('Firestore product update sync error:', err);
       });
-    } catch (err) {
-      console.error('Failed preparing updated product for Firestore:', err);
-    }
 
     // Also persist to optional backend API (/api/products) if running
     fetch(`/api/products/${encodeURIComponent(id)}`, {

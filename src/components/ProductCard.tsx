@@ -64,19 +64,29 @@ export const ProductCard: React.FC<ProductCardProps> = ({
     (c) => c.name.toLowerCase() === effectiveColor.toLowerCase()
   ) || (product.colorOptions && product.colorOptions.length > 0 ? product.colorOptions[0] : undefined);
 
-  // Primary image with cache-busting versioning
-  const rawPrimary =
-    activeColorOption?.images?.[0] ||
-    activeColorOption?.image ||
-    product.mainImage ||
-    product.images?.[0] ||
-    'https://images.unsplash.com/photo-1610030469983-98e550d6193c?auto=format&fit=crop&w=1200&q=85';
-  const primaryImage = getCacheBustedUrl(rawPrimary, product.updatedAt);
+  // Primary image with cache-busting versioning — always prefer real uploaded photos over sample placeholders
+  const candidateImages = [
+    activeColorOption?.image,
+    ...(activeColorOption?.images || []),
+    product.mainImage,
+    ...(product.images || []),
+  ].filter((u): u is string => Boolean(u && typeof u === 'string'));
+
+  const realPrimary =
+    candidateImages.find((u) => u.startsWith('data:image/')) ||
+    candidateImages.find((u) => !u.includes('images.unsplash.com') && !u.startsWith('/uploads/')) ||
+    candidateImages[0] ||
+    '';
+  const primaryImage = getCacheBustedUrl(realPrimary, product.updatedAt);
 
   // Secondary image on hover (if available) with cache-busting
   const rawSecondary =
-    activeColorOption?.images?.[1] ||
-    (product.images && product.images.length > 1 ? product.images[1] : null);
+    candidateImages.find(
+      (u) =>
+        u !== realPrimary &&
+        !u.includes('images.unsplash.com') &&
+        !u.startsWith('/uploads/')
+    ) || null;
   const secondaryImage = rawSecondary ? getCacheBustedUrl(rawSecondary, product.updatedAt) : null;
 
   const hasSecondaryImage = Boolean(secondaryImage && secondaryImage !== primaryImage);
@@ -299,9 +309,10 @@ export const ProductCard: React.FC<ProductCardProps> = ({
           loading={priority ? 'eager' : 'lazy'}
           onError={(e) => {
             setIsImageLoaded(true);
-            e.currentTarget.src =
-              product.mainImage ||
-              'https://images.unsplash.com/photo-1610030469983-98e550d6193c?auto=format&fit=crop&w=1200&q=85';
+            const fallback = candidateImages.find((u) => u !== realPrimary && u.startsWith('data:image/'));
+            if (fallback && e.currentTarget.src !== fallback) {
+              e.currentTarget.src = fallback;
+            }
           }}
         />
 

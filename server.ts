@@ -66,30 +66,17 @@ async function startServer() {
         return res.status(400).json({ success: false, message: 'No image data provided' });
       }
 
-      // If already a hosted URL or uploads path, return directly
-      if (image.startsWith('http://') || image.startsWith('https://') || image.startsWith('/uploads/')) {
+      // Return self-contained data:image/ or hosted URLs directly so images work across all cloud instances & devices
+      if (
+        image.startsWith('data:image/') ||
+        image.startsWith('http://') ||
+        image.startsWith('https://') ||
+        image.startsWith('/uploads/')
+      ) {
         return res.json({ success: true, url: image });
       }
 
-      // Parse dataUrl
-      const matches = image.match(/^data:image\/([a-zA-Z0-9+]+);base64,(.+)$/);
-      let ext = 'jpg';
-      let buffer: Buffer;
-
-      if (matches) {
-        ext = matches[1] === 'jpeg' ? 'jpg' : matches[1];
-        if (ext === 'svg+xml') ext = 'svg';
-        buffer = Buffer.from(matches[2], 'base64');
-      } else {
-        buffer = Buffer.from(image, 'base64');
-      }
-
-      const safeName = `rm_prod_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.${ext}`;
-      const filePath = path.join(uploadsDir, safeName);
-      fs.writeFileSync(filePath, buffer);
-
-      const publicUrl = `/uploads/${safeName}`;
-      return res.json({ success: true, url: publicUrl });
+      return res.json({ success: true, url: `data:image/jpeg;base64,${image}` });
     } catch (err: any) {
       console.error('Image upload endpoint error:', err);
       return res.status(500).json({ success: false, message: err.message || 'Image upload failed' });
@@ -133,24 +120,8 @@ async function startServer() {
 
   const persistBase64ImageIfNeeded = (imgStr?: string): string => {
     if (!imgStr || typeof imgStr !== 'string') return '';
-    if (!imgStr.startsWith('data:image/')) return imgStr;
-    try {
-      const matches = imgStr.match(/^data:image\/([a-zA-Z0-9+]+);base64,(.+)$/);
-      let ext = 'jpg';
-      let buffer: Buffer;
-      if (matches) {
-        ext = matches[1] === 'jpeg' ? 'jpg' : matches[1];
-        if (ext === 'svg+xml') ext = 'svg';
-        buffer = Buffer.from(matches[2], 'base64');
-      } else {
-        buffer = Buffer.from(imgStr, 'base64');
-      }
-      const safeName = `rm_prod_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.${ext}`;
-      fs.writeFileSync(path.join(uploadsDir, safeName), buffer);
-      return `/uploads/${safeName}`;
-    } catch {
-      return imgStr;
-    }
+    // Keep data:image/ URLs intact so products remain self-contained across Cloud Run containers and devices
+    return imgStr;
   };
 
   const normalizeProductImagesOnServer = (product: any): any => {
@@ -225,7 +196,7 @@ async function startServer() {
         ...rawProduct,
         id: rawProduct.id || `prod-${Date.now()}`,
         name: rawProduct.name || rawProduct.title,
-        updatedAt: new Date().toISOString(),
+        updatedAt: rawProduct.updatedAt || new Date().toISOString(),
       });
       const existing = readServerProducts();
       const idx = existing.findIndex((p) => p.id === normalized.id);
@@ -248,7 +219,7 @@ async function startServer() {
       const normalized = normalizeProductImagesOnServer({
         ...updates,
         id,
-        updatedAt: new Date().toISOString(),
+        updatedAt: updates.updatedAt || new Date().toISOString(),
       });
       const existing = readServerProducts();
       const idx = existing.findIndex((p) => p.id === id);

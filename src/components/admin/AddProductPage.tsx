@@ -999,32 +999,42 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
     showToast('Cover photo set as main!');
   };
 
+  const isSampleOrEphemeralUrl = (img?: string): boolean => {
+    if (!img || typeof img !== 'string') return true;
+    if (img.startsWith('/uploads/')) return true;
+    if (img.includes('images.unsplash.com')) return true;
+    if (SAMPLE_CLOTHING_PRESETS.some((preset) => preset.url === img)) return true;
+    return false;
+  };
+
   const addImageToActiveColor = (imgUrl: string) => {
-    if (!imgUrl.trim()) return;
+    const cleanUrl = imgUrl.trim();
+    if (!cleanUrl) return;
     setIsDirty(true);
     if (colors.length === 0) {
-      setUnassignedGalleryImages((prev) => (prev.includes(imgUrl) ? prev : [...prev, imgUrl]));
-      setUnassignedPrimaryImage((prev) => prev || imgUrl);
-      showToast('Photo added!');
+      setUnassignedGalleryImages((prev) => {
+        const cleaned = prev.filter((img) => !isSampleOrEphemeralUrl(img) && img !== cleanUrl);
+        return [cleanUrl, ...cleaned];
+      });
+      setUnassignedPrimaryImage(cleanUrl);
+      showToast('Photo added as main cover!');
       return;
     }
     setColors((prev) =>
       prev.map((col, idx) => {
         if (idx !== activeColorIndex) return col;
         const currentGallery = (col.galleryImages || []).filter(
-          (img) => !SAMPLE_CLOTHING_PRESETS.some((preset) => preset.url === img)
+          (img) => !isSampleOrEphemeralUrl(img) && img !== cleanUrl
         );
-        const updatedGallery = currentGallery.includes(imgUrl)
-          ? [imgUrl, ...currentGallery.filter((i) => i !== imgUrl)]
-          : [...currentGallery, imgUrl];
+        const updatedGallery = [cleanUrl, ...currentGallery];
         return {
           ...col,
           galleryImages: updatedGallery,
-          primaryImage: col.primaryImage || imgUrl,
+          primaryImage: cleanUrl,
         };
       })
     );
-    showToast('Photo added!');
+    showToast('Photo added as main cover!');
   };
 
   const removeImageFromActiveColor = (imgUrl: string) => {
@@ -1078,33 +1088,31 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
         setIsDirty(true);
         if (colors.length === 0) {
           setUnassignedGalleryImages((prev) => {
-            const combined = [...prev];
-            uploadedUrls.forEach((u) => {
-              if (!combined.includes(u)) combined.push(u);
-            });
-            return combined;
+            const cleanPrev = prev.filter(
+              (img) => !isSampleOrEphemeralUrl(img) && !uploadedUrls.includes(img)
+            );
+            return [...uploadedUrls, ...cleanPrev];
           });
-          setUnassignedPrimaryImage((prev) => prev || uploadedUrls[0] || '');
+          // Always make the newly uploaded photo the primary cover image
+          setUnassignedPrimaryImage(uploadedUrls[0]);
         } else {
           setColors((prev) =>
             prev.map((col, idx) => {
               if (idx !== activeColorIndex) return col;
               const currentGallery = (col.galleryImages || []).filter(
-                (img) => !SAMPLE_CLOTHING_PRESETS.some((preset) => preset.url === img)
+                (img) => !isSampleOrEphemeralUrl(img) && !uploadedUrls.includes(img)
               );
-              const combined = [...currentGallery];
-              uploadedUrls.forEach((u) => {
-                if (!combined.includes(u)) combined.push(u);
-              });
+              const combined = [...uploadedUrls, ...currentGallery];
               return {
                 ...col,
                 galleryImages: combined,
-                primaryImage: col.primaryImage || uploadedUrls[0] || combined[0] || '',
+                // Always promote the newly uploaded photo to primaryImage so old placeholders are replaced
+                primaryImage: uploadedUrls[0] || combined[0] || '',
               };
             })
           );
         }
-        showToast(`${uploadedUrls.length} photo${uploadedUrls.length > 1 ? 's' : ''} uploaded!`);
+        showToast(`${uploadedUrls.length} photo${uploadedUrls.length > 1 ? 's' : ''} uploaded & set as main cover!`);
       }
     } catch (err) {
       console.error('Failed to upload images:', err);
@@ -1158,13 +1166,19 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
       return;
     }
 
+    const candidateCovers = [
+      activeColor?.primaryImage,
+      colors[0]?.primaryImage,
+      ...(activeColor?.galleryImages || []),
+      ...(colors[0]?.galleryImages || []),
+      unassignedPrimaryImage,
+      ...unassignedGalleryImages,
+    ].filter(Boolean) as string[];
+
+    // Prefer a real uploaded image (data:image/ or non-Unsplash URL) over any sample placeholder
     const mainCover =
-      activeColor?.primaryImage ||
-      colors[0]?.primaryImage ||
-      activeColor?.galleryImages?.[0] ||
-      colors[0]?.galleryImages?.[0] ||
-      unassignedPrimaryImage ||
-      unassignedGalleryImages[0] ||
+      candidateCovers.find((u) => !isSampleOrEphemeralUrl(u)) ||
+      candidateCovers[0] ||
       '';
 
     const effectiveParentSku =
@@ -1238,11 +1252,24 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
               Object.assign(stockMap, stockBySize);
             }
 
+            const rawColorImgs = [
+              c.primaryImage,
+              ...(c.galleryImages || []),
+            ].filter(Boolean) as string[];
+            const hasRealColorImg = rawColorImgs.some((u) => !isSampleOrEphemeralUrl(u));
+            const filteredColorImgs = hasRealColorImg
+              ? rawColorImgs.filter((u) => !isSampleOrEphemeralUrl(u))
+              : rawColorImgs;
+            const primaryColorImg = filteredColorImgs[0] || mainCover;
+            const orderedColorGallery = Array.from(
+              new Set([primaryColorImg, ...filteredColorImgs].filter(Boolean))
+            );
+
             return {
               name: c.name,
               hex: c.hex,
-              image: c.primaryImage || mainCover,
-              images: c.galleryImages && c.galleryImages.length > 0 ? c.galleryImages : mainCover ? [mainCover] : [],
+              image: primaryColorImg,
+              images: orderedColorGallery.length > 0 ? orderedColorGallery : mainCover ? [mainCover] : [],
               stockBySize: stockMap,
               skuBySize: skuMap,
               priceBySize: priceMap,
@@ -1254,6 +1281,18 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
         : [];
 
     const inactiveRowKeys = variants.filter((v) => !v.active).map((v) => v.key);
+
+    const allRawProductImages = Array.from(
+      new Set([
+        mainCover,
+        ...unassignedGalleryImages,
+        ...colors.flatMap((c) => [c.primaryImage, ...(c.galleryImages || [])]),
+      ].filter(Boolean))
+    );
+    const hasRealProductImg = allRawProductImages.some((u) => !isSampleOrEphemeralUrl(u));
+    const finalProductImages = hasRealProductImg
+      ? allRawProductImages.filter((u) => !isSampleOrEphemeralUrl(u))
+      : allRawProductImages;
 
     const productPayload: Partial<Product> = {
       name: name.trim() || 'Untitled Product',
@@ -1276,14 +1315,8 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
       skuBySize,
       inactiveRowKeys,
       inStock: effectiveTotalStock > 0,
-      mainImage: mainCover,
-      images: Array.from(
-        new Set([
-          mainCover,
-          ...unassignedGalleryImages,
-          ...colors.flatMap((c) => c.galleryImages),
-        ].filter(Boolean))
-      ),
+      mainImage: finalProductImages[0] || mainCover,
+      images: finalProductImages,
       description: description.trim(),
       highlights: highlights.filter((h) => h.trim().length > 0),
       offerTag: offerTag.trim() || (discountPercent > 0 ? `${discountPercent}% OFF` : ''),

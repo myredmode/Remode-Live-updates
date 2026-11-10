@@ -147,13 +147,21 @@ export const ProductDetail: React.FC = () => {
 
   // Variant-specific or fallback attributes
   const effectiveImages = useMemo(() => {
-    if (activeVariant?.images && activeVariant.images.length > 0) {
-      return activeVariant.images;
+    const rawList = [
+      activeVariant?.image,
+      ...(activeVariant?.images || []),
+      product?.mainImage,
+      ...(product?.images || []),
+    ].filter((u): u is string => Boolean(u && typeof u === 'string'));
+
+    const unique = Array.from(new Set(rawList));
+    const hasReal = unique.some(
+      (u) => u.startsWith('data:image/') || (!u.includes('images.unsplash.com') && !u.startsWith('/uploads/'))
+    );
+    if (hasReal) {
+      return unique.filter((u) => !u.includes('images.unsplash.com') && !u.startsWith('/uploads/'));
     }
-    if (activeVariant?.image) {
-      return [activeVariant.image, ...(product?.images || [])];
-    }
-    return [product?.mainImage, ...(product?.images || [])].filter(Boolean) as string[];
+    return unique;
   }, [activeVariant, product]);
 
   // Size selection state

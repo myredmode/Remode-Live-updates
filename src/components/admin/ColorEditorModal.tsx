@@ -330,15 +330,16 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
 
       if (uploadedUrls.length > 0) {
         setGalleryImages((prev) => {
-          const next = [...prev];
-          uploadedUrls.forEach((url) => {
-            if (!next.includes(url)) {
-              next.push(url);
-            }
-          });
-          return next;
+          const cleanPrev = prev.filter(
+            (url) =>
+              url &&
+              !url.includes('images.unsplash.com') &&
+              !url.startsWith('/uploads/') &&
+              !uploadedUrls.includes(url)
+          );
+          return [...uploadedUrls, ...cleanPrev];
         });
-        setPrimaryImage((prevPrimary) => prevPrimary || uploadedUrls[0]);
+        setPrimaryImage(uploadedUrls[0]);
       }
     } catch (err) {
       console.error('Failed to upload image:', err);
@@ -353,12 +354,17 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
   const handleAddCustomImageUrl = () => {
     const clean = newImageUrl.trim();
     if (!clean) return;
-    if (!primaryImage) {
-      setPrimaryImage(clean);
-    }
-    if (!galleryImages.includes(clean)) {
-      setGalleryImages((prev) => [...prev, clean]);
-    }
+    setPrimaryImage(clean);
+    setGalleryImages((prev) => [
+      clean,
+      ...prev.filter(
+        (u) =>
+          u &&
+          u !== clean &&
+          !u.includes('images.unsplash.com') &&
+          !u.startsWith('/uploads/')
+      ),
+    ]);
     setNewImageUrl('');
     setShowAddUrlInput(false);
   };
@@ -419,11 +425,26 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
       colorCode.trim() || getAutoColorCode(customerName)
     ).toUpperCase();
 
-    const validGallery = galleryImages.filter((img) => img && !brokenImages[img]);
+    const rawValidGallery = galleryImages.filter((img) => img && !brokenImages[img]);
+    const hasRealImg = rawValidGallery.some(
+      (u) => !u.includes('images.unsplash.com') && !u.startsWith('/uploads/')
+    );
+    const validGallery = hasRealImg
+      ? rawValidGallery.filter(
+          (u) => !u.includes('images.unsplash.com') && !u.startsWith('/uploads/')
+        )
+      : rawValidGallery;
+
     const finalPrimary =
-      primaryImage && !brokenImages[primaryImage]
+      primaryImage &&
+      !brokenImages[primaryImage] &&
+      (!hasRealImg || (!primaryImage.includes('images.unsplash.com') && !primaryImage.startsWith('/uploads/')))
         ? primaryImage
         : validGallery[0] || '';
+
+    const orderedGallery = Array.from(
+      new Set([finalPrimary, ...validGallery].filter(Boolean))
+    );
 
     const colorDef: ColorDef = {
       id: initialColor?.id || `col-${Date.now()}`,
@@ -432,12 +453,7 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
       hex: resolvedHex.toUpperCase(),
       code: finalCode,
       primaryImage: finalPrimary,
-      galleryImages:
-        validGallery.length > 0
-          ? validGallery
-          : finalPrimary
-          ? [finalPrimary]
-          : [],
+      galleryImages: orderedGallery,
     };
 
     onSave(colorDef);
@@ -942,7 +958,13 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
                           {!isPrimary && (
                             <button
                               type="button"
-                              onClick={() => setPrimaryImage(img)}
+                              onClick={() => {
+                                setPrimaryImage(img);
+                                setGalleryImages((prev) => [
+                                  img,
+                                  ...prev.filter((i) => i !== img),
+                                ]);
+                              }}
                               className="p-1 bg-white/95 text-slate-900 rounded hover:bg-white cursor-pointer"
                               title="Set as Main Image"
                             >
