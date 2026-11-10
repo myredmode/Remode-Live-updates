@@ -39,33 +39,52 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
 
   const isEditing = Boolean(initialProduct);
 
-  // Form Fields
+  // Form Fields (Empty state for new products; populated only when editing an existing product)
   const [name, setName] = useState(initialProduct?.name || '');
   const [category, setCategory] = useState(initialProduct?.category || '');
   const [subcategory, setSubcategory] = useState(initialProduct?.subcategory || '');
   const [kurtiType, setKurtiType] = useState(initialProduct?.kurtiType || initialProduct?.typeStyle || '');
   const [typeStyle, setTypeStyle] = useState(initialProduct?.typeStyle || initialProduct?.kurtiType || '');
-  const [price, setPrice] = useState(initialProduct?.price ? String(initialProduct.price) : '999');
-  const [mrp, setMrp] = useState(initialProduct?.mrp ? String(initialProduct.mrp) : '1999');
+  const [price, setPrice] = useState(initialProduct?.price !== undefined ? String(initialProduct.price) : '');
+  const [mrp, setMrp] = useState(initialProduct?.mrp !== undefined ? String(initialProduct.mrp) : '');
   const [gstRate, setGstRate] = useState(initialProduct?.gstRate ? String(initialProduct.gstRate) : '5');
   const [sku, setSku] = useState(initialProduct?.sku || '');
   const [isSkuManuallyEdited, setIsSkuManuallyEdited] = useState<boolean>(Boolean(initialProduct?.sku));
   const [skuSeq] = useState<string>(() => String(Math.floor(1000 + Math.random() * 9000)));
-  const [brand, setBrand] = useState(initialProduct?.brand || 'REDMODE');
-  const [material, setMaterial] = useState(initialProduct?.material || '100% Pure Cotton');
-  const [fit, setFit] = useState(initialProduct?.fit || 'Regular Straight Fit');
-  const [pattern, setPattern] = useState(initialProduct?.pattern || 'Printed');
+  const [brand, setBrand] = useState(initialProduct?.brand || '');
+  const [material, setMaterial] = useState(initialProduct?.material || '');
+  const [fit, setFit] = useState(initialProduct?.fit || '');
+  const [pattern, setPattern] = useState(initialProduct?.pattern || '');
   const [offerTag, setOfferTag] = useState(initialProduct?.offerTag || '');
   const [isNewLaunch, setIsNewLaunch] = useState(Boolean(initialProduct?.isNewLaunch || initialProduct?.isNewArrival));
   const [isBestseller, setIsBestseller] = useState(Boolean(initialProduct?.isBestseller));
   const [isFestive, setIsFestive] = useState(Boolean(initialProduct?.isFestive));
   const [description, setDescription] = useState(initialProduct?.description || '');
+  const [highlights, setHighlights] = useState<string[]>(() => {
+    if (initialProduct?.highlights && Array.isArray(initialProduct.highlights)) {
+      return initialProduct.highlights;
+    }
+    return [];
+  });
+  const [newBulletInput, setNewBulletInput] = useState<string>('');
+
+  const handleAddHighlight = () => {
+    const trimmed = newBulletInput.trim();
+    if (!trimmed) return;
+    setHighlights((prev) => [...prev, trimmed]);
+    setNewBulletInput('');
+  };
+
+  const handleUpdateHighlight = (index: number, value: string) => {
+    setHighlights((prev) => prev.map((item, idx) => (idx === index ? value : item)));
+  };
+
+  const handleRemoveHighlight = (index: number) => {
+    setHighlights((prev) => prev.filter((_, idx) => idx !== index));
+  };
 
   // Main Images list
-  const [mainImage, setMainImage] = useState(
-    initialProduct?.mainImage ||
-      'https://images.unsplash.com/photo-1617627143750-d86bc21e42bb?auto=format&fit=crop&w=1200&q=85'
-  );
+  const [mainImage, setMainImage] = useState(initialProduct?.mainImage || '');
   const [extraImages, setExtraImages] = useState<string[]>(
     initialProduct?.images && initialProduct.images.length > 0
       ? initialProduct.images.filter((img) => img !== initialProduct.mainImage)
@@ -73,36 +92,37 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
   );
   const [newExtraImageUrl, setNewExtraImageUrl] = useState('');
 
-  // Selected Sizes & Stock per Size
+  // Selected Sizes & Stock per Size (Unselected by default for new products)
   const [selectedSizes, setSelectedSizes] = useState<string[]>(
     initialProduct?.sizes && initialProduct.sizes.length > 0
       ? initialProduct.sizes
-      : ['S', 'M', 'L', 'XL']
+      : []
   );
   const [stockBySize, setStockBySize] = useState<Record<string, number>>(
-    initialProduct?.stockBySize || { S: 10, M: 15, L: 12, XL: 8 }
+    initialProduct?.stockBySize || {}
   );
 
-  // Color Variations
-  const [primaryColorName, setPrimaryColorName] = useState(initialProduct?.color || 'Red');
+  // Color Variations (Empty by default for new products)
+  const [primaryColorName, setPrimaryColorName] = useState(initialProduct?.color || '');
   const [colorOptions, setColorOptions] = useState<ColorVariant[]>(() => {
     if (initialProduct?.colorOptions && initialProduct.colorOptions.length > 0) {
       return JSON.parse(JSON.stringify(initialProduct.colorOptions));
     }
-    return [
-      {
-        name: initialProduct?.color || 'Red',
-        hex: '#dc2626',
-        image: initialProduct?.mainImage || 'https://images.unsplash.com/photo-1617627143750-d86bc21e42bb?auto=format&fit=crop&w=1200&q=85',
-        images: initialProduct?.images || [
-          'https://images.unsplash.com/photo-1617627143750-d86bc21e42bb?auto=format&fit=crop&w=1200&q=85',
-        ],
-        price: initialProduct?.price || 999,
-        mrp: initialProduct?.mrp || 1999,
-        stockBySize: initialProduct?.stockBySize || { S: 10, M: 15, L: 12, XL: 8 },
-        description: '',
-      },
-    ];
+    if (initialProduct?.color) {
+      return [
+        {
+          name: initialProduct.color,
+          hex: '#dc2626',
+          image: initialProduct.mainImage || '',
+          images: initialProduct.images || (initialProduct.mainImage ? [initialProduct.mainImage] : []),
+          price: initialProduct.price || 0,
+          mrp: initialProduct.mrp || 0,
+          stockBySize: initialProduct.stockBySize || {},
+          description: '',
+        },
+      ];
+    }
+    return [];
   });
 
   const [activeVariantTab, setActiveVariantTab] = useState<number>(initialSelectedColorIndex || 0);
@@ -228,6 +248,13 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
 
   useEffect(() => {
     if (!isEditing && !isSkuManuallyEdited) {
+      const hasInput = Boolean(
+        name.trim() || category.trim() || subcategory.trim() || kurtiType.trim() || typeStyle.trim() || colorOptions.length > 0
+      );
+      if (!hasInput) {
+        setSku('');
+        return;
+      }
       const cleanAlpha = (str: string, len: number, fallback: string) => {
         const cleaned = (str || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
         return cleaned.length >= 2 ? cleaned.slice(0, len) : fallback;
@@ -249,7 +276,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       setStockBySize(nextStock);
     } else {
       setSelectedSizes([...selectedSizes, sz]);
-      setStockBySize({ ...stockBySize, [sz]: 10 });
+      setStockBySize({ ...stockBySize, [sz]: 0 });
     }
   };
 
@@ -279,11 +306,11 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       name: colName,
       hex: defaultHexes[colName] || '#475569',
       image: mainImage,
-      images: [mainImage],
-      price: parseInt(price) || 999,
-      mrp: parseInt(mrp) || 1999,
+      images: mainImage ? [mainImage] : [],
+      price: parseInt(price) || 0,
+      mrp: parseInt(mrp) || 0,
       stockBySize: { ...stockBySize },
-      description: `${colName} shade crafted with identical premium fit and stitching finish.`,
+      description: '',
     };
 
     const updated = [...colorOptions, newVariant];
@@ -292,14 +319,10 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
   };
 
   const removeColorVariant = (index: number) => {
-    if (colorOptions.length <= 1) {
-      alert('A product must have at least one color variation.');
-      return;
-    }
     const updated = colorOptions.filter((_, idx) => idx !== index);
     setColorOptions(updated);
     if (activeVariantTab >= updated.length) {
-      setActiveVariantTab(updated.length - 1);
+      setActiveVariantTab(Math.max(0, updated.length - 1));
     }
   };
 
@@ -344,7 +367,6 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) {
-      alert('Please enter a product name');
       return;
     }
 
@@ -363,7 +385,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
     const normalizedColorOptions = colorOptions.map((c) => ({
       ...c,
       image: c.image || c.images?.[0] || mainImage,
-      images: c.images && c.images.length > 0 ? c.images : [c.image || mainImage],
+      images: c.images && c.images.length > 0 ? c.images : (c.image || mainImage ? [c.image || mainImage] : []),
       price: c.price || numericPrice,
       mrp: c.mrp || numericMrp,
       stockBySize: c.stockBySize || stockBySize,
@@ -379,8 +401,8 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
     const finalProductData = {
       name: name.trim(),
       slug: generatedSlug,
-      brand: brand.trim() || 'REDMODE',
-      sku: sku.trim() || `RM-${category.slice(0, 3).toUpperCase()}-${Date.now().toString().slice(-4)}`,
+      brand: brand.trim(),
+      sku: sku.trim() || `RM-${(category || 'PRD').slice(0, 3).toUpperCase()}-${Date.now().toString().slice(-4)}`,
       price: numericPrice,
       mrp: numericMrp,
       gstRate: numericGst,
@@ -390,7 +412,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       isBestseller: isBestseller,
       isFestive: isFestive,
       mainImage: mainImage || normalizedColorOptions[0]?.image || '',
-      images: uniqueImages.length > 0 ? uniqueImages : [mainImage],
+      images: uniqueImages.length > 0 ? uniqueImages : (mainImage ? [mainImage] : []),
       category: category.trim(),
       subcategory: subcategory.trim(),
       kurtiType: kurtiType.trim(),
@@ -398,19 +420,16 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       sizes: selectedSizes.length > 0 ? selectedSizes : ['Free size'],
       defaultSize: selectedSizes.length > 0 ? selectedSizes[0] : 'Free size',
       stockBySize: stockBySize,
-      color: normalizedColorOptions[0]?.name || primaryColorName || 'Standard',
+      color: normalizedColorOptions[0]?.name || primaryColorName || '',
       colorOptions: normalizedColorOptions,
       material: material.trim(),
       fit: fit.trim(),
       pattern: pattern.trim(),
       description: description.trim(),
+      highlights: highlights.filter((h) => h.trim().length > 0),
       published: initialProduct ? initialProduct.published : true,
-      returnPolicy:
-        initialProduct?.returnPolicy ||
-        'Easy 7-day hassle-free return and size exchange. Free reverse courier pickup available PAN India.',
-      deliveryInfo:
-        initialProduct?.deliveryInfo ||
-        'Dispatched within 24 hours. Express courier delivery in 3-5 business days via Shipmozo network.',
+      returnPolicy: initialProduct?.returnPolicy || '',
+      deliveryInfo: initialProduct?.deliveryInfo || '',
       sizeChart: sizeChart && sizeChart.length > 0 ? sizeChart : [
         { size: 'S', bust: '36"', waist: '32"', hip: '39"', length: '44"' },
         { size: 'M', bust: '38"', waist: '34"', hip: '41"', length: '44"' },
@@ -420,7 +439,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       ],
       seo: {
         title: `${name.trim()} | REDMODE Official Store`,
-        metaDescription: `Shop ${name.trim()} online at REDMODE in ${normalizedColorOptions.map((c) => c.name).join(', ')} options. Best prices & fast delivery.`,
+        metaDescription: description.trim().slice(0, 160),
         keywords: `${name}, ${category}, ${subcategory}, redmode clothing`,
         urlSlug: generatedSlug,
         imageAlt: `${name.trim()} - REDMODE`,
@@ -480,7 +499,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
                   required
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. Aurelia Crimson Floral Printed A-Line Kurti"
+                  placeholder="Enter product name..."
                   className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 focus:border-black focus:ring-1 focus:ring-black outline-none transition text-slate-900 text-xs font-medium"
                 />
               </div>
@@ -596,7 +615,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
                     min="1"
                     value={price}
                     onChange={(e) => setPrice(e.target.value)}
-                    placeholder="899"
+                    placeholder="Enter selling price"
                     className="w-full pl-8 pr-3.5 py-2.5 rounded-xl border border-slate-200 focus:border-black focus:ring-1 focus:ring-black outline-none transition text-slate-900 text-xs font-medium"
                   />
                 </div>
@@ -613,7 +632,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
                     min="1"
                     value={mrp}
                     onChange={(e) => setMrp(e.target.value)}
-                    placeholder="1999"
+                    placeholder="Enter MRP"
                     className="w-full pl-8 pr-3.5 py-2.5 rounded-xl border border-slate-200 focus:border-black focus:ring-1 focus:ring-black outline-none transition text-slate-900 text-xs font-medium"
                   />
                 </div>
@@ -629,7 +648,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
                     setSku(e.target.value.toUpperCase());
                     setIsSkuManuallyEdited(true);
                   }}
-                  placeholder="e.g. RM-KRT-SHORT-RED-0001"
+                  placeholder="Auto-generates as you enter product details..."
                   className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 focus:border-black focus:ring-1 focus:ring-black outline-none transition text-slate-900 text-xs font-mono font-medium"
                 />
               </div>
@@ -726,6 +745,65 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
                   placeholder="Detailed description for customers..."
                   className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 focus:border-black focus:ring-1 focus:ring-black outline-none transition text-slate-900 text-xs font-normal"
                 />
+              </div>
+
+              {/* Product Highlights (Bullet Points) */}
+              <div className="space-y-2 md:col-span-2 pt-2 border-t border-slate-100">
+                <div className="flex items-center justify-between">
+                  <label className="font-semibold text-slate-700">Product Highlights (Bullet Points)</label>
+                  <span className="text-[11px] text-slate-400">Shown to customers on product page</span>
+                </div>
+
+                {highlights.length > 0 && (
+                  <div className="space-y-2">
+                    {highlights.map((bullet, idx) => (
+                      <div key={idx} className="flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold flex items-center justify-center shrink-0">
+                          {idx + 1}
+                        </span>
+                        <input
+                          type="text"
+                          value={bullet}
+                          onChange={(e) => handleUpdateHighlight(idx, e.target.value)}
+                          placeholder={`Bullet point #${idx + 1}`}
+                          className="flex-1 px-3 py-1.5 rounded-lg text-xs text-slate-900 bg-slate-50 border border-slate-200 focus:bg-white focus:border-slate-900 outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveHighlight(idx)}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition cursor-pointer"
+                          title="Remove bullet point"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 pt-1">
+                  <input
+                    type="text"
+                    value={newBulletInput}
+                    onChange={(e) => setNewBulletInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleAddHighlight();
+                      }
+                    }}
+                    placeholder="Add a highlight (e.g. Premium Quality Fabric, Breathable Fabric)..."
+                    className="flex-1 px-3.5 py-2 rounded-xl text-xs text-slate-900 bg-white border border-slate-200 focus:border-slate-900 outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddHighlight}
+                    className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition shrink-0 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Bullet</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>

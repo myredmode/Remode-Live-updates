@@ -977,10 +977,25 @@ export const ProductDetail: React.FC = () => {
                           {effectiveDescription ||
                             `Elevate your ethnic wardrobe with this exclusive designer creation from REDMODE. Crafted from premium breathable pure fabric, it combines rich craftsmanship with modern comfort. Designed for versatile festive, office, and casual celebrations.`}
                         </p>
+                        {product.highlights && product.highlights.length > 0 && (
+                          <div className="pt-2 border-t border-zinc-100 space-y-1.5">
+                            <span className="font-semibold text-zinc-900 text-[11px] uppercase tracking-wider block">
+                              Product Highlights
+                            </span>
+                            <ul className="space-y-1 text-xs text-zinc-700">
+                              {product.highlights.map((bullet, idx) => (
+                                <li key={idx} className="flex items-start gap-2">
+                                  <span className="text-emerald-600 font-bold leading-5">•</span>
+                                  <span>{bullet}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
                         <div className="grid grid-cols-2 gap-2 pt-2 text-[11px] text-zinc-600 border-t border-zinc-100">
                           <div>
                             <span className="font-semibold text-zinc-900">Fabric: </span>
-                            {product.fabric || '100% Pure Premium Cotton'}
+                            {product.material || product.fabric || '100% Pure Premium Cotton'}
                           </div>
                           <div>
                             <span className="font-semibold text-zinc-900">Fit: </span>

@@ -513,6 +513,8 @@ export const AdminPanel: React.FC = () => {
   const [catalogViewMode, setCatalogViewMode] = useState<'variants' | 'grouped'>('variants');
   // Catalog Bulk Selection State (holds selected product IDs)
   const [selectedCatalogProductIds, setSelectedCatalogProductIds] = useState<string[]>([]);
+  const [showBulkDeleteConfirmModal, setShowBulkDeleteConfirmModal] = useState<boolean>(false);
+  const [productToDelete, setProductToDelete] = useState<Product | null>(null);
 
   // Product Add / Edit Dedicated Page State
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
@@ -2785,28 +2787,59 @@ export const AdminPanel: React.FC = () => {
                     : allVariants;
 
                   const allDisplayedProductIds = Array.from(new Set(displayedVariants.map((v) => v.product.id)));
-                  const isAllSelected = allDisplayedProductIds.length > 0 && allDisplayedProductIds.every((id) => selectedCatalogProductIds.includes(id));
+                  const isAllSelected =
+                    allDisplayedProductIds.length > 0 &&
+                    allDisplayedProductIds.every((id) => selectedCatalogProductIds.includes(id));
+
+                  const handleSelectAllDisplayed = () => {
+                    setSelectedCatalogProductIds((prev) =>
+                      Array.from(new Set([...prev, ...allDisplayedProductIds]))
+                    );
+                  };
+
+                  const handleDeselectAllDisplayed = () => {
+                    setSelectedCatalogProductIds([]);
+                  };
+
                   const toggleSelectAll = () => {
                     if (isAllSelected) {
-                      setSelectedCatalogProductIds((prev) => prev.filter((id) => !allDisplayedProductIds.includes(id)));
+                      setSelectedCatalogProductIds((prev) =>
+                        prev.filter((id) => !allDisplayedProductIds.includes(id))
+                      );
                     } else {
-                      setSelectedCatalogProductIds((prev) => Array.from(new Set([...prev, ...allDisplayedProductIds])));
+                      handleSelectAllDisplayed();
                     }
                   };
 
                   const handleBulkDelete = () => {
                     if (selectedCatalogProductIds.length === 0) return;
-                    const count = selectedCatalogProductIds.length;
-                    if (
-                      window.confirm(
-                        `Are you sure you want to permanently delete ${count} selected product${count > 1 ? 's' : ''}? This will immediately remove them from the store.`
-                      )
-                    ) {
-                      selectedCatalogProductIds.forEach((id) => {
-                        deleteProduct(id);
-                      });
-                      setSelectedCatalogProductIds([]);
-                    }
+                    setShowBulkDeleteConfirmModal(true);
+                  };
+
+                  const handleBulkActivate = () => {
+                    if (selectedCatalogProductIds.length === 0) return;
+                    selectedCatalogProductIds.forEach((id) => {
+                      updateProduct(id, { published: true, inactiveRowKeys: [] });
+                    });
+                    setOrderActionFeedback({
+                      id: `bulk_act_${Date.now()}`,
+                      message: `Activated ${selectedCatalogProductIds.length} selected product${selectedCatalogProductIds.length === 1 ? '' : 's'}.`,
+                      type: 'success',
+                    });
+                    setTimeout(() => setOrderActionFeedback(null), 3500);
+                  };
+
+                  const handleBulkDeactivate = () => {
+                    if (selectedCatalogProductIds.length === 0) return;
+                    selectedCatalogProductIds.forEach((id) => {
+                      updateProduct(id, { published: false });
+                    });
+                    setOrderActionFeedback({
+                      id: `bulk_deact_${Date.now()}`,
+                      message: `Deactivated ${selectedCatalogProductIds.length} selected product${selectedCatalogProductIds.length === 1 ? '' : 's'}.`,
+                      type: 'success',
+                    });
+                    setTimeout(() => setOrderActionFeedback(null), 3500);
                   };
 
                   const handleBulkTag = (tagKey: 'isNewLaunch' | 'isBestseller' | 'isFestive', value: boolean) => {
@@ -2830,22 +2863,52 @@ export const AdminPanel: React.FC = () => {
                     <div className="border border-slate-200/80 rounded-2xl overflow-hidden bg-white shadow-2xs">
                       {/* Bulk Selection Actions Bar when items are selected */}
                       {selectedCatalogProductIds.length > 0 ? (
-                        <div className="px-4 py-2.5 bg-slate-900 text-white flex items-center justify-between flex-wrap gap-3 text-xs border-b border-slate-800">
-                          <div className="flex items-center gap-2.5">
-                            <span className="w-2 h-2 rounded-full bg-rose-400 animate-pulse" />
-                            <span className="font-bold">
-                              {selectedCatalogProductIds.length} {selectedCatalogProductIds.length === 1 ? 'Product' : 'Products'} Selected
+                        <div className="px-4 py-3 bg-slate-900 text-white flex items-center justify-between flex-wrap gap-3 text-xs border-b border-slate-800">
+                          <div className="flex items-center gap-3 flex-wrap">
+                            <span className="inline-flex items-center gap-2 font-bold text-white bg-slate-800 px-3 py-1 rounded-lg border border-slate-700">
+                              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                              <span>
+                                Selected: {selectedCatalogProductIds.length}{' '}
+                                {selectedCatalogProductIds.length === 1 ? 'Product' : 'Products'}
+                              </span>
                             </span>
                             <button
                               type="button"
-                              onClick={() => setSelectedCatalogProductIds([])}
-                              className="text-[11px] text-slate-300 hover:text-white underline cursor-pointer ml-1"
+                              onClick={handleSelectAllDisplayed}
+                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-[11px] font-semibold border border-slate-700 transition cursor-pointer"
+                            >
+                              Select All ({allDisplayedProductIds.length})
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleDeselectAllDisplayed}
+                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-[11px] font-semibold border border-slate-700 transition cursor-pointer"
                             >
                               Deselect All
                             </button>
                           </div>
 
                           <div className="flex items-center gap-2 flex-wrap">
+                            {/* Activate / Deactivate Selected */}
+                            <button
+                              type="button"
+                              onClick={handleBulkActivate}
+                              className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                              title="Activate selected products in store"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              <span>Activate Selected</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={handleBulkDeactivate}
+                              className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold rounded-lg transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                              title="Deactivate selected products in store"
+                            >
+                              <span>Deactivate Selected</span>
+                            </button>
+
                             {/* Category Assign Dropdown */}
                             <div className="flex items-center gap-1.5 bg-slate-800 px-2.5 py-1 rounded-lg border border-slate-700">
                               <span className="text-[10px] text-slate-400 font-medium">Move to:</span>
@@ -2894,7 +2957,7 @@ export const AdminPanel: React.FC = () => {
                                 title="Delete selected products permanently from store"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
-                                <span>Delete ({selectedCatalogProductIds.length})</span>
+                                <span>Delete Selected</span>
                               </button>
                             )}
                           </div>
@@ -2911,9 +2974,9 @@ export const AdminPanel: React.FC = () => {
                             <button
                               type="button"
                               onClick={toggleSelectAll}
-                              className="text-xs font-semibold text-slate-700 hover:text-black hover:underline cursor-pointer flex items-center gap-1.5"
+                              className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 hover:border-slate-300 text-xs font-semibold text-slate-700 hover:text-black cursor-pointer flex items-center gap-1.5 shadow-2xs"
                             >
-                              <CheckSquare className="w-3.5 h-3.5 text-slate-500" />
+                              <CheckSquare className="w-3.5 h-3.5 text-slate-600" />
                               <span>Select All ({allDisplayedProductIds.length})</span>
                             </button>
                             <span className="text-[11px] text-slate-400 hidden sm:inline">
@@ -2954,6 +3017,7 @@ export const AdminPanel: React.FC = () => {
                                 0
                               );
                               const isSelected = selectedCatalogProductIds.includes(v.product.id);
+                              const isPublished = v.product.published !== false;
 
                               return (
                                 <tr
@@ -2961,6 +3025,8 @@ export const AdminPanel: React.FC = () => {
                                   className={`hover:bg-slate-50/70 transition group ${
                                     isSelected
                                       ? 'bg-rose-50/30 font-medium'
+                                      : !isPublished
+                                      ? 'opacity-60 bg-slate-50/40'
                                       : v.totalVariants > 1 && !v.isFirstVariant
                                       ? 'bg-slate-50/20'
                                       : ''
@@ -3012,6 +3078,21 @@ export const AdminPanel: React.FC = () => {
                                           <p className="font-semibold text-slate-900 truncate">
                                             {v.product.name}
                                           </p>
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              updateProduct(v.product.id, { published: !isPublished });
+                                            }}
+                                            className={`text-[9px] font-bold px-1.5 py-0.5 rounded border cursor-pointer transition ${
+                                              isPublished
+                                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                                : 'bg-slate-100 text-slate-500 border-slate-200'
+                                            }`}
+                                            title="Click to toggle Active / Inactive status"
+                                          >
+                                            {isPublished ? 'Active' : 'Inactive'}
+                                          </button>
                                         </div>
 
                                         {/* Color Variant Highlight Tag */}
@@ -3201,11 +3282,7 @@ export const AdminPanel: React.FC = () => {
                                       {currentAdminUser.role !== "Label Admin" && (
                                         <button
                                           type="button"
-                                          onClick={() => {
-                                            if (confirm(`Are you sure you want to permanently delete style "${v.product.name}"? This cannot be undone.`)) {
-                                              deleteProduct(v.product.id);
-                                            }
-                                          }}
+                                          onClick={() => setProductToDelete(v.product)}
                                           className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
                                           title="Delete Product"
                                         >
@@ -3226,28 +3303,59 @@ export const AdminPanel: React.FC = () => {
 
                 // If in Grouped Styles View:
                 const allDisplayedProductIds = filteredProducts.map((p) => p.id);
-                const isAllSelected = allDisplayedProductIds.length > 0 && allDisplayedProductIds.every((id) => selectedCatalogProductIds.includes(id));
+                const isAllSelected =
+                  allDisplayedProductIds.length > 0 &&
+                  allDisplayedProductIds.every((id) => selectedCatalogProductIds.includes(id));
+
+                const handleSelectAllDisplayed = () => {
+                  setSelectedCatalogProductIds((prev) =>
+                    Array.from(new Set([...prev, ...allDisplayedProductIds]))
+                  );
+                };
+
+                const handleDeselectAllDisplayed = () => {
+                  setSelectedCatalogProductIds([]);
+                };
+
                 const toggleSelectAll = () => {
                   if (isAllSelected) {
-                    setSelectedCatalogProductIds((prev) => prev.filter((id) => !allDisplayedProductIds.includes(id)));
+                    setSelectedCatalogProductIds((prev) =>
+                      prev.filter((id) => !allDisplayedProductIds.includes(id))
+                    );
                   } else {
-                    setSelectedCatalogProductIds((prev) => Array.from(new Set([...prev, ...allDisplayedProductIds])));
+                    handleSelectAllDisplayed();
                   }
                 };
 
                 const handleBulkDelete = () => {
                   if (selectedCatalogProductIds.length === 0) return;
-                  const count = selectedCatalogProductIds.length;
-                  if (
-                    window.confirm(
-                      `Are you sure you want to permanently delete ${count} selected product${count > 1 ? 's' : ''}? This will immediately remove them from the store.`
-                    )
-                  ) {
-                    selectedCatalogProductIds.forEach((id) => {
-                      deleteProduct(id);
-                    });
-                    setSelectedCatalogProductIds([]);
-                  }
+                  setShowBulkDeleteConfirmModal(true);
+                };
+
+                const handleBulkActivate = () => {
+                  if (selectedCatalogProductIds.length === 0) return;
+                  selectedCatalogProductIds.forEach((id) => {
+                    updateProduct(id, { published: true, inactiveRowKeys: [] });
+                  });
+                  setOrderActionFeedback({
+                    id: `bulk_act_${Date.now()}`,
+                    message: `Activated ${selectedCatalogProductIds.length} selected product${selectedCatalogProductIds.length === 1 ? '' : 's'}.`,
+                    type: 'success',
+                  });
+                  setTimeout(() => setOrderActionFeedback(null), 3500);
+                };
+
+                const handleBulkDeactivate = () => {
+                  if (selectedCatalogProductIds.length === 0) return;
+                  selectedCatalogProductIds.forEach((id) => {
+                    updateProduct(id, { published: false });
+                  });
+                  setOrderActionFeedback({
+                    id: `bulk_deact_${Date.now()}`,
+                    message: `Deactivated ${selectedCatalogProductIds.length} selected product${selectedCatalogProductIds.length === 1 ? '' : 's'}.`,
+                    type: 'success',
+                  });
+                  setTimeout(() => setOrderActionFeedback(null), 3500);
                 };
 
                 const handleBulkTag = (tagKey: 'isNewLaunch' | 'isBestseller' | 'isFestive', value: boolean) => {
@@ -3271,22 +3379,51 @@ export const AdminPanel: React.FC = () => {
                   <div className="border border-slate-200/80 rounded-2xl overflow-hidden bg-white shadow-2xs">
                     {/* Bulk Selection Actions Bar when items are selected */}
                     {selectedCatalogProductIds.length > 0 ? (
-                      <div className="px-4 py-2.5 bg-slate-900 text-white flex items-center justify-between flex-wrap gap-3 text-xs border-b border-slate-800">
-                        <div className="flex items-center gap-2.5">
-                          <span className="w-2 h-2 rounded-full bg-rose-400 animate-pulse" />
-                          <span className="font-bold">
-                            {selectedCatalogProductIds.length} {selectedCatalogProductIds.length === 1 ? 'Product' : 'Products'} Selected
+                      <div className="px-4 py-3 bg-slate-900 text-white flex items-center justify-between flex-wrap gap-3 text-xs border-b border-slate-800">
+                        <div className="flex items-center gap-3 flex-wrap">
+                          <span className="inline-flex items-center gap-2 font-bold text-white bg-slate-800 px-3 py-1 rounded-lg border border-slate-700">
+                            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                            <span>
+                              Selected: {selectedCatalogProductIds.length}{' '}
+                              {selectedCatalogProductIds.length === 1 ? 'Product' : 'Products'}
+                            </span>
                           </span>
                           <button
                             type="button"
-                            onClick={() => setSelectedCatalogProductIds([])}
-                            className="text-[11px] text-slate-300 hover:text-white underline cursor-pointer ml-1"
+                            onClick={handleSelectAllDisplayed}
+                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-[11px] font-semibold border border-slate-700 transition cursor-pointer"
+                          >
+                            Select All ({allDisplayedProductIds.length})
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleDeselectAllDisplayed}
+                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-[11px] font-semibold border border-slate-700 transition cursor-pointer"
                           >
                             Deselect All
                           </button>
                         </div>
 
                         <div className="flex items-center gap-2 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={handleBulkActivate}
+                            className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                            title="Activate selected products in store"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Activate Selected</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={handleBulkDeactivate}
+                            className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold rounded-lg transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                            title="Deactivate selected products in store"
+                          >
+                            <span>Deactivate Selected</span>
+                          </button>
+
                           <div className="flex items-center gap-1.5 bg-slate-800 px-2.5 py-1 rounded-lg border border-slate-700">
                             <span className="text-[10px] text-slate-400 font-medium">Move to:</span>
                             <select
@@ -3332,7 +3469,7 @@ export const AdminPanel: React.FC = () => {
                               title="Delete selected products permanently from store"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
-                              <span>Delete ({selectedCatalogProductIds.length})</span>
+                              <span>Delete Selected</span>
                             </button>
                           )}
                         </div>
@@ -3347,9 +3484,9 @@ export const AdminPanel: React.FC = () => {
                         <button
                           type="button"
                           onClick={toggleSelectAll}
-                          className="text-xs font-semibold text-slate-700 hover:text-black hover:underline cursor-pointer flex items-center gap-1.5"
+                          className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 hover:border-slate-300 text-xs font-semibold text-slate-700 hover:text-black cursor-pointer flex items-center gap-1.5 shadow-2xs"
                         >
-                          <CheckSquare className="w-3.5 h-3.5 text-slate-500" />
+                          <CheckSquare className="w-3.5 h-3.5 text-slate-600" />
                           <span>Select All ({allDisplayedProductIds.length})</span>
                         </button>
                       </div>
@@ -3386,12 +3523,17 @@ export const AdminPanel: React.FC = () => {
                             );
                             const variantsCount = p.colorOptions?.length || 1;
                             const isSelected = selectedCatalogProductIds.includes(p.id);
+                            const isPublished = p.published !== false;
 
                             return (
                               <tr
                                 key={p.id}
                                 className={`hover:bg-slate-50/60 transition group ${
-                                  isSelected ? 'bg-rose-50/30 font-medium' : ''
+                                  isSelected
+                                    ? 'bg-rose-50/30 font-medium'
+                                    : !isPublished
+                                    ? 'opacity-60 bg-slate-50/40'
+                                    : ''
                                 }`}
                               >
                                 {/* Checkbox Single Select */}
@@ -3423,9 +3565,26 @@ export const AdminPanel: React.FC = () => {
                                     }}
                                   />
                                   <div className="min-w-0">
-                                    <p className="font-semibold text-slate-900 truncate max-w-[220px]">
-                                      {p.name}
-                                    </p>
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <p className="font-semibold text-slate-900 truncate max-w-[200px]">
+                                        {p.name}
+                                      </p>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          updateProduct(p.id, { published: !isPublished });
+                                        }}
+                                        className={`text-[9px] font-bold px-1.5 py-0.5 rounded border cursor-pointer transition ${
+                                          isPublished
+                                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                            : 'bg-slate-100 text-slate-500 border-slate-200'
+                                        }`}
+                                        title="Click to toggle Active / Inactive status"
+                                      >
+                                        {isPublished ? 'Active' : 'Inactive'}
+                                      </button>
+                                    </div>
                                     <div className="flex items-center gap-2 mt-0.5">
                                       <span className="text-[10px] text-slate-400 font-mono">
                                         SKU: {p.sku || p.id}
@@ -3578,11 +3737,7 @@ export const AdminPanel: React.FC = () => {
                                     {currentAdminUser.role !== "Label Admin" && (
                                       <button
                                         type="button"
-                                        onClick={() => {
-                                          if (confirm(`Are you sure you want to permanently delete "${p.name}"? This cannot be undone.`)) {
-                                            deleteProduct(p.id);
-                                          }
-                                        }}
+                                        onClick={() => setProductToDelete(p)}
                                         className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
                                         title="Delete Product"
                                       >
@@ -3600,6 +3755,100 @@ export const AdminPanel: React.FC = () => {
                   </div>
                 );
               })()}
+
+              {/* Confirmation Modal for Bulk Deletion */}
+              {showBulkDeleteConfirmModal && (
+                <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+                  <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+                    <div className="flex items-start gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                        <AlertTriangle className="w-5 h-5" />
+                      </div>
+                      <div className="space-y-1">
+                        <h3 className="text-base font-bold text-slate-900">
+                          Delete {selectedCatalogProductIds.length} Selected{' '}
+                          {selectedCatalogProductIds.length === 1 ? 'Product' : 'Products'}?
+                        </h3>
+                        <p className="text-xs text-slate-500 leading-relaxed">
+                          Are you sure you want to permanently delete the {selectedCatalogProductIds.length} selected{' '}
+                          {selectedCatalogProductIds.length === 1 ? 'product' : 'products'}? This action cannot be undone.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                      <button
+                        type="button"
+                        onClick={() => setShowBulkDeleteConfirmModal(false)}
+                        className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const count = selectedCatalogProductIds.length;
+                          selectedCatalogProductIds.forEach((id) => {
+                            deleteProduct(id);
+                          });
+                          setSelectedCatalogProductIds([]);
+                          setShowBulkDeleteConfirmModal(false);
+                          setOrderActionFeedback({
+                            id: `bulk_del_${Date.now()}`,
+                            message: `Deleted ${count} product${count === 1 ? '' : 's'} from catalog.`,
+                            type: 'success',
+                          });
+                          setTimeout(() => setOrderActionFeedback(null), 3500);
+                        }}
+                        className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white transition cursor-pointer shadow-xs"
+                      >
+                        Confirm Delete ({selectedCatalogProductIds.length})
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Confirmation Modal for Single Product Deletion */}
+              {productToDelete && (
+                <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+                  <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+                    <div className="flex items-start gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                        <AlertTriangle className="w-5 h-5" />
+                      </div>
+                      <div className="space-y-1">
+                        <h3 className="text-base font-bold text-slate-900">Delete Product?</h3>
+                        <p className="text-xs text-slate-500 leading-relaxed">
+                          Are you sure you want to permanently delete{' '}
+                          <span className="font-semibold text-slate-800">"{productToDelete.name}"</span>? This action cannot be undone.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                      <button
+                        type="button"
+                        onClick={() => setProductToDelete(null)}
+                        className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          deleteProduct(productToDelete.id);
+                          setSelectedCatalogProductIds((prev) =>
+                            prev.filter((id) => id !== productToDelete.id)
+                          );
+                          setProductToDelete(null);
+                        }}
+                        className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white transition cursor-pointer shadow-xs"
+                      >
+                        Delete Product
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
             ) : (
               <AccessDeniedNotice
@@ -3614,6 +3863,7 @@ export const AdminPanel: React.FC = () => {
           {activeTab === 'add-product' && (
             currentAdminUser.role !== 'Label Admin' ? (
             <AddProductPage
+              key={editingProduct ? editingProduct.id : 'new-product'}
               initialProduct={editingProduct}
               initialSelectedColorIndex={editingColorIndex}
               categories={categories}

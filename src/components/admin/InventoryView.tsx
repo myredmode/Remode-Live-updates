@@ -208,16 +208,6 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ onEditProduct }) =
     return false;
   };
 
-  // Ensure products don't stay globally unpublished from previous bulk operations,
-  // restoring published: true so unselected sibling variants remain active.
-  useEffect(() => {
-    products.forEach((p) => {
-      if (p.published === false) {
-        updateProduct(p.id, { published: true });
-      }
-    });
-  }, [products]);
-
   // Inline Price Edit State (no modal, directly editable inline from table)
   const [priceEditingRowKey, setPriceEditingRowKey] = useState<string | null>(null);
   const [editInlineListing, setEditInlineListing] = useState<string>('');

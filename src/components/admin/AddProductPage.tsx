@@ -115,7 +115,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   // Saving lock to prevent duplicate submissions
   const [isSaving, setIsSaving] = useState(false);
 
-  // General Information State (Empty description and empty highlights by default for new products)
+  // General Information State (Clean, empty state by default for new products)
   const [name, setName] = useState(initialProduct?.name || '');
   const [description, setDescription] = useState(initialProduct?.description || '');
   const [highlights, setHighlights] = useState<string[]>(
@@ -125,19 +125,19 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   );
   const [newBulletInput, setNewBulletInput] = useState('');
   const [selectedSizes, setSelectedSizes] = useState<string[]>(() => {
-    if (initialProduct?.sizes) {
+    if (initialProduct?.sizes && initialProduct.sizes.length > 0) {
       return initialProduct.sizes.filter(
         (s) => !['free size', 'freesize', 'free-size', 'free'].includes(s.trim().toLowerCase())
       );
     }
-    return ['S', 'M', 'L', 'XL'];
+    return [];
   });
   const [customSizeInput, setCustomSizeInput] = useState('');
   const [showAddSizeInput, setShowAddSizeInput] = useState(false);
   const [gender, setGender] = useState<string>(
-    (initialProduct as any)?.gender || 'Woman'
+    initialProduct ? (initialProduct as any)?.gender || '' : ''
   );
-  const [brand, setBrand] = useState(initialProduct?.brand || 'REDMODE');
+  const [brand, setBrand] = useState(initialProduct?.brand || '');
 
   // Track whether admin manually customized Parent SKU
   const [isSkuManuallyEdited, setIsSkuManuallyEdited] = useState<boolean>(Boolean(initialProduct?.sku));
@@ -149,16 +149,14 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
     }
     return String(Math.floor(1000 + Math.random() * 9000));
   });
-  const [parentSku, setParentSku] = useState(
-    initialProduct?.sku || `RM-KRT-GEN-SG-${skuSequence}`
-  );
+  const [parentSku, setParentSku] = useState(initialProduct?.sku || '');
 
-  // Pricing & Stock State
+  // Pricing & Stock State (Empty by default for new products)
   const [basePrice, setBasePrice] = useState(
-    initialProduct?.price ? String(initialProduct.price) : '699'
+    initialProduct?.price ? String(initialProduct.price) : ''
   );
   const [mrp, setMrp] = useState(
-    initialProduct?.mrp ? String(initialProduct.mrp) : '1199'
+    initialProduct?.mrp ? String(initialProduct.mrp) : ''
   );
   const [costPrice, setCostPrice] = useState(
     (initialProduct as any)?.costPrice ? String((initialProduct as any).costPrice) : ''
@@ -198,10 +196,10 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   // Shipping & Returns (Collapsible)
   const [isShippingOpen, setIsShippingOpen] = useState(false);
   const [dispatchTime, setDispatchTime] = useState(
-    initialProduct?.deliveryInfo || '24–48 Hours'
+    initialProduct?.deliveryInfo || ''
   );
   const [returnWindow, setReturnWindow] = useState(
-    initialProduct?.returnPolicy || '7-Day Easy Returns & Exchanges'
+    initialProduct?.returnPolicy || ''
   );
   const [isCodAvailable, setIsCodAvailable] = useState(true);
 
@@ -213,39 +211,67 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
 
   // Advanced Details (Collapsible)
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
-  const [material, setMaterial] = useState(initialProduct?.material || '100% Pure Cotton');
-  const [fit, setFit] = useState(initialProduct?.fit || 'Regular Straight Fit');
+  const [material, setMaterial] = useState(initialProduct?.material || '');
+  const [fit, setFit] = useState(initialProduct?.fit || '');
   const [barcode, setBarcode] = useState((initialProduct as any)?.barcode || '');
-  const [hsnCode, setHsnCode] = useState((initialProduct as any)?.hsnCode || '6204');
+  const [hsnCode, setHsnCode] = useState((initialProduct as any)?.hsnCode || '');
 
-  // Color Definitions & Color-Specific Media
+  // Unassigned media buffer when photos are uploaded before selecting any color variation
+  const [unassignedPrimaryImage, setUnassignedPrimaryImage] = useState<string>(
+    !initialProduct ? '' : initialProduct.mainImage || ''
+  );
+  const [unassignedGalleryImages, setUnassignedGalleryImages] = useState<string[]>(
+    !initialProduct
+      ? []
+      : initialProduct.images && initialProduct.images.length > 0
+      ? initialProduct.images
+      : initialProduct.mainImage
+      ? [initialProduct.mainImage]
+      : []
+  );
+
+  // Color Definitions & Color-Specific Media (Empty for new products — no default "Sage Green")
   const [colors, setColors] = useState<ColorDef[]>(() => {
-    if (initialProduct?.colorOptions && initialProduct.colorOptions.length > 0) {
+    if (!initialProduct) {
+      return [];
+    }
+    if (initialProduct.colorOptions && initialProduct.colorOptions.length > 0) {
       return initialProduct.colorOptions.map((c, idx) => ({
         id: `col-${idx}`,
         name: c.name || `Color ${idx + 1}`,
         hex: c.hex || '#10b981',
         code: (c as any).code || c.name.slice(0, 2).toUpperCase(),
-        primaryImage: c.image || initialProduct.mainImage || SAMPLE_CLOTHING_PRESETS[0].url,
-        galleryImages: c.images && c.images.length > 0 ? c.images : [c.image || initialProduct.mainImage || SAMPLE_CLOTHING_PRESETS[0].url],
+        primaryImage: c.image || initialProduct.mainImage || '',
+        galleryImages:
+          c.images && c.images.length > 0
+            ? c.images
+            : c.image || initialProduct.mainImage
+            ? [c.image || initialProduct.mainImage]
+            : [],
       }));
     }
-    return [
-      {
-        id: 'col-0',
-        name: initialProduct?.color || 'Sage Green',
-        hex: '#a7f3d0',
-        code: 'SG',
-        primaryImage: initialProduct?.mainImage || '',
-        galleryImages: initialProduct?.images && initialProduct.images.length > 0
-          ? initialProduct.images
-          : (initialProduct?.mainImage ? [initialProduct.mainImage] : []),
-      },
-    ];
+    if (initialProduct.color) {
+      return [
+        {
+          id: 'col-0',
+          name: initialProduct.color,
+          hex: '#10b981',
+          code: getAutoColorCode(initialProduct.color),
+          primaryImage: initialProduct.mainImage || '',
+          galleryImages:
+            initialProduct.images && initialProduct.images.length > 0
+              ? initialProduct.images
+              : initialProduct.mainImage
+              ? [initialProduct.mainImage]
+              : [],
+        },
+      ];
+    }
+    return [];
   });
 
   const [activeColorIndex, setActiveColorIndex] = useState<number>(
-    Math.min(initialSelectedColorIndex, (initialProduct?.colorOptions?.length || 1) - 1)
+    Math.max(0, Math.min(initialSelectedColorIndex, (initialProduct?.colorOptions?.length || 1) - 1))
   );
 
   // Color Modals & Management
@@ -291,7 +317,6 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
     const cleanParent = (pSku || 'RM-PRD').trim().toUpperCase();
     const cleanColor = (cCode || 'CL').trim().toUpperCase();
     const cleanSize = (size || 'STD').trim().toUpperCase();
-    // Avoid duplicating color code if parent SKU already includes it
     if (cleanParent.includes(`-${cleanColor}-`)) {
       return `${cleanParent}-${cleanSize}`;
     }
@@ -300,46 +325,49 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
 
   // Variants Matrix: Color × Size
   const [variants, setVariants] = useState<VariantRow[]>(() => {
-    // Initial variant population
+    if (!initialProduct) {
+      return [];
+    }
     const initialRows: VariantRow[] = [];
     const colorsList =
-      initialProduct?.colorOptions && initialProduct.colorOptions.length > 0
+      initialProduct.colorOptions && initialProduct.colorOptions.length > 0
         ? initialProduct.colorOptions
-        : [
+        : initialProduct.color
+        ? [
             {
-              name: initialProduct?.color || 'Sage Green',
-              hex: '#a7f3d0',
-              stockBySize: initialProduct?.stockBySize || {},
+              name: initialProduct.color,
+              hex: '#10b981',
+              stockBySize: initialProduct.stockBySize || {},
             },
-          ];
+          ]
+        : [];
 
     const currentSizes =
-      initialProduct?.sizes && initialProduct.sizes.length > 0
+      initialProduct.sizes && initialProduct.sizes.length > 0
         ? initialProduct.sizes.filter(
             (s) => !['free size', 'freesize', 'free-size', 'free'].includes(s.trim().toLowerCase())
           )
-        : ['S', 'M', 'XL', 'XXL'];
+        : [];
 
     const parent =
-      initialProduct?.sku ||
-      `RM-${(initialProduct?.category || 'JKT').slice(0, 3).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
+      initialProduct.sku ||
+      `RM-${(initialProduct.category || 'PRD').slice(0, 3).toUpperCase()}-${skuSequence}`;
 
     colorsList.forEach((c, cIdx) => {
       const cCode = (c as any).code || c.name.slice(0, 2).toUpperCase();
       if (currentSizes.length === 0) {
-        // Free size: no size variation
         const key = `var_${cIdx}_freesize`;
         const existingStock =
           c.stockBySize?.['Free size'] !== undefined
             ? c.stockBySize['Free size']
-            : initialProduct?.stockBySize?.['Free size'] !== undefined
+            : initialProduct.stockBySize?.['Free size'] !== undefined
             ? initialProduct.stockBySize['Free size']
-            : 15;
+            : 0;
         const existingSku =
           (c as any).skuBySize?.['Free size'] ||
-          initialProduct?.skuBySize?.['Free size'] ||
+          initialProduct.skuBySize?.['Free size'] ||
           generateSku(parent, cCode, 'FS');
-        const isInactive = initialProduct?.inactiveRowKeys?.includes(key);
+        const isInactive = initialProduct.inactiveRowKeys?.includes(key);
 
         initialRows.push({
           key,
@@ -359,14 +387,14 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
           const existingStock =
             c.stockBySize?.[sz] !== undefined
               ? c.stockBySize[sz]
-              : initialProduct?.stockBySize?.[sz] !== undefined
+              : initialProduct.stockBySize?.[sz] !== undefined
               ? initialProduct.stockBySize[sz]
-              : 15;
+              : 0;
           const existingSku =
             (c as any).skuBySize?.[sz] ||
-            initialProduct?.skuBySize?.[sz] ||
+            initialProduct.skuBySize?.[sz] ||
             generateSku(parent, cCode, sz);
-          const isInactive = initialProduct?.inactiveRowKeys?.includes(key);
+          const isInactive = initialProduct.inactiveRowKeys?.includes(key);
 
           initialRows.push({
             key,
@@ -390,12 +418,27 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   // Re-sync variants whenever colors or sizes change, preserving existing entered values
   useEffect(() => {
     setVariants((prevVariants) => {
+      if (colors.length === 0 && selectedSizes.length === 0) {
+        return [];
+      }
       const newRows: VariantRow[] = [];
-      const parent = parentSku || 'RM-PRD';
+      const parent = parentSku || `RM-PRD-${skuSequence}`;
+      const effectiveColors: ColorDef[] =
+        colors.length > 0
+          ? colors
+          : [
+              {
+                id: 'col-0',
+                name: 'Standard',
+                hex: '#94a3b8',
+                code: 'STD',
+                primaryImage: unassignedPrimaryImage,
+                galleryImages: unassignedGalleryImages,
+              },
+            ];
 
-      colors.forEach((col) => {
+      effectiveColors.forEach((col) => {
         if (selectedSizes.length === 0) {
-          // Free size: no size variation created! Single row per color
           const key = `var_${col.id}_freesize`;
           const existing = prevVariants.find(
             (v) =>
@@ -412,6 +455,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
               colorHex: col.hex,
               colorCode: col.code,
               size: 'Free size',
+              sku: !isEditing ? generateSku(parent, col.code, 'FS') : existing.sku,
             });
           } else {
             newRows.push({
@@ -422,7 +466,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
               colorCode: col.code,
               size: 'Free size',
               sku: generateSku(parent, col.code, 'FS'),
-              stock: 10,
+              stock: 0,
               priceOverride: '',
               active: true,
             });
@@ -455,7 +499,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                 colorCode: col.code,
                 size: sz,
                 sku: generateSku(parent, col.code, sz),
-                stock: 10,
+                stock: 0,
                 priceOverride: '',
                 active: true,
               });
@@ -466,12 +510,24 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
 
       return newRows;
     });
-  }, [colors, selectedSizes, parentSku, isEditing]);
+  }, [colors, selectedSizes, parentSku, isEditing, skuSequence, unassignedPrimaryImage, unassignedGalleryImages]);
 
-  // Automatically update Parent SKU dynamically before first save when title, category, type, or color changes
+  // Automatically update Parent SKU dynamically before first save ONLY once product details are being entered
   useEffect(() => {
     if (!isEditing && !isSkuManuallyEdited) {
-      const primaryColCode = colors[0]?.code || getAutoColorCode(colors[0]?.name || 'CLR');
+      const hasAnyInput = Boolean(
+        name.trim() ||
+          category.trim() ||
+          subcategory.trim() ||
+          kurtiType.trim() ||
+          typeStyle.trim() ||
+          colors.length > 0
+      );
+      if (!hasAnyInput) {
+        setParentSku('');
+        return;
+      }
+      const primaryColCode = colors[0]?.code || (colors[0]?.name ? getAutoColorCode(colors[0].name) : 'CLR');
       const autoSku = buildStructuredParentSku(
         category,
         typeStyle || kurtiType,
@@ -484,66 +540,63 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
     }
   }, [name, category, subcategory, kurtiType, typeStyle, colors, isEditing, isSkuManuallyEdited, skuSequence]);
 
-  // Fancy Product Naming & Dynamic Fancy Colour Naming State
+  // Fancy Product Naming & Dynamic Fancy Colour Naming State (No default colour pre-selected for new products)
   const [selectedBaseColorFamily, setSelectedBaseColorFamily] = useState<string>(() => {
-    const initialColName = (initialProduct?.color || 'Sage Green').toLowerCase();
+    if (!initialProduct?.color) return '';
+    const initialColName = initialProduct.color.toLowerCase();
     const foundBase = BASE_COLORS.find(
       (b) =>
         initialColName.includes(b.name.toLowerCase()) ||
         b.suggestions.some((s) => s.name.toLowerCase() === initialColName)
     );
-    return foundBase?.name || 'Green';
+    return foundBase?.name || '';
   });
   const [fancyNameSeed, setFancyNameSeed] = useState<number>(0);
+  const [showMoreNameIdeas, setShowMoreNameIdeas] = useState<boolean>(false);
 
   const dynamicFancyColorSuggestions = useMemo(() => {
-    const baseObj =
-      BASE_COLORS.find((b) => b.name.toLowerCase() === selectedBaseColorFamily.toLowerCase()) ||
-      BASE_COLORS[0];
-    return baseObj.suggestions;
+    if (!selectedBaseColorFamily) return [];
+    const baseObj = BASE_COLORS.find(
+      (b) => b.name.toLowerCase() === selectedBaseColorFamily.toLowerCase()
+    );
+    return baseObj ? baseObj.suggestions : [];
   }, [selectedBaseColorFamily]);
 
   const suggestedFancyProductNames = useMemo(() => {
-    const activeColName = colors[activeColorIndex]?.name || colors[0]?.name || 'Sage Green';
+    const activeColName = (colors[activeColorIndex]?.name || colors[0]?.name || '').trim();
     const cleanCat = category.trim() || 'Kurti';
     const cleanSub = subcategory.trim();
     const cleanType = (typeStyle || kurtiType).trim();
+    const cleanMat = material.trim().split(/\s+/)[0] || '';
 
     const styleDescriptor = cleanType || cleanSub || cleanCat;
+    const colorPart = activeColName ? `${activeColName} ` : '';
+    const matPart = cleanMat && !styleDescriptor.toLowerCase().includes(cleanMat.toLowerCase()) ? `${cleanMat} ` : '';
+
     const craftAdjectives = [
       'Royal',
-      'Aurelia',
-      'Handcrafted',
       'Signature',
+      'Handcrafted',
       'Festive',
       'Classic',
-      'Zari',
       'Heritage',
-      'Velvet Touch',
-      'Luxe',
       'Artisanal',
       'Everyday Elegance',
     ];
-    const detailFinish = [
-      'Edition',
-      'Collection',
-      'Silhouette',
-      'Statement Piece',
-      'Tailored Fit',
-      'Designer Wear',
-    ];
+    const adj1 = craftAdjectives[fancyNameSeed % craftAdjectives.length];
+    const adj2 = craftAdjectives[(fancyNameSeed + 2) % craftAdjectives.length];
+    const adj3 = craftAdjectives[(fancyNameSeed + 4) % craftAdjectives.length];
 
     const pool: string[] = [
-      `${activeColName} ${styleDescriptor}`,
-      `${craftAdjectives[fancyNameSeed % craftAdjectives.length]} ${activeColName} ${styleDescriptor}`,
-      `${activeColName} ${cleanSub && cleanSub !== styleDescriptor ? `${cleanSub} ` : ''}${styleDescriptor}`.replace(/\s+/g, ' ').trim(),
-      `${craftAdjectives[(fancyNameSeed + 3) % craftAdjectives.length]} ${activeColName} ${cleanCat} — ${detailFinish[fancyNameSeed % detailFinish.length]}`,
-      `${activeColName} ${craftAdjectives[(fancyNameSeed + 5) % craftAdjectives.length]} ${styleDescriptor}`,
-      `RedMode ${activeColName} ${styleDescriptor}`,
-    ];
+      `${colorPart}${styleDescriptor}`.trim(),
+      `${adj1} ${colorPart}${styleDescriptor}`.replace(/\s+/g, ' ').trim(),
+      `${colorPart}${matPart}${styleDescriptor}`.replace(/\s+/g, ' ').trim(),
+      `${adj2} ${colorPart}${cleanCat}`.replace(/\s+/g, ' ').trim(),
+      `${adj3} ${colorPart}${styleDescriptor}`.replace(/\s+/g, ' ').trim(),
+    ].filter((s) => s.length > 2);
 
-    return Array.from(new Set(pool)).slice(0, 5);
-  }, [colors, activeColorIndex, category, subcategory, kurtiType, typeStyle, fancyNameSeed]);
+    return Array.from(new Set(pool));
+  }, [colors, activeColorIndex, category, subcategory, kurtiType, typeStyle, material, fancyNameSeed]);
 
   // Handle URL slug auto generation from product name
   useEffect(() => {
@@ -594,28 +647,32 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
     return variants.reduce((sum, v) => (v.active ? sum + (Number(v.stock) || 0) : sum), 0);
   }, [variants]);
 
+  // Active color or fallback to unassigned media slot when no color is chosen yet
+  const activeColor: ColorDef | undefined = colors[activeColorIndex] || colors[0];
+  const currentPrimaryImage = activeColor ? activeColor.primaryImage : unassignedPrimaryImage;
+  const currentGalleryImages = activeColor ? activeColor.galleryImages : unassignedGalleryImages;
+
   // Completion Status Calculations
   const completionStats = useMemo(() => {
     const checks = [
       { name: 'General Information', valid: Boolean(name.trim()) },
-      { name: 'Product Media', valid: Boolean(colors[activeColorIndex]?.primaryImage) },
+      { name: 'Product Media', valid: Boolean(currentPrimaryImage || currentGalleryImages.length > 0) },
       { name: 'Pricing & MRP', valid: Boolean(numericBasePrice > 0 && numericMrp >= numericBasePrice) },
       { name: 'Category Selected', valid: Boolean(category.trim()) },
-      { name: 'Variants & SKUs', valid: Boolean(variants.length > 0 && duplicateSkus.length === 0) },
+      { name: 'Variants & SKUs', valid: Boolean(duplicateSkus.length === 0 && (variants.length > 0 || Boolean(parentSku.trim()))) },
       { name: 'SEO & Search', valid: Boolean(urlSlug.trim()) },
     ];
 
     const completed = checks.filter((c) => c.valid).length;
     const remaining = checks.length - completed;
     return { checks, completed, total: checks.length, remaining };
-  }, [name, selectedSizes, colors, activeColorIndex, numericBasePrice, numericMrp, category, variants, duplicateSkus, urlSlug]);
+  }, [name, currentPrimaryImage, currentGalleryImages, numericBasePrice, numericMrp, category, variants, duplicateSkus, parentSku, urlSlug]);
 
   // Browser Back & Popstate Handling
   useEffect(() => {
-    // Push history state so browser back button returns to product list
     window.history.pushState({ page: 'admin-product-editor' }, '', window.location.href);
 
-    const handlePopState = (e: PopStateEvent) => {
+    const handlePopState = () => {
       if (isDirty) {
         setShowUnsavedModal(true);
       } else {
@@ -637,9 +694,6 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
     }
   };
 
-  // Color selection & modification
-  const activeColor = colors[activeColorIndex] || colors[0];
-
   const handleOpenAddColor = () => {
     setEditingColor(null);
     setShowColorModal(true);
@@ -653,11 +707,9 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   const handleSaveColor = (savedColor: ColorDef) => {
     setIsDirty(true);
     if (editingColor) {
-      // Editing existing color - update colorDef and variant rows
       setColors((prev) =>
         prev.map((c) => (c.id === savedColor.id ? savedColor : c))
       );
-      // Also update any matching variants so colorName, colorHex, colorCode sync
       setVariants((prev) =>
         prev.map((row) => {
           if (row.colorId === savedColor.id || row.colorName.toLowerCase() === editingColor.name.toLowerCase()) {
@@ -674,25 +726,27 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
       );
       showToast(`Updated color "${savedColor.name}"`);
     } else {
-      // Adding brand new color
-      setColors((prev) => [...prev, savedColor]);
+      const colorWithInheritedMedia: ColorDef =
+        colors.length === 0 && (!savedColor.galleryImages || savedColor.galleryImages.length === 0) && unassignedGalleryImages.length > 0
+          ? {
+              ...savedColor,
+              primaryImage: savedColor.primaryImage || unassignedPrimaryImage || unassignedGalleryImages[0] || '',
+              galleryImages: unassignedGalleryImages,
+            }
+          : savedColor;
+      setColors((prev) => [...prev, colorWithInheritedMedia]);
       setActiveColorIndex(colors.length);
       showToast(`Added color "${savedColor.name}" (${savedColor.code})`);
     }
   };
 
   const handlePromptDeleteColor = (col: ColorDef) => {
-    if (colors.length <= 1) {
-      alert('Product must have at least one color variation.');
-      return;
-    }
-
     const colorVariants = variants.filter(
       (v) => v.colorId === col.id || v.colorName.toLowerCase() === col.name.toLowerCase()
     );
-    const totalStock = colorVariants.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+    const colStock = colorVariants.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
 
-    if (colorVariants.length > 0 && totalStock > 0) {
+    if (colorVariants.length > 0 && colStock > 0) {
       setColorToDelete(col);
     } else {
       performDeleteColor(col);
@@ -727,7 +781,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
     showToast(`Deactivated variants for "${col.name}"`);
   };
 
-  // Size toggling - allows deselecting all sizes to switch product to "Free size" mode
+  // Size toggling
   const handleToggleSize = (size: string) => {
     setIsDirty(true);
     if (selectedSizes.includes(size)) {
@@ -759,21 +813,28 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   // Bulk set stock for all active variants
   const handleApplyBulkStock = (amount: number) => {
     setIsDirty(true);
+    setTotalStockInput(String(amount * Math.max(1, variants.filter((v) => v.active).length)));
     setVariants((prev) =>
       prev.map((row) => (row.active ? { ...row, stock: Math.max(0, amount) } : row))
     );
     showToast(`Updated stock to ${amount} for all active variants`);
   };
 
-  // Direct Total Stock input management: allows smooth typing (0, 1, 10, 100, 250, 1000) without rounding or resetting
+  // Direct Total Stock input management: empty for new products, allows smooth typing (0, 1, 10, 100, 250, 1000)
   const isTotalStockFocused = useRef(false);
-  const [totalStockInput, setTotalStockInput] = useState<string>(() => String(totalStock));
+  const [totalStockInput, setTotalStockInput] = useState<string>(() =>
+    initialProduct ? String(totalStock) : ''
+  );
 
   useEffect(() => {
     if (!isTotalStockFocused.current) {
-      setTotalStockInput(String(totalStock));
+      if (variants.length > 0 && totalStock > 0) {
+        setTotalStockInput(String(totalStock));
+      } else if (initialProduct) {
+        setTotalStockInput(String(totalStock));
+      }
     }
-  }, [totalStock]);
+  }, [totalStock, variants.length, initialProduct]);
 
   const applyTotalStockDistribution = (total: number) => {
     setIsDirty(true);
@@ -825,7 +886,20 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   // Regenerate all variant SKUs
   const handleRegenerateAllSkus = () => {
     setIsDirty(true);
-    const parent = parentSku || 'RM-PRD';
+    const primaryColCode = colors[0]?.code || (colors[0]?.name ? getAutoColorCode(colors[0].name) : 'CLR');
+    const parent =
+      parentSku ||
+      buildStructuredParentSku(
+        category,
+        typeStyle || kurtiType,
+        subcategory,
+        name,
+        primaryColCode,
+        skuSequence
+      );
+    if (!parentSku) {
+      setParentSku(parent);
+    }
     setVariants((prev) =>
       prev.map((row) => ({
         ...row,
@@ -835,10 +909,16 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
     showToast('All variant SKUs regenerated');
   };
 
-  // Active color gallery updates: 1-click set as main cover
+  // Active color gallery updates: works whether colors are added or still in unassigned state
   const setPrimaryImageForActiveColor = (imgUrl: string) => {
     if (!imgUrl) return;
     setIsDirty(true);
+    if (colors.length === 0) {
+      setUnassignedPrimaryImage(imgUrl);
+      setUnassignedGalleryImages((prev) => [imgUrl, ...prev.filter((i) => i !== imgUrl)]);
+      showToast('Cover photo set as main!');
+      return;
+    }
     setColors((prev) =>
       prev.map((col, idx) => {
         if (idx !== activeColorIndex) return col;
@@ -856,6 +936,12 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   const addImageToActiveColor = (imgUrl: string) => {
     if (!imgUrl.trim()) return;
     setIsDirty(true);
+    if (colors.length === 0) {
+      setUnassignedGalleryImages((prev) => (prev.includes(imgUrl) ? prev : [...prev, imgUrl]));
+      setUnassignedPrimaryImage((prev) => prev || imgUrl);
+      showToast('Photo added!');
+      return;
+    }
     setColors((prev) =>
       prev.map((col, idx) => {
         if (idx !== activeColorIndex) return col;
@@ -877,6 +963,15 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
 
   const removeImageFromActiveColor = (imgUrl: string) => {
     setIsDirty(true);
+    if (colors.length === 0) {
+      setUnassignedGalleryImages((prev) => {
+        const remaining = prev.filter((img) => img !== imgUrl);
+        setUnassignedPrimaryImage((curr) => (curr === imgUrl ? remaining[0] || '' : curr));
+        return remaining;
+      });
+      showToast('Photo removed');
+      return;
+    }
     setColors((prev) =>
       prev.map((col, idx) => {
         if (idx !== activeColorIndex) return col;
@@ -894,7 +989,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
     showToast('Photo removed');
   };
 
-  // Direct native File Upload Handler (Select multiple photos in one go, upload, & attach to active color)
+  // Direct native File Upload Handler
   const [isUploadingImage, setIsUploadingImage] = useState(false);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -915,50 +1010,35 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
 
       if (uploadedUrls.length > 0) {
         setIsDirty(true);
-        setColors((prev) =>
-          prev.map((col, idx) => {
-            if (idx !== activeColorIndex) return col;
-            const currentGallery = (col.galleryImages || []).filter(
-              (img) => !SAMPLE_CLOTHING_PRESETS.some((preset) => preset.url === img)
-            );
-            const combined = [...currentGallery];
+        if (colors.length === 0) {
+          setUnassignedGalleryImages((prev) => {
+            const combined = [...prev];
             uploadedUrls.forEach((u) => {
               if (!combined.includes(u)) combined.push(u);
             });
-            return {
-              ...col,
-              galleryImages: combined,
-              primaryImage: col.primaryImage || uploadedUrls[0] || combined[0] || '',
-            };
-          })
-        );
-        // Automatically analyze uploaded product image for dominant colour & suggest fancy colour/product names
-        try {
-          const detected = await extractDominantColorFromImage(uploadedUrls[0]);
-          if (detected?.baseColorName) {
-            setSelectedBaseColorFamily(detected.baseColorName);
-            const matchedBase = BASE_COLORS.find(
-              (b) => b.name.toLowerCase() === detected.baseColorName.toLowerCase()
-            );
-            const topFancyColor = matchedBase?.suggestions?.[0];
-            if (topFancyColor && (!isEditing || colors[activeColorIndex]?.name === 'Sage Green')) {
-              setColors((prev) =>
-                prev.map((col, idx) =>
-                  idx === activeColorIndex
-                    ? {
-                        ...col,
-                        name: topFancyColor.name,
-                        baseColor: detected.baseColorName,
-                        hex: topFancyColor.hex,
-                        code: topFancyColor.code,
-                      }
-                    : col
-                )
+            return combined;
+          });
+          setUnassignedPrimaryImage((prev) => prev || uploadedUrls[0] || '');
+        } else {
+          setColors((prev) =>
+            prev.map((col, idx) => {
+              if (idx !== activeColorIndex) return col;
+              const currentGallery = (col.galleryImages || []).filter(
+                (img) => !SAMPLE_CLOTHING_PRESETS.some((preset) => preset.url === img)
               );
-            }
-          }
-        } catch {}
-        showToast(`${uploadedUrls.length} photo${uploadedUrls.length > 1 ? 's' : ''} uploaded & analyzed!`);
+              const combined = [...currentGallery];
+              uploadedUrls.forEach((u) => {
+                if (!combined.includes(u)) combined.push(u);
+              });
+              return {
+                ...col,
+                galleryImages: combined,
+                primaryImage: col.primaryImage || uploadedUrls[0] || combined[0] || '',
+              };
+            })
+          );
+        }
+        showToast(`${uploadedUrls.length} photo${uploadedUrls.length > 1 ? 's' : ''} uploaded!`);
       }
     } catch (err) {
       console.error('Failed to upload images:', err);
@@ -974,8 +1054,12 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
     if (isSaving) return;
     const validationErrors: Record<string, string> = {};
 
+    const hasAnyPhoto =
+      Boolean(unassignedPrimaryImage) ||
+      unassignedGalleryImages.length > 0 ||
+      colors.some((c) => c.primaryImage || (c.galleryImages && c.galleryImages.length > 0));
+
     if (!isDraft) {
-      // Strict publish validation
       if (!name.trim()) {
         validationErrors.name = 'Product Name is required.';
       }
@@ -988,7 +1072,6 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
       if (numericMrp < numericBasePrice) {
         validationErrors.mrp = 'MRP cannot be less than Selling Price.';
       }
-      const hasAnyPhoto = colors.some((c) => c.primaryImage || (c.galleryImages && c.galleryImages.length > 0));
       if (!hasAnyPhoto) {
         validationErrors.media = 'Please upload at least one product photo.';
       }
@@ -996,7 +1079,6 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
         validationErrors.sku = `SKU already exists: ${duplicateSkus.join(', ')}. Please use unique SKUs.`;
       }
 
-      // Check variant SKUs and stock
       const hasEmptySku = variants.some((v) => v.active && !v.sku.trim());
       if (hasEmptySku) {
         validationErrors.skuEmpty = 'All active variants must have a valid SKU.';
@@ -1010,54 +1092,100 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
       return;
     }
 
-    // Build standard compatible RedMode Product object
     const mainCover =
       activeColor?.primaryImage ||
       colors[0]?.primaryImage ||
       activeColor?.galleryImages?.[0] ||
       colors[0]?.galleryImages?.[0] ||
+      unassignedPrimaryImage ||
+      unassignedGalleryImages[0] ||
       '';
 
-    // Build colorOptions compatible with StoreContext
-    const colorOptionsData: ColorVariant[] = colors.map((c) => {
-      const colorVariants = variants.filter(
-        (v) => v.colorId === c.id || v.colorName.toLowerCase() === c.name.toLowerCase()
+    const effectiveParentSku =
+      parentSku.trim() ||
+      buildStructuredParentSku(
+        category,
+        typeStyle || kurtiType,
+        subcategory,
+        name,
+        colors[0]?.code || 'STD',
+        skuSequence
       );
-      const stockMap: Record<string, number> = {};
-      const skuMap: Record<string, string> = {};
-      const priceMap: Record<string, number> = {};
 
-      colorVariants.forEach((v) => {
-        stockMap[v.size] = Number(v.stock) || 0;
-        skuMap[v.size] = v.sku.trim();
-        if (v.priceOverride && !isNaN(Number(v.priceOverride))) {
-          priceMap[v.size] = Number(v.priceOverride);
-        }
-      });
-
-      return {
-        name: c.name,
-        hex: c.hex,
-        image: c.primaryImage,
-        images: c.galleryImages,
-        stockBySize: stockMap,
-        skuBySize: skuMap,
-        priceBySize: priceMap,
-        price: numericBasePrice,
-        mrp: numericMrp,
-        code: c.code,
-      } as any;
-    });
+    const typedTotalStock = Math.max(0, parseInt(totalStockInput, 10) || 0);
+    const effectiveTotalStock = totalStock > 0 ? totalStock : typedTotalStock;
 
     // Aggregate stock by size
     const stockBySize: Record<string, number> = {};
     const skuBySize: Record<string, string> = {};
-    variants.forEach((v) => {
-      if (v.active) {
-        stockBySize[v.size] = (stockBySize[v.size] || 0) + (Number(v.stock) || 0);
-        skuBySize[v.size] = v.sku.trim();
+    if (variants.length > 0) {
+      variants.forEach((v) => {
+        if (v.active) {
+          stockBySize[v.size] = (stockBySize[v.size] || 0) + (Number(v.stock) || 0);
+          skuBySize[v.size] = v.sku.trim();
+        }
+      });
+      // If user typed a Total Stock number but variant rows are still 0, distribute typedTotalStock across sizes
+      const sumInMap = Object.values(stockBySize).reduce((a, b) => a + b, 0);
+      if (sumInMap === 0 && typedTotalStock > 0) {
+        const sizeKeys = Object.keys(stockBySize);
+        if (sizeKeys.length > 0) {
+          const base = Math.floor(typedTotalStock / sizeKeys.length);
+          let rem = typedTotalStock % sizeKeys.length;
+          sizeKeys.forEach((sz) => {
+            stockBySize[sz] = base + (rem > 0 ? 1 : 0);
+            if (rem > 0) rem--;
+          });
+        }
       }
-    });
+    } else {
+      const targetSizes = selectedSizes.length > 0 ? selectedSizes : ['Free size'];
+      const base = Math.floor(effectiveTotalStock / targetSizes.length);
+      let rem = effectiveTotalStock % targetSizes.length;
+      targetSizes.forEach((sz) => {
+        stockBySize[sz] = base + (rem > 0 ? 1 : 0);
+        if (rem > 0) rem--;
+        skuBySize[sz] = generateSku(effectiveParentSku, 'STD', sz === 'Free size' ? 'FS' : sz);
+      });
+    }
+
+    // Build colorOptions compatible with StoreContext
+    const colorOptionsData: ColorVariant[] =
+      colors.length > 0
+        ? colors.map((c) => {
+            const colorVariants = variants.filter(
+              (v) => v.colorId === c.id || v.colorName.toLowerCase() === c.name.toLowerCase()
+            );
+            const stockMap: Record<string, number> = {};
+            const skuMap: Record<string, string> = {};
+            const priceMap: Record<string, number> = {};
+
+            colorVariants.forEach((v) => {
+              stockMap[v.size] = Number(v.stock) || 0;
+              skuMap[v.size] = v.sku.trim();
+              if (v.priceOverride && !isNaN(Number(v.priceOverride))) {
+                priceMap[v.size] = Number(v.priceOverride);
+              }
+            });
+
+            if (Object.keys(stockMap).length === 0) {
+              Object.assign(stockMap, stockBySize);
+            }
+
+            return {
+              name: c.name,
+              hex: c.hex,
+              image: c.primaryImage || mainCover,
+              images: c.galleryImages && c.galleryImages.length > 0 ? c.galleryImages : mainCover ? [mainCover] : [],
+              stockBySize: stockMap,
+              skuBySize: skuMap,
+              priceBySize: priceMap,
+              price: numericBasePrice,
+              mrp: numericMrp,
+              code: c.code,
+            } as any;
+          })
+        : [];
 
     const inactiveRowKeys = variants.filter((v) => !v.active).map((v) => v.key);
 
@@ -1065,7 +1193,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
       name: name.trim() || 'Untitled Product',
       slug: urlSlug.trim() || name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
       brand: brand.trim() || 'REDMODE',
-      sku: parentSku.trim(),
+      sku: effectiveParentSku,
       price: numericBasePrice,
       mrp: numericMrp,
       category: category.trim(),
@@ -1074,17 +1202,21 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
       kurtiType: kurtiType.trim(),
       typeStyle: typeStyle.trim() || kurtiType.trim(),
       gender: gender,
-      color: colors[0]?.name || 'Standard',
+      color: colors[0]?.name || '',
       colorOptions: colorOptionsData,
       sizes: selectedSizes.length > 0 ? selectedSizes : ['Free size'],
       defaultSize: selectedSizes.length > 0 ? selectedSizes[0] : 'Free size',
       stockBySize,
       skuBySize,
       inactiveRowKeys,
-      inStock: totalStock > 0,
+      inStock: effectiveTotalStock > 0,
       mainImage: mainCover,
       images: Array.from(
-        new Set([mainCover, ...colors.flatMap((c) => c.galleryImages)])
+        new Set([
+          mainCover,
+          ...unassignedGalleryImages,
+          ...colors.flatMap((c) => c.galleryImages),
+        ].filter(Boolean))
       ),
       description: description.trim(),
       highlights: highlights.filter((h) => h.trim().length > 0),
@@ -1232,8 +1364,8 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                 </p>
               </div>
 
-              {/* Product Name + AI / Smart Fancy Product Name Suggestions */}
-              <div className="space-y-2.5">
+              {/* Product Name + Minimal Fancy Product Name Suggestions */}
+              <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-semibold text-slate-700">
                     Name Product <span className="text-rose-500">*</span>
@@ -1242,7 +1374,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                 </div>
                 <input
                   type="text"
-                  placeholder="Enter product name or select a suggested fancy name below..."
+                  placeholder="Enter product name..."
                   value={name}
                   onChange={(e) => {
                     setName(e.target.value);
@@ -1253,27 +1385,17 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                   } focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition`}
                 />
 
-                {/* Clean, Organized Fancy Product Name Suggestions Panel */}
-                <div className="p-3 rounded-xl bg-slate-50/90 border border-slate-200/80 space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] font-bold text-slate-700 flex items-center gap-1.5">
-                      <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                      <span>Suggested Fancy Product Names</span>
-                      <span className="text-[10px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-md">
-                        {activeColor?.name || 'Active Shade'}
-                      </span>
+                {/* Minimal, Compact Fancy Product Name Suggestions */}
+                {suggestedFancyProductNames.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                    <span className="text-[11px] font-medium text-slate-400 inline-flex items-center gap-1 mr-0.5">
+                      <Sparkles className="w-3 h-3 text-amber-500" />
+                      <span>Ideas:</span>
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => setFancyNameSeed((s) => s + 1)}
-                      className="text-[11px] font-semibold text-emerald-600 hover:text-emerald-700 inline-flex items-center gap-1 cursor-pointer"
-                    >
-                      <RotateCcw className="w-3 h-3" />
-                      <span>More Ideas</span>
-                    </button>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {suggestedFancyProductNames.map((suggestion) => {
+                    {(showMoreNameIdeas
+                      ? suggestedFancyProductNames
+                      : suggestedFancyProductNames.slice(0, 2)
+                    ).map((suggestion) => {
                       const isSelectedName = name.trim().toLowerCase() === suggestion.toLowerCase();
                       return (
                         <button
@@ -1286,19 +1408,33 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                               setErrors((prev) => ({ ...prev, name: '' }));
                             }
                           }}
-                          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border transition flex items-center gap-1.5 cursor-pointer ${
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border transition inline-flex items-center gap-1 cursor-pointer ${
                             isSelectedName
-                              ? 'bg-slate-900 text-white border-slate-900 shadow-2xs ring-2 ring-emerald-500/30'
-                              : 'bg-white text-slate-700 border-slate-200 hover:border-slate-400 hover:bg-slate-100'
+                              ? 'bg-slate-900 text-white border-slate-900'
+                              : 'bg-slate-50/80 text-slate-600 border-slate-200 hover:border-slate-300 hover:bg-slate-100 hover:text-slate-900'
                           }`}
                         >
-                          {isSelectedName && <Check className="w-3 h-3 text-emerald-400 shrink-0" />}
+                          {isSelectedName && <Check className="w-2.5 h-2.5 text-emerald-400 shrink-0" />}
                           <span>{suggestion}</span>
                         </button>
                       );
                     })}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!showMoreNameIdeas) {
+                          setShowMoreNameIdeas(true);
+                        } else {
+                          setFancyNameSeed((s) => s + 1);
+                        }
+                      }}
+                      className="px-2 py-1 rounded-lg text-[11px] font-semibold text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50/60 transition inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <RotateCcw className="w-2.5 h-2.5" />
+                      <span>More Ideas</span>
+                    </button>
                   </div>
-                </div>
+                )}
               </div>
 
               {/* Description (Completely empty by default for new products) */}
@@ -1364,7 +1500,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                         handleAddHighlight();
                       }
                     }}
-                    placeholder="Add a new bullet point (e.g. 100% Breathable Cotton Fabric) and press Add..."
+                    placeholder="Add a highlight (e.g. Premium Quality Fabric, Comfortable Everyday Wear)..."
                     className="flex-1 px-3.5 py-2 rounded-xl text-xs text-slate-900 bg-white border border-slate-200 focus:border-slate-900 outline-none"
                   />
                   <button
@@ -1378,7 +1514,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                 </div>
               </div>
 
-              {/* Size and Gender Selection Grid (Directly from Reference Screenshot) */}
+              {/* Size and Gender Selection Grid */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 pt-2">
                 {/* Size Chips */}
                 <div className="space-y-2">
@@ -1469,7 +1605,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                           key={g}
                           type="button"
                           onClick={() => {
-                            setGender(g);
+                            setGender(isSelected ? '' : g);
                             setIsDirty(true);
                           }}
                           className={`px-3.5 py-2.5 rounded-xl text-xs font-medium border flex items-center gap-2 transition cursor-pointer ${
@@ -1501,6 +1637,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                   <label className="text-xs font-semibold text-slate-700">Brand</label>
                   <input
                     type="text"
+                    placeholder="e.g. REDMODE"
                     value={brand}
                     onChange={(e) => {
                       setBrand(e.target.value);
@@ -1516,7 +1653,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                       type="button"
                       onClick={() => {
                         const newSeq = String(Math.floor(1000 + Math.random() * 9000));
-                        const primaryColCode = colors[0]?.code || getAutoColorCode(colors[0]?.name || 'CLR');
+                        const primaryColCode = colors[0]?.code || (colors[0]?.name ? getAutoColorCode(colors[0].name) : 'CLR');
                         const newSku = buildStructuredParentSku(
                           category,
                           typeStyle || kurtiType,
@@ -1542,7 +1679,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                       setIsSkuManuallyEdited(true);
                       setIsDirty(true);
                     }}
-                    placeholder="e.g. RM-KRT-SHORT-SG-0001"
+                    placeholder="Auto-generates as you enter product details..."
                     className="w-full px-3.5 py-2 rounded-xl text-xs font-mono text-slate-900 bg-slate-50 border border-slate-200 focus:bg-white focus:border-slate-900 outline-none"
                   />
                 </div>
@@ -1580,7 +1717,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                     </span>
                     <input
                       type="number"
-                      placeholder="699"
+                      placeholder="Enter selling price"
                       value={basePrice}
                       onChange={(e) => {
                         setBasePrice(e.target.value);
@@ -1601,7 +1738,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                     <input
                       type="text"
                       inputMode="numeric"
-                      placeholder="100"
+                      placeholder="Enter total stock"
                       value={totalStockInput}
                       onFocus={() => {
                         isTotalStockFocused.current = true;
@@ -1620,10 +1757,12 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                       }}
                       onBlur={() => {
                         isTotalStockFocused.current = false;
-                        setTotalStockInput(String(totalStock));
+                        if (variants.length > 0) {
+                          setTotalStockInput(totalStock > 0 ? String(totalStock) : totalStockInput);
+                        }
                       }}
                       className="w-full pl-3.5 pr-10 py-2.5 rounded-xl text-xs font-bold text-slate-800 bg-slate-50 border border-slate-200 focus:bg-white focus:border-slate-900 outline-none"
-                      title="Total aggregated stock across all variants. You can type any number (e.g. 100) directly here or edit individual sizes in the table below."
+                      title="Total aggregated stock across all variants. You can type any number directly here or edit individual sizes in the table below."
                     />
                     <Package className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                   </div>
@@ -1643,7 +1782,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                     </span>
                     <input
                       type="number"
-                      placeholder="1199"
+                      placeholder="Enter MRP"
                       value={mrp}
                       onChange={(e) => {
                         setMrp(e.target.value);
@@ -1672,7 +1811,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                     </span>
                     <input
                       type="number"
-                      placeholder="e.g. 350"
+                      placeholder="Enter cost price"
                       value={costPrice}
                       onChange={(e) => {
                         setCostPrice(e.target.value);
@@ -1732,12 +1871,12 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                       Available Colors &amp; Variations
                     </label>
                     <p className="text-[11px] text-slate-500">
-                      Customer-facing fashion colors with automatic names, HEX swatches, garment photos and SKU codes.
+                      Select a base colour and fancy shade, or add custom colour variations.
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-[11px] text-slate-400 font-medium hidden sm:inline">
-                      {colors.length} color{colors.length > 1 ? 's' : ''} configured
+                      {colors.length} color{colors.length !== 1 ? 's' : ''} configured
                     </span>
                     <button
                       type="button"
@@ -1758,9 +1897,19 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                         <Palette className="w-3.5 h-3.5 text-emerald-600" />
                         <span>1. Select Product Base Colour:</span>
                       </span>
-                      <span className="text-[10px] text-slate-400">
-                        Filters dynamic fancy colour shades below
-                      </span>
+                      {selectedBaseColorFamily ? (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedBaseColorFamily('')}
+                          className="text-[10px] text-slate-400 hover:text-slate-600 cursor-pointer"
+                        >
+                          Clear
+                        </button>
+                      ) : (
+                        <span className="text-[10px] text-slate-400">
+                          Choose a base colour to view fancy shades
+                        </span>
+                      )}
                     </div>
                     <div className="flex flex-wrap items-center gap-1.5">
                       {BASE_COLORS.map((base) => {
@@ -1770,7 +1919,9 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                           <button
                             key={base.id}
                             type="button"
-                            onClick={() => setSelectedBaseColorFamily(base.name)}
+                            onClick={() =>
+                              setSelectedBaseColorFamily(isSelectedFamily ? '' : base.name)
+                            }
                             className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border flex items-center gap-1.5 transition cursor-pointer ${
                               isSelectedFamily
                                 ? 'bg-slate-900 text-white border-slate-900 shadow-2xs ring-2 ring-slate-900/15'
@@ -1788,97 +1939,91 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                     </div>
                   </div>
 
-                  <div className="space-y-1.5 pt-2 border-t border-slate-200/70">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-bold text-slate-700 flex items-center gap-1.5">
-                        <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                        <span>2. Fancy {selectedBaseColorFamily} Names:</span>
-                      </span>
-                      <span className="text-[10px] text-slate-500">
-                        Click to apply to active colour or add variation
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      {dynamicFancyColorSuggestions.map((preset) => {
-                        const isCurrentlyActive =
-                          activeColor?.name.toLowerCase() === preset.name.toLowerCase();
-                        const alreadyAdded = colors.some(
-                          (c) => c.name.toLowerCase() === preset.name.toLowerCase()
-                        );
+                  {selectedBaseColorFamily && dynamicFancyColorSuggestions.length > 0 && (
+                    <div className="space-y-1.5 pt-2 border-t border-slate-200/70">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-slate-700 flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                          <span>2. Fancy {selectedBaseColorFamily} Shades:</span>
+                        </span>
+                        <span className="text-[10px] text-slate-500">
+                          Click a shade to add or select variation
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {dynamicFancyColorSuggestions.map((preset) => {
+                          const isCurrentlyActive =
+                            activeColor?.name.toLowerCase() === preset.name.toLowerCase();
+                          const alreadyAdded = colors.some(
+                            (c) => c.name.toLowerCase() === preset.name.toLowerCase()
+                          );
 
-                        return (
-                          <button
-                            key={preset.name}
-                            type="button"
-                            onClick={() => {
-                              setIsDirty(true);
-                              if (alreadyAdded) {
-                                const foundIdx = colors.findIndex(
-                                  (c) => c.name.toLowerCase() === preset.name.toLowerCase()
-                                );
-                                if (foundIdx >= 0) {
-                                  setActiveColorIndex(foundIdx);
-                                  showToast(`Selected "${preset.name}"`);
+                          return (
+                            <button
+                              key={preset.name}
+                              type="button"
+                              onClick={() => {
+                                setIsDirty(true);
+                                if (alreadyAdded) {
+                                  const foundIdx = colors.findIndex(
+                                    (c) => c.name.toLowerCase() === preset.name.toLowerCase()
+                                  );
+                                  if (foundIdx >= 0) {
+                                    setActiveColorIndex(foundIdx);
+                                    showToast(`Selected "${preset.name}"`);
+                                  }
+                                  return;
                                 }
-                                return;
-                              }
-                              // Update current colour if only 1 default colour exists, else add variation
-                              if (colors.length === 1 && !isEditing) {
-                                setColors((prev) =>
-                                  prev.map((c, idx) =>
-                                    idx === 0
-                                      ? {
-                                          ...c,
-                                          name: preset.name,
-                                          baseColor: selectedBaseColorFamily,
-                                          hex: preset.hex,
-                                          code: preset.code,
-                                        }
-                                      : c
-                                  )
-                                );
-                                showToast(`Applied fancy colour "${preset.name}" (${preset.code})`);
-                              } else {
+                                const inheritedPrimary =
+                                  colors.length === 0
+                                    ? unassignedPrimaryImage
+                                    : activeColor?.primaryImage || '';
+                                const inheritedGallery =
+                                  colors.length === 0
+                                    ? unassignedGalleryImages
+                                    : activeColor?.primaryImage
+                                    ? [activeColor.primaryImage]
+                                    : [];
                                 const newCol: ColorDef = {
                                   id: `col-${Date.now()}`,
                                   name: preset.name,
                                   baseColor: selectedBaseColorFamily,
                                   hex: preset.hex,
                                   code: preset.code,
-                                  primaryImage: activeColor?.primaryImage || '',
-                                  galleryImages: activeColor?.primaryImage ? [activeColor.primaryImage] : [],
+                                  primaryImage: inheritedPrimary,
+                                  galleryImages: inheritedGallery,
                                 };
-                                setColors([...colors, newCol]);
+                                setColors((prev) => [...prev, newCol]);
                                 setActiveColorIndex(colors.length);
-                                showToast(`Added fancy colour "${preset.name}" (${preset.code})`);
-                              }
-                            }}
-                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border flex items-center gap-1.5 transition cursor-pointer ${
-                              isCurrentlyActive
-                                ? 'bg-slate-900 text-white border-slate-900 shadow-2xs ring-2 ring-emerald-500/30'
-                                : alreadyAdded
-                                ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
-                                : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200 hover:border-slate-300'
-                            }`}
-                          >
-                            <span
-                              className="w-3 h-3 rounded-full border border-black/20 shrink-0"
-                              style={{ backgroundColor: preset.hex }}
-                            />
-                            <span>{preset.name}</span>
-                            {isCurrentlyActive ? (
-                              <Check className="w-3 h-3 text-emerald-400" />
-                            ) : alreadyAdded ? (
-                              <Check className="w-2.5 h-2.5 text-emerald-600" />
-                            ) : null}
-                          </button>
-                        );
-                      })}
+                                showToast(`Added colour "${preset.name}" (${preset.code})`);
+                              }}
+                              className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border flex items-center gap-1.5 transition cursor-pointer ${
+                                isCurrentlyActive
+                                  ? 'bg-slate-900 text-white border-slate-900 shadow-2xs ring-2 ring-emerald-500/30'
+                                  : alreadyAdded
+                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                                  : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200 hover:border-slate-300'
+                              }`}
+                            >
+                              <span
+                                className="w-3 h-3 rounded-full border border-black/20 shrink-0"
+                                style={{ backgroundColor: preset.hex }}
+                              />
+                              <span>{preset.name}</span>
+                              {isCurrentlyActive ? (
+                                <Check className="w-3 h-3 text-emerald-400" />
+                              ) : alreadyAdded ? (
+                                <Check className="w-2.5 h-2.5 text-emerald-600" />
+                              ) : null}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </div>
 
-                {/* Color Cards Grid - Requirement 20 */}
+                {/* Color Cards Grid */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 pt-1">
                   {colors.map((col, idx) => {
                     const isActiveColor = activeColorIndex === idx;
@@ -1958,10 +2103,9 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                             >
                               <Edit3 className="w-3.5 h-3.5" />
                             </button>
-                            {colors.length > 1 && (
-                              <button
-                                type="button"
-                                onClick={(e) => {
+                            <button
+                              type="button"
+                              onClick={(e) => {
                                 e.stopPropagation();
                                 handlePromptDeleteColor(col);
                               }}
@@ -1970,7 +2114,6 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
-                            )}
                           </div>
                         </div>
                       </div>
@@ -1987,153 +2130,159 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                       <Plus className="w-4 h-4" />
                     </div>
                     <span className="text-xs font-bold text-slate-700">Add New Color</span>
-                    <span className="text-[10px] text-slate-400">Suggest names &amp; pick shade</span>
+                    <span className="text-[10px] text-slate-400">Pick base &amp; fancy shade</span>
                   </button>
                 </div>
               </div>
 
               {/* Scannable Variant Table */}
-              <div className="space-y-2 pt-2">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs font-semibold text-slate-700">
-                  <div className="flex items-center gap-2">
-                    <span>
-                      Generated Variants ({variants.filter((v) => v.active).length} Active of {variants.length})
-                    </span>
-                    <span className="text-[11px] text-slate-400 font-normal">
-                      {selectedSizes.length > 0
-                        ? `(${colors.length} Color${colors.length > 1 ? 's' : ''} × ${selectedSizes.length} Sizes)`
-                        : `(${colors.length} Color${colors.length > 1 ? 's' : ''} · Free size — No Size Variations)`}
-                    </span>
+              {variants.length > 0 ? (
+                <div className="space-y-2 pt-2">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs font-semibold text-slate-700">
+                    <div className="flex items-center gap-2">
+                      <span>
+                        Generated Variants ({variants.filter((v) => v.active).length} Active of {variants.length})
+                      </span>
+                      <span className="text-[11px] text-slate-400 font-normal">
+                        {selectedSizes.length > 0
+                          ? `(${colors.length} Color${colors.length !== 1 ? 's' : ''} × ${selectedSizes.length} Sizes)`
+                          : `(${colors.length} Color${colors.length !== 1 ? 's' : ''} · Free size)`}
+                      </span>
+                    </div>
+
+                    {/* Quick Fill Stock buttons */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] font-normal text-slate-500">Quick Fill Stock:</span>
+                      {[10, 25, 50, 100].map((qty) => (
+                        <button
+                          key={qty}
+                          type="button"
+                          onClick={() => handleApplyBulkStock(qty)}
+                          className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition cursor-pointer"
+                        >
+                          +{qty}
+                        </button>
+                      ))}
+                    </div>
                   </div>
 
-                  {/* Quick Fill Stock buttons */}
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[11px] font-normal text-slate-500">Quick Fill Stock:</span>
-                    {[10, 25, 50, 100].map((qty) => (
-                      <button
-                        key={qty}
-                        type="button"
-                        onClick={() => handleApplyBulkStock(qty)}
-                        className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition cursor-pointer"
-                      >
-                        +{qty}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                  <div className="overflow-x-auto border border-slate-200 rounded-xl bg-white">
+                    <table className="w-full text-left text-xs text-slate-700 border-collapse">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-medium">
+                          <th className="py-2.5 px-3">Color</th>
+                          <th className="py-2.5 px-3">Size</th>
+                          <th className="py-2.5 px-3">
+                            Unique SKU <span className="text-rose-500">*</span>
+                          </th>
+                          <th className="py-2.5 px-3">
+                            Stock <span className="text-rose-500">*</span>
+                          </th>
+                          <th className="py-2.5 px-3">Price Override</th>
+                          <th className="py-2.5 px-3 text-center">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {variants.map((v) => {
+                          const isDup = duplicateSkus.includes(v.sku.trim().toUpperCase());
+                          return (
+                            <tr
+                              key={v.key}
+                              className={`transition hover:bg-slate-50/70 ${!v.active ? 'opacity-40 bg-slate-50/50' : ''}`}
+                            >
+                              {/* Color */}
+                              <td className="py-2.5 px-3 font-medium text-slate-900 whitespace-nowrap">
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className="w-3 h-3 rounded-full border border-black/20 shrink-0"
+                                    style={{ backgroundColor: v.colorHex }}
+                                  />
+                                  <span>{v.colorName}</span>
+                                </div>
+                              </td>
 
-                <div className="overflow-x-auto border border-slate-200 rounded-xl bg-white">
-                  <table className="w-full text-left text-xs text-slate-700 border-collapse">
-                    <thead>
-                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-medium">
-                        <th className="py-2.5 px-3">Color</th>
-                        <th className="py-2.5 px-3">Size</th>
-                        <th className="py-2.5 px-3">
-                          Unique SKU <span className="text-rose-500">*</span>
-                        </th>
-                        <th className="py-2.5 px-3">
-                          Stock <span className="text-rose-500">*</span>
-                        </th>
-                        <th className="py-2.5 px-3">Price Override</th>
-                        <th className="py-2.5 px-3 text-center">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {variants.map((v) => {
-                        const isDup = duplicateSkus.includes(v.sku.trim().toUpperCase());
-                        return (
-                          <tr
-                            key={v.key}
-                            className={`transition hover:bg-slate-50/70 ${!v.active ? 'opacity-40 bg-slate-50/50' : ''}`}
-                          >
-                            {/* Color */}
-                            <td className="py-2.5 px-3 font-medium text-slate-900 whitespace-nowrap">
-                              <div className="flex items-center gap-2">
-                                <span
-                                  className="w-3 h-3 rounded-full border border-black/20 shrink-0"
-                                  style={{ backgroundColor: v.colorHex }}
+                              {/* Size */}
+                              <td className="py-2.5 px-3 font-semibold text-slate-900">
+                                {v.size === 'Free size' ? (
+                                  <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-900 border border-emerald-200 text-[11px] italic font-medium">
+                                    Free size
+                                  </span>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded-md bg-slate-100 text-[11px] border border-slate-200">
+                                    {v.size}
+                                  </span>
+                                )}
+                              </td>
+
+                              {/* SKU */}
+                              <td className="py-2.5 px-3">
+                                <input
+                                  type="text"
+                                  value={v.sku}
+                                  onChange={(e) => updateVariant(v.key, 'sku', e.target.value.toUpperCase())}
+                                  disabled={!v.active}
+                                  className={`w-40 sm:w-48 px-2.5 py-1 rounded-lg text-xs font-mono font-medium border ${
+                                    isDup
+                                      ? 'border-rose-400 bg-rose-50 text-rose-700'
+                                      : 'border-slate-200 bg-slate-50 focus:bg-white text-slate-900 focus:border-slate-900'
+                                  } outline-none`}
                                 />
-                                <span>{v.colorName}</span>
-                              </div>
-                            </td>
+                              </td>
 
-                            {/* Size */}
-                            <td className="py-2.5 px-3 font-semibold text-slate-900">
-                              {v.size === 'Free size' ? (
-                                <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-900 border border-emerald-200 text-[11px] italic font-medium">
-                                  Free size
-                                </span>
-                              ) : (
-                                <span className="px-2 py-0.5 rounded-md bg-slate-100 text-[11px] border border-slate-200">
-                                  {v.size}
-                                </span>
-                              )}
-                            </td>
+                              {/* Stock */}
+                              <td className="py-2.5 px-3">
+                                <input
+                                  type="text"
+                                  inputMode="numeric"
+                                  value={String(v.stock ?? 0)}
+                                  onChange={(e) => {
+                                    const raw = e.target.value.replace(/[^0-9]/g, '');
+                                    const num = raw === '' ? 0 : parseInt(raw, 10);
+                                    updateVariant(v.key, 'stock', isNaN(num) ? 0 : Math.max(0, num));
+                                  }}
+                                  disabled={!v.active}
+                                  className="w-20 px-2 py-1 rounded-lg text-xs font-semibold text-slate-900 bg-slate-50 border border-slate-200 focus:bg-white focus:border-slate-900 outline-none text-center"
+                                />
+                              </td>
 
-                            {/* SKU */}
-                            <td className="py-2.5 px-3">
-                              <input
-                                type="text"
-                                value={v.sku}
-                                onChange={(e) => updateVariant(v.key, 'sku', e.target.value.toUpperCase())}
-                                disabled={!v.active}
-                                className={`w-40 sm:w-48 px-2.5 py-1 rounded-lg text-xs font-mono font-medium border ${
-                                  isDup
-                                    ? 'border-rose-400 bg-rose-50 text-rose-700'
-                                    : 'border-slate-200 bg-slate-50 focus:bg-white text-slate-900 focus:border-slate-900'
-                                } outline-none`}
-                              />
-                            </td>
+                              {/* Price Override */}
+                              <td className="py-2.5 px-3">
+                                <input
+                                  type="number"
+                                  placeholder={numericBasePrice ? `₹${numericBasePrice}` : 'Default'}
+                                  value={v.priceOverride}
+                                  onChange={(e) => updateVariant(v.key, 'priceOverride', e.target.value)}
+                                  disabled={!v.active}
+                                  className="w-24 px-2 py-1 rounded-lg text-xs text-slate-800 bg-slate-50 border border-slate-200 focus:bg-white focus:border-slate-900 outline-none placeholder:text-slate-400"
+                                />
+                              </td>
 
-                            {/* Stock */}
-                            <td className="py-2.5 px-3">
-                              <input
-                                type="text"
-                                inputMode="numeric"
-                                value={String(v.stock ?? 0)}
-                                onChange={(e) => {
-                                  const raw = e.target.value.replace(/[^0-9]/g, '');
-                                  const num = raw === '' ? 0 : parseInt(raw, 10);
-                                  updateVariant(v.key, 'stock', isNaN(num) ? 0 : Math.max(0, num));
-                                }}
-                                disabled={!v.active}
-                                className="w-20 px-2 py-1 rounded-lg text-xs font-semibold text-slate-900 bg-slate-50 border border-slate-200 focus:bg-white focus:border-slate-900 outline-none text-center"
-                              />
-                            </td>
-
-                            {/* Price Override */}
-                            <td className="py-2.5 px-3">
-                              <input
-                                type="number"
-                                placeholder={`₹${numericBasePrice || 699}`}
-                                value={v.priceOverride}
-                                onChange={(e) => updateVariant(v.key, 'priceOverride', e.target.value)}
-                                disabled={!v.active}
-                                className="w-24 px-2 py-1 rounded-lg text-xs text-slate-800 bg-slate-50 border border-slate-200 focus:bg-white focus:border-slate-900 outline-none placeholder:text-slate-400"
-                              />
-                            </td>
-
-                            {/* Status */}
-                            <td className="py-2.5 px-3 text-center">
-                              <button
-                                type="button"
-                                onClick={() => updateVariant(v.key, 'active', !v.active)}
-                                className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border transition cursor-pointer ${
-                                  v.active
-                                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
-                                    : 'bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200'
-                                }`}
-                              >
-                                {v.active ? 'Active' : 'Inactive'}
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                              {/* Status */}
+                              <td className="py-2.5 px-3 text-center">
+                                <button
+                                  type="button"
+                                  onClick={() => updateVariant(v.key, 'active', !v.active)}
+                                  className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border transition cursor-pointer ${
+                                    v.active
+                                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                                      : 'bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200'
+                                  }`}
+                                >
+                                  {v.active ? 'Active' : 'Inactive'}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="p-4 rounded-xl bg-slate-50 border border-dashed border-slate-200 text-center text-xs text-slate-500">
+                  Select a colour variation and available sizes above to generate variant SKUs and stock rows.
+                </div>
+              )}
             </section>
           </div>
 
@@ -2145,9 +2294,6 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
             <section className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-2xs space-y-4">
               <div className="border-b border-slate-100 pb-3">
                 <h2 className="text-base font-bold text-slate-900">Product Photos</h2>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Color / Variety: <span className="font-semibold text-slate-700">{activeColor?.name || 'Default'}</span>
-                </p>
               </div>
 
               {/* Color Switcher if multiple colors exist */}
@@ -2178,10 +2324,10 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                 className="relative aspect-square w-full rounded-2xl bg-slate-50 border-2 border-dashed border-slate-200 hover:border-slate-400 overflow-hidden flex items-center justify-center group cursor-pointer transition"
                 title="Click to upload photos"
               >
-                {activeColor?.primaryImage ? (
+                {currentPrimaryImage ? (
                   <>
                     <img
-                      src={activeColor.primaryImage}
+                      src={currentPrimaryImage}
                       alt={name || 'Product Image'}
                       className="w-full h-full object-cover object-center"
                     />
@@ -2210,15 +2356,18 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
               </div>
 
               {/* Thumbnails Row: [img][img][ + ] */}
-              {(activeColor?.galleryImages?.length || 0) > 0 && (
+              {currentGalleryImages.length > 0 && (
                 <div className="space-y-1.5 pt-1">
                   <div className="flex items-center justify-between text-[11px] text-slate-400">
-                    <span>{activeColor?.galleryImages?.length} {activeColor?.galleryImages?.length === 1 ? 'photo' : 'photos'}</span>
+                    <span>
+                      {currentGalleryImages.length}{' '}
+                      {currentGalleryImages.length === 1 ? 'photo' : 'photos'}
+                    </span>
                     <span className="text-emerald-600 font-medium">Click photo to set as cover</span>
                   </div>
                   <div className="flex items-center gap-2 overflow-x-auto py-1">
-                    {(activeColor?.galleryImages || []).map((imgUrl, thumbIdx) => {
-                      const isMain = activeColor.primaryImage === imgUrl;
+                    {currentGalleryImages.map((imgUrl, thumbIdx) => {
+                      const isMain = currentPrimaryImage === imgUrl;
                       return (
                         <div
                           key={thumbIdx}
@@ -2267,7 +2416,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
               )}
             </section>
 
-            {/* 2. CATEGORY CARD (Matching Reference Screenshot) */}
+            {/* 2. CATEGORY CARD */}
             <section className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-2xs space-y-4">
               <div className="border-b border-slate-100 pb-3 flex items-center justify-between">
                 <div>
@@ -2493,7 +2642,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                 />
               </div>
 
-              {/* Add Category Button (Soft Green pill matching reference screenshot) */}
+              {/* Add Category Button */}
               <button
                 type="button"
                 onClick={() => setShowAddCategoryModal(true)}
@@ -2611,6 +2760,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                       <label className="font-semibold text-slate-700">Dispatch Time</label>
                       <input
                         type="text"
+                        placeholder="e.g. Dispatched within 24–48 hours"
                         value={dispatchTime}
                         onChange={(e) => {
                           setDispatchTime(e.target.value);
@@ -2623,6 +2773,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                       <label className="font-semibold text-slate-700">Return Policy</label>
                       <input
                         type="text"
+                        placeholder="e.g. 7-Day Easy Exchange & Returns"
                         value={returnWindow}
                         onChange={(e) => {
                           setReturnWindow(e.target.value);
@@ -2724,6 +2875,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                         <label className="font-semibold text-slate-700">Material / Fabric</label>
                         <input
                           type="text"
+                          placeholder="e.g. 100% Pure Cotton"
                           value={material}
                           onChange={(e) => {
                             setMaterial(e.target.value);
@@ -2736,6 +2888,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                         <label className="font-semibold text-slate-700">Fit Type</label>
                         <input
                           type="text"
+                          placeholder="e.g. Regular Fit"
                           value={fit}
                           onChange={(e) => {
                             setFit(e.target.value);
@@ -2763,6 +2916,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                         <label className="font-semibold text-slate-700">HSN Code</label>
                         <input
                           type="text"
+                          placeholder="e.g. 6204"
                           value={hsnCode}
                           onChange={(e) => {
                             setHsnCode(e.target.value);

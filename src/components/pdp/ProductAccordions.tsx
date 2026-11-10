@@ -82,6 +82,22 @@ export const ProductAccordions: React.FC<ProductAccordionsProps> = ({
               {displayDescription}
             </p>
 
+            {product.highlights && product.highlights.length > 0 && (
+              <div className="pt-2 border-t border-zinc-100 space-y-1.5">
+                <strong className="block text-zinc-900 font-bold uppercase tracking-wider text-[11px]">
+                  Product Highlights
+                </strong>
+                <ul className="space-y-1 text-xs text-zinc-700">
+                  {product.highlights.map((bullet, idx) => (
+                    <li key={idx} className="flex items-start gap-2">
+                      <span className="text-emerald-600 font-bold leading-5">•</span>
+                      <span>{bullet}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             <div className="p-3 bg-zinc-50 border border-zinc-200 text-xs text-zinc-700 space-y-1 mt-2">
               <strong className="block text-zinc-900 font-bold uppercase tracking-wider text-[11px]">
                 The REDMODE Artisanal Standard
