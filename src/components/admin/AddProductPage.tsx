@@ -862,6 +862,72 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   };
 
   // Highlights / Bullet Points Management
+  const suggestedBulletPoints = useMemo(() => {
+    const coreBullets = [
+      'Premium Quality Fabric',
+      'Comfortable Everyday Wear',
+      'Elegant Floral Design',
+      'Breathable Fabric',
+      'Stylish 3/4 Sleeves',
+      'Perfect for Casual Wear',
+      'Soft & Skin-Friendly',
+      'Colorfast & Fade Resistant',
+      'Ideal for Office & Festive Wear',
+      'Easy Hand & Machine Wash',
+      '100% Pure Cotton Feel',
+      'Flattering Regular Fit',
+    ];
+    const lowerCat = (category || '').toLowerCase();
+    if (lowerCat.includes('shirt') && !lowerCat.includes('t-shirt')) {
+      return [
+        'Premium Quality Fabric',
+        'Comfortable Everyday Wear',
+        'Breathable Fabric',
+        'Crisp Collar & Tailored Fit',
+        'Perfect for Casual & Formal Wear',
+        'Soft & Skin-Friendly',
+        'Easy Iron & Wrinkle Resistant',
+        'Colorfast & Fade Resistant',
+      ];
+    }
+    if (lowerCat.includes('t-shirt') || lowerCat.includes('tshirt')) {
+      return [
+        'Premium Quality Fabric',
+        'Comfortable Everyday Wear',
+        'Breathable Cotton Jersey',
+        'Soft & Skin-Friendly',
+        'Perfect for Casual Wear',
+        'Durable Ribbed Crew Neck',
+        'Colorfast & Pre-Shrunk Fabric',
+        'Relaxed All-Day Fit',
+      ];
+    }
+    if (lowerCat.includes('lower') || lowerCat.includes('trouser') || lowerCat.includes('bottom')) {
+      return [
+        'Premium Quality Fabric',
+        'Comfortable Everyday Wear',
+        'Breathable & Stretchable Fabric',
+        'Elasticated Waistband with Drawstring',
+        'Deep Side Pockets for Convenience',
+        'Perfect for Casual & Active Wear',
+        'Soft & Skin-Friendly',
+        'Easy Hand & Machine Wash',
+      ];
+    }
+    return coreBullets;
+  }, [category]);
+
+  const handleToggleBulletPreset = (bulletText: string) => {
+    setHighlights((prev) => {
+      const exists = prev.some((b) => b.trim().toLowerCase() === bulletText.toLowerCase());
+      if (exists) {
+        return prev.filter((b) => b.trim().toLowerCase() !== bulletText.toLowerCase());
+      }
+      return [...prev, bulletText];
+    });
+    setIsDirty(true);
+  };
+
   const handleAddHighlight = () => {
     if (!newBulletInput.trim()) return;
     setHighlights((prev) => [...prev, newBulletInput.trim()]);
@@ -1453,43 +1519,101 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
               </div>
 
               {/* Bullet Points / Key Highlights (Customer-facing feature bullets) */}
-              <div className="space-y-2 pt-1 border-t border-slate-100">
+              <div className="space-y-3 pt-2 border-t border-slate-100">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-1.5">
-                    <ListChecks className="w-3.5 h-3.5 text-emerald-600" />
-                    <label className="text-xs font-semibold text-slate-700">Product Highlights (Bullet Points)</label>
-                  </div>
-                  <span className="text-[11px] text-slate-400">Shown to customers on product page</span>
-                </div>
-
-                {/* Existing Bullets List */}
-                <div className="space-y-2">
-                  {highlights.map((bullet, idx) => (
-                    <div key={idx} className="flex items-center gap-2 group">
-                      <span className="w-5 h-5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold flex items-center justify-center shrink-0">
-                        {idx + 1}
+                    <ListChecks className="w-4 h-4 text-emerald-600" />
+                    <label className="text-xs font-bold text-slate-800">
+                      Product Highlights (Bullet Points)
+                    </label>
+                    {highlights.length > 0 && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                        {highlights.length} Added
                       </span>
-                      <input
-                        type="text"
-                        value={bullet}
-                        onChange={(e) => handleUpdateHighlight(idx, e.target.value)}
-                        placeholder={`Bullet point #${idx + 1}`}
-                        className="flex-1 px-3 py-1.5 rounded-lg text-xs text-slate-900 bg-slate-50 border border-slate-200 focus:bg-white focus:border-slate-900 outline-none"
-                      />
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-slate-400">Shown to customers on product page</span>
+                    {highlights.length > 0 && (
                       <button
                         type="button"
-                        onClick={() => handleRemoveHighlight(idx)}
-                        className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition cursor-pointer"
-                        title="Remove bullet point"
+                        onClick={() => {
+                          setHighlights([]);
+                          setIsDirty(true);
+                        }}
+                        className="text-[11px] font-semibold text-rose-500 hover:text-rose-600 cursor-pointer"
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        Clear All
                       </button>
-                    </div>
-                  ))}
+                    )}
+                  </div>
                 </div>
 
-                {/* Add New Bullet Field */}
-                <div className="flex items-center gap-2 pt-1">
+                {/* Quick-Select Bullet Point Suggestions */}
+                <div className="p-3 rounded-xl bg-slate-50/90 border border-slate-200/80 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-slate-600">
+                      Click to add/remove quick bullet points:
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {suggestedBulletPoints.map((presetBullet) => {
+                      const isAdded = highlights.some(
+                        (h) => h.trim().toLowerCase() === presetBullet.toLowerCase()
+                      );
+                      return (
+                        <button
+                          key={presetBullet}
+                          type="button"
+                          onClick={() => handleToggleBulletPreset(presetBullet)}
+                          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-medium border transition inline-flex items-center gap-1.5 cursor-pointer ${
+                            isAdded
+                              ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+                              : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-100'
+                          }`}
+                        >
+                          {isAdded ? (
+                            <Check className="w-3 h-3 text-white shrink-0" />
+                          ) : (
+                            <Plus className="w-3 h-3 text-slate-400 shrink-0" />
+                          )}
+                          <span>{presetBullet}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Existing Added Bullets List */}
+                {highlights.length > 0 && (
+                  <div className="space-y-2 pt-0.5">
+                    {highlights.map((bullet, idx) => (
+                      <div key={idx} className="flex items-center gap-2 group">
+                        <span className="w-5 h-5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold flex items-center justify-center shrink-0">
+                          {idx + 1}
+                        </span>
+                        <input
+                          type="text"
+                          value={bullet}
+                          onChange={(e) => handleUpdateHighlight(idx, e.target.value)}
+                          placeholder={`Bullet point #${idx + 1}`}
+                          className="flex-1 px-3 py-1.5 rounded-lg text-xs text-slate-900 bg-slate-50 border border-slate-200 focus:bg-white focus:border-slate-900 outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveHighlight(idx)}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition cursor-pointer"
+                          title="Remove bullet point"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Add New Custom Bullet Field */}
+                <div className="flex items-center gap-2">
                   <input
                     type="text"
                     value={newBulletInput}
@@ -1500,7 +1624,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                         handleAddHighlight();
                       }
                     }}
-                    placeholder="Add a highlight (e.g. Premium Quality Fabric, Comfortable Everyday Wear)..."
+                    placeholder="Type a custom bullet point (e.g. Premium Quality Fabric) and click Add Bullet..."
                     className="flex-1 px-3.5 py-2 rounded-xl text-xs text-slate-900 bg-white border border-slate-200 focus:border-slate-900 outline-none"
                   />
                   <button
