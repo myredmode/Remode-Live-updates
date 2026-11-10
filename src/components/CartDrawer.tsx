@@ -76,7 +76,7 @@ export const CartDrawer: React.FC = () => {
 
   // Recommendations for "BUILD YOUR WARDROBE"
   const wardrobeRecommendations = products
-    .filter((p) => p.id !== lastAddedItem?.product.id && p.published)
+    .filter((p) => p.id !== lastAddedItem?.product.id && p.published !== false)
     .slice(0, 6);
 
   // Determine if we should show the "Added to Bag" notification screen

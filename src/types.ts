@@ -79,6 +79,7 @@ export interface Product {
   returnPolicy: string;
   deliveryInfo: string;
   published: boolean;
+  inStock?: boolean;
   inactiveRowKeys?: string[];
   views: number;
   salesCount: number;

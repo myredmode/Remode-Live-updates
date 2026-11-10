@@ -22,7 +22,7 @@ export const RelatedProducts: React.FC<RelatedProductsProps> = ({ currentProduct
 
   const related = React.useMemo(() => {
     const others = products.filter(
-      (p) => p.published && p.id !== currentProduct.id
+      (p) => p.published !== false && p.id !== currentProduct.id
     );
 
     // Prioritize same category first

@@ -71,6 +71,145 @@ function cleanForFirestore(obj: any): any {
   return obj;
 }
 
+function toIsoTimestamp(val: any): string | undefined {
+  if (!val) return undefined;
+  if (typeof val === 'string') return val;
+  if (typeof val?.toDate === 'function') {
+    try {
+      return val.toDate().toISOString();
+    } catch {}
+  }
+  if (typeof val?.seconds === 'number') {
+    return new Date(val.seconds * 1000).toISOString();
+  }
+  return undefined;
+}
+
+/**
+ * Deduplicates product images before saving to Cloud Firestore so the document
+ * never exceeds Firestore's 1,048,576-byte (1 MB) limit even with multiple base64 photos.
+ */
+function prepareProductForFirestore(product: Product): Record<string, any> {
+  const priorityUrls: string[] = [];
+  const pushUnique = (u?: string) => {
+    if (u && typeof u === 'string' && !u.startsWith('__img_ref:') && !priorityUrls.includes(u)) {
+      priorityUrls.push(u);
+    }
+  };
+
+  // Prioritize mainImage and each color's primary image first
+  pushUnique(product.mainImage);
+  if (Array.isArray(product.colorOptions)) {
+    product.colorOptions.forEach((co) => pushUnique(co?.image));
+  }
+  if (Array.isArray(product.images)) {
+    product.images.forEach((u) => pushUnique(u));
+  }
+  if (Array.isArray(product.colorOptions)) {
+    product.colorOptions.forEach((co) => {
+      if (Array.isArray(co?.images)) {
+        co.images.forEach((u) => pushUnique(u));
+      }
+    });
+  }
+
+  // Cap total base64 image payload at ~720KB so total Firestore document stays safely below 1MB
+  const MAX_IMAGE_CHARS = 720000;
+  const allowedImages: string[] = [];
+  let charBudget = 0;
+
+  for (const url of priorityUrls) {
+    const len = url.length;
+    if (allowedImages.length === 0 || charBudget + len <= MAX_IMAGE_CHARS) {
+      allowedImages.push(url);
+      charBudget += len;
+    }
+  }
+
+  const toRefOrUrl = (url?: string): string => {
+    if (!url || typeof url !== 'string') return '';
+    const idx = allowedImages.indexOf(url);
+    if (idx >= 0) {
+      return url.startsWith('data:image/') ? `__img_ref:${idx}` : url;
+    }
+    return allowedImages[0] ? (allowedImages[0].startsWith('data:image/') ? '__img_ref:0' : allowedImages[0]) : '';
+  };
+
+  const dedupedColorOptions = Array.isArray(product.colorOptions)
+    ? product.colorOptions.map((co) => {
+        const rawImgs = Array.isArray(co.images) && co.images.length > 0 ? co.images : co.image ? [co.image] : [];
+        const mappedImgs = Array.from(
+          new Set(
+            rawImgs
+              .filter((u) => u && (allowedImages.includes(u) || !u.startsWith('data:image/')))
+              .map((u) => toRefOrUrl(u))
+              .filter(Boolean)
+          )
+        );
+        return {
+          ...co,
+          image: toRefOrUrl(co.image || rawImgs[0] || product.mainImage),
+          images: mappedImgs,
+        };
+      })
+    : [];
+
+  return cleanForFirestore({
+    ...product,
+    published: product.published !== false,
+    inStock: product.inStock !== false,
+    mainImage: toRefOrUrl(product.mainImage || allowedImages[0] || ''),
+    images: allowedImages,
+    colorOptions: dedupedColorOptions,
+    createdAt: toIsoTimestamp(product.createdAt) || new Date().toISOString(),
+    updatedAt: toIsoTimestamp(product.updatedAt) || new Date().toISOString(),
+  });
+}
+
+/**
+ * Rehydrates any `__img_ref:N` tokens back to their full image URLs when reading from Firestore.
+ */
+function rehydrateProductFromFirestore(raw: Partial<Product>): Partial<Product> {
+  if (!raw || typeof raw !== 'object') return raw;
+  const imgPool = Array.isArray(raw.images) ? raw.images : [];
+  const resolveRef = (val?: string): string => {
+    if (!val || typeof val !== 'string') return '';
+    if (val.startsWith('__img_ref:')) {
+      const idx = parseInt(val.replace('__img_ref:', ''), 10);
+      if (!isNaN(idx) && imgPool[idx]) return imgPool[idx];
+      return imgPool[0] || '';
+    }
+    return val;
+  };
+
+  const resolvedImages = imgPool.map((u) => resolveRef(u)).filter(Boolean);
+  const resolvedMain = resolveRef(raw.mainImage) || resolvedImages[0] || '';
+  const resolvedColors = Array.isArray(raw.colorOptions)
+    ? raw.colorOptions.map((co) => {
+        const coPrimary = resolveRef(co.image) || resolvedMain;
+        const coGallery = Array.isArray(co.images)
+          ? co.images.map((u) => resolveRef(u)).filter(Boolean)
+          : coPrimary
+          ? [coPrimary]
+          : [];
+        return {
+          ...co,
+          image: coPrimary,
+          images: coGallery.length > 0 ? coGallery : coPrimary ? [coPrimary] : [],
+        };
+      })
+    : raw.colorOptions;
+
+  return {
+    ...raw,
+    mainImage: resolvedMain,
+    images: resolvedImages.length > 0 ? resolvedImages : resolvedMain ? [resolvedMain] : [],
+    colorOptions: resolvedColors,
+    createdAt: toIsoTimestamp(raw.createdAt) || raw.createdAt,
+    updatedAt: toIsoTimestamp(raw.updatedAt) || raw.updatedAt,
+  };
+}
+
 export type ActiveView =
   | 'home'
   | 'catalogue'
@@ -1089,7 +1228,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const normalizeProductsWithInitial = (rawList: Partial<Product>[], blacklist: string[] = []): Product[] => {
     if (!Array.isArray(rawList)) return [];
 
-    const activeList = rawList.filter((p) => p && p.id && !blacklist.includes(p.id));
+    const activeList = rawList
+      .filter((p) => p && p.id && !blacklist.includes(p.id))
+      .map((p) => rehydrateProductFromFirestore(p));
 
     return activeList.map((p: Partial<Product>) => {
       const initialMatch = INITIAL_PRODUCTS.find((ip) => ip.id === p.id);
@@ -1104,6 +1245,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return {
         ...initialMatch,
         ...p,
+        published: p.published !== false,
+        inStock: p.inStock !== false,
         mainImage: userMainImage,
         images: userImages,
         sizes:
@@ -1520,6 +1663,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } catch {}
     const activeBlacklist = Array.from(new Set([...deletedIds.deletedProductIds, ...localDeleted]));
 
+    const getProductTimeMs = (p: Partial<Product>): number => {
+      const iso = toIsoTimestamp(p.updatedAt) || toIsoTimestamp(p.createdAt);
+      if (!iso) return 0;
+      const ms = new Date(iso).getTime();
+      return isNaN(ms) ? 0 : ms;
+    };
+
     const mergeProductLists = (
       currentList: Product[],
       incomingList: Product[],
@@ -1527,31 +1677,36 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     ): Product[] => {
       const map = new Map<string, Product>();
       for (const item of currentList) {
-        if (item && item.id && !blacklist.includes(item.id)) {
+        if (item && item.id && item.name && !blacklist.includes(item.id)) {
           map.set(item.id, item);
         }
       }
       for (const incoming of incomingList) {
-        if (!incoming || !incoming.id || blacklist.includes(incoming.id)) continue;
+        if (!incoming || !incoming.id || !incoming.name || blacklist.includes(incoming.id)) continue;
         const existing = map.get(incoming.id);
         if (!existing) {
           map.set(incoming.id, incoming);
         } else {
-          const existingTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
-          const incomingTime = new Date(incoming.updatedAt || incoming.createdAt || 0).getTime();
+          const existingTime = getProductTimeMs(existing);
+          const incomingTime = getProductTimeMs(incoming);
           if (incomingTime >= existingTime) {
             map.set(incoming.id, incoming);
           }
         }
       }
-      return Array.from(map.values());
+      return Array.from(map.values()).sort((a, b) => {
+        const bTime = getProductTimeMs(b);
+        const aTime = getProductTimeMs(a);
+        if (bTime !== aTime) return bTime - aTime;
+        return 0;
+      });
     };
 
     // Fast local initial load from IndexedDB
     idbGet<Product[]>('redmode_products_v2')
       .then((idbProducts) => {
         if (idbProducts && Array.isArray(idbProducts) && !isCancelled) {
-          const filtered = idbProducts.filter((p) => !activeBlacklist.includes(p.id));
+          const filtered = idbProducts.filter((p) => p && p.id && p.name && !activeBlacklist.includes(p.id));
           const normalized = normalizeProductsWithInitial(filtered, activeBlacklist);
           setProducts((prev) => mergeProductLists(prev, normalized, activeBlacklist));
         }
@@ -1596,27 +1751,50 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             const fullBlacklist = Array.from(new Set([...deletedIds.deletedProductIds, ...currentLocalDeleted]));
 
             const fsProducts: Product[] = [];
+            const fsIds = new Set<string>();
             snap.forEach((d) => {
               const data = d.data();
-              if (data && data.id) {
-                if (!fullBlacklist.includes(data.id)) {
-                  fsProducts.push(data as Product);
+              const docId = data?.id || d.id;
+              // Ignore incomplete stub documents that lack a valid product name
+              if (data && docId && typeof data.name === 'string' && data.name.trim().length > 0) {
+                fsIds.add(docId);
+                if (!fullBlacklist.includes(docId)) {
+                  fsProducts.push({ ...(data as Product), id: docId });
                 }
               }
             });
 
-            // Merge Firestore products with local products so newly added products never disappear
-            if (!snap.empty) {
-              const normalized = normalizeProductsWithInitial(fsProducts, fullBlacklist);
-              setProducts((prev) => {
-                const merged = mergeProductLists(prev, normalized, fullBlacklist);
-                idbSet('redmode_products_v2', merged).catch(() => {});
-                try {
-                  localStorage.setItem('redmode_products', JSON.stringify(merged));
-                } catch {}
-                return merged;
+            const normalized = normalizeProductsWithInitial(fsProducts, fullBlacklist);
+            setProducts((prev) => {
+              const merged = mergeProductLists(prev, normalized, fullBlacklist);
+              idbSet('redmode_products_v2', merged).catch(() => {});
+              try {
+                localStorage.setItem('redmode_products', JSON.stringify(merged));
+              } catch {}
+
+              // Auto-sync any custom local product that failed to reach Firestore earlier
+              const initialIdSet = new Set(INITIAL_PRODUCTS.map((ip) => ip.id));
+              merged.forEach((localProd) => {
+                if (
+                  localProd &&
+                  localProd.id &&
+                  localProd.name &&
+                  !fullBlacklist.includes(localProd.id) &&
+                  !initialIdSet.has(localProd.id) &&
+                  !fsIds.has(localProd.id)
+                ) {
+                  setDoc(
+                    doc(db, 'products', localProd.id),
+                    prepareProductForFirestore(localProd),
+                    { merge: true }
+                  ).catch((syncErr) => {
+                    console.warn('Auto-sync local product to Firestore warning:', syncErr);
+                  });
+                }
               });
-            }
+
+              return merged;
+            });
           }
         },
         (fsErr) => {
@@ -2534,7 +2712,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const nowIso = new Date().toISOString();
     const newProduct: Product = {
       ...productData,
-      id: `prod-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      id: (productData as any).id || `prod-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      published: (productData as any).published !== false,
+      inStock: (productData as any).inStock !== false,
       views: 0,
       salesCount: 0,
       createdAt: nowIso,
@@ -2553,48 +2733,33 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return next;
     });
 
-    // 2. Persist to backend API (/api/products converts base64 images to permanent /uploads/... URLs)
-    // and then sync the lightweight record to Cloud Firestore
+    // 2. Immediately sync the deduplicated, self-contained product record to Cloud Firestore
+    // so it goes live across all devices in real time without waiting on local server calls
+    try {
+      const firestorePayload = prepareProductForFirestore(newProduct);
+      setDoc(doc(db, 'products', newProduct.id), firestorePayload, {
+        merge: true,
+      }).catch((err) => {
+        console.error('Firestore product create sync error:', err);
+      });
+      setDoc(
+        doc(db, 'settings', 'system_deletions'),
+        {
+          deletedProductIds: arrayRemove(newProduct.id),
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      ).catch(() => {});
+    } catch (err) {
+      console.error('Failed preparing product for Firestore:', err);
+    }
+
+    // 3. Also persist to optional backend API (/api/products) if running
     fetch('/api/products', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(newProduct),
-    })
-      .then((r) => r.json())
-      .then((res) => {
-        const persistedProduct: Product = res?.success && res.product ? res.product : newProduct;
-        if (res?.success && res.product) {
-          setProducts((prev) => {
-            const next = prev.map((p) => (p.id === newProduct.id ? persistedProduct : p));
-            idbSet('redmode_products_v2', next).catch(() => {});
-            try {
-              localStorage.setItem('redmode_products', JSON.stringify(next));
-            } catch {}
-            return next;
-          });
-        }
-        try {
-          setDoc(doc(db, 'products', persistedProduct.id), cleanForFirestore(persistedProduct), {
-            merge: true,
-          }).catch((err) => {
-            console.debug('Firestore product create sync skipped/offline:', err);
-          });
-          setDoc(
-            doc(db, 'settings', 'system_deletions'),
-            {
-              deletedProductIds: arrayRemove(persistedProduct.id),
-              updatedAt: new Date().toISOString(),
-            },
-            { merge: true }
-          ).catch(() => {});
-        } catch {}
-      })
-      .catch(() => {
-        // Fallback direct Firestore sync if backend call fails
-        try {
-          setDoc(doc(db, 'products', newProduct.id), cleanForFirestore(newProduct), { merge: true }).catch(() => {});
-        } catch {}
-      });
+    }).catch(() => {});
 
     logAdminActivity({
       adminId: currentAdminUser.id,
@@ -2613,6 +2778,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       ...(targetProduct || {}),
       ...updatedFields,
       id,
+      published: updatedFields.published !== undefined ? updatedFields.published : (targetProduct?.published !== false),
+      inStock: updatedFields.inStock !== undefined ? updatedFields.inStock : (targetProduct?.inStock !== false),
       updatedAt: nowIso,
     } as Product;
 
@@ -2628,36 +2795,22 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return next;
     });
 
-    // Persist to backend API (/api/products) and sync to Cloud Firestore
+    // Immediately sync the deduplicated product to Cloud Firestore across all devices
+    try {
+      const firestorePayload = prepareProductForFirestore(updatedProd);
+      setDoc(doc(db, 'products', id), firestorePayload, { merge: true }).catch((err) => {
+        console.error('Firestore product update sync error:', err);
+      });
+    } catch (err) {
+      console.error('Failed preparing updated product for Firestore:', err);
+    }
+
+    // Also persist to optional backend API (/api/products) if running
     fetch(`/api/products/${encodeURIComponent(id)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updatedProd),
-    })
-      .then((r) => r.json())
-      .then((res) => {
-        const persistedProduct: Product = res?.success && res.product ? res.product : updatedProd;
-        if (res?.success && res.product) {
-          setProducts((prev) => {
-            const next = prev.map((p) => (p.id === id ? persistedProduct : p));
-            idbSet('redmode_products_v2', next).catch(() => {});
-            try {
-              localStorage.setItem('redmode_products', JSON.stringify(next));
-            } catch {}
-            return next;
-          });
-        }
-        try {
-          setDoc(doc(db, 'products', id), cleanForFirestore(persistedProduct), { merge: true }).catch((err) => {
-            console.debug('Firestore product update sync skipped/offline:', err);
-          });
-        } catch {}
-      })
-      .catch(() => {
-        try {
-          setDoc(doc(db, 'products', id), cleanForFirestore(updatedProd), { merge: true }).catch(() => {});
-        } catch {}
-      });
+    }).catch(() => {});
 
     if (targetProduct) {
       logAdminActivity({

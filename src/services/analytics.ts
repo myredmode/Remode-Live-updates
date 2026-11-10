@@ -3,6 +3,7 @@ import {
   collection,
   doc,
   setDoc,
+  updateDoc,
   getDoc,
   getDocs,
   query,
@@ -434,17 +435,12 @@ export class AnalyticsService {
           { merge: true }
         );
 
-        // Also increment `views` on the product catalog document
+        // Also increment `views` on the product catalog document if it already exists
         const catalogProdRef = doc(db, 'products', event.productId);
-        await setDoc(
-          catalogProdRef,
-          {
-            views: increment(1),
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true }
-        ).catch(() => {
-          // Ignore if product doc uses custom schema
+        await updateDoc(catalogProdRef, {
+          views: increment(1),
+        }).catch(() => {
+          // Ignore if product doc does not exist yet
         });
       }
     } catch (err: any) {

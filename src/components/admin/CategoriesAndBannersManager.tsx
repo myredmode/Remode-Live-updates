@@ -1219,7 +1219,7 @@ export const CategoriesAndBannersManager: React.FC<CategoriesAndBannersManagerPr
             ) : (
               menuHighlights.map((item, idx) => {
                 const matchingProductsCount = products.filter((p) => {
-                  if (!p.published) return false;
+                  if (p.published === false) return false;
                   if (item.targetType === 'category' && item.targetValue) {
                     return p.category.toLowerCase().includes(item.targetValue.toLowerCase());
                   }

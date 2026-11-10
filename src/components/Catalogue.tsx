@@ -125,7 +125,7 @@ export const Catalogue: React.FC = () => {
   // Filter products
   const filteredProducts = useMemo(() => {
     return products
-      .filter((p) => p.published)
+      .filter((p) => p.published !== false)
       .filter((p) => {
         // Category filter
         if (selectedCategorySlug) {
@@ -233,13 +233,6 @@ export const Catalogue: React.FC = () => {
           }
 
           if (!matches) return false;
-        } else if (!searchQuery.trim()) {
-          // When in default shop view without search, show all Kurtis
-          const isKurti =
-            p.category.toLowerCase().includes('kurti') ||
-            p.name.toLowerCase().includes('kurti') ||
-            p.subcategory.toLowerCase().includes('kurti');
-          if (!isKurti) return false;
         }
 
         // Subcategory filter
@@ -251,6 +244,8 @@ export const Catalogue: React.FC = () => {
           const pName = (p.name || '').toLowerCase();
 
           let matchSub =
+            !pSub ||
+            pSub === pCat ||
             pSub === sSlug ||
             pSub.includes(sSlug) ||
             sSlug.includes(pSub) ||
@@ -338,6 +333,10 @@ export const Catalogue: React.FC = () => {
         if (priceSort === 'low-high') return a.price - b.price;
         if (priceSort === 'high-low') return b.price - a.price;
         if (priceSort === 'bestsellers') return (b.salesCount || 0) - (a.salesCount || 0);
+        // Default: Sort newest listings first
+        const bTime = new Date(b.createdAt || 0).getTime() || 0;
+        const aTime = new Date(a.createdAt || 0).getTime() || 0;
+        if (bTime !== aTime) return bTime - aTime;
         return 0; // featured default
       });
   }, [
@@ -358,7 +357,7 @@ export const Catalogue: React.FC = () => {
   // Curated recommendations for editorial discovery (Section 10)
   const curatedRecommendations = useMemo(() => {
     return products
-      .filter((p) => p.published)
+      .filter((p) => p.published !== false)
       .slice(0, 4);
   }, [products]);
 
@@ -382,7 +381,7 @@ export const Catalogue: React.FC = () => {
 
     // 1. Try to find a real product image from current inventory matching this subcategory
     const prod = products.find((p) => {
-      if (!p.published) return false;
+      if (p.published === false) return false;
       const pSub = (p.subcategory || '').toLowerCase().replace(/\s+/g, '-');
       const pCat = (p.category || '').toLowerCase().replace(/\s+/g, '-');
       const pName = (p.name || '').toLowerCase();
@@ -880,7 +879,7 @@ export const Catalogue: React.FC = () => {
                   >
                     <span>All Silhouettes</span>
                     <span className="text-zinc-400">
-                      {products.filter((p) => p.published).length}
+                      {products.filter((p) => p.published !== false).length}
                     </span>
                   </button>
 

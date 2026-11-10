@@ -186,7 +186,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, asPag
     if (!query) return [];
 
     return products.filter((p) => {
-      if (!p.published) return false;
+      if (p.published === false) return false;
       const matchText = `${p.name} ${p.category} ${p.subcategory} ${p.description || ''} ${p.material || ''}`.toLowerCase();
       const matchesQuery = matchText.includes(query);
 
@@ -211,7 +211,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, asPag
 
       // Matched products in database
       const matchedProducts = products.filter((p) => {
-        if (!p.published) return false;
+        if (p.published === false) return false;
         const pCat = p.category.toLowerCase();
         if (slug === 'kurti') return pCat.includes('kurti') && !pCat.includes('set');
         if (slug === 'trouser') return pCat.includes('trouser') || pCat.includes('bottom');
