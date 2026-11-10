@@ -3187,7 +3187,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
         onSave={handleSaveColor}
         initialColor={editingColor}
         existingColors={colors}
-        sampleImageFallback={activeColor?.primaryImage || SAMPLE_CLOTHING_PRESETS[0].url}
+        sampleImageFallback={activeColor?.primaryImage || ''}
       />
 
       {/* ========================================================= */}

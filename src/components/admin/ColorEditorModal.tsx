@@ -1,18 +1,22 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  Sparkles,
   Palette,
   Check,
   Copy,
   Plus,
   Trash2,
   X,
-  RotateCcw,
   Upload,
   Image as ImageIcon,
   Pipette,
   AlertCircle,
-  Eye,
+  ChevronDown,
+  ChevronUp,
+  ChevronLeft,
+  ChevronRight,
+  Loader2,
+  Link as LinkIcon,
+  Star,
 } from 'lucide-react';
 import {
   BASE_COLORS,
@@ -48,120 +52,176 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
   onSave,
   initialColor,
   existingColors,
-  sampleImageFallback = 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=1200&q=85',
 }) => {
-  if (!isOpen) return null;
-
   const isEditing = Boolean(initialColor);
 
   // 1. Base color state
-  const [baseColorName, setBaseColorName] = useState<string>(
-    initialColor?.baseColor || 'Green'
-  );
+  const [baseColorName, setBaseColorName] = useState<string>('Green');
 
   // 2. Customer-facing premium name
-  const [customerName, setCustomerName] = useState<string>(
-    initialColor?.name || ''
-  );
+  const [customerName, setCustomerName] = useState<string>('');
 
-  // 3. HEX Color (empty by default if new, never forced to #000000)
-  const [hexValue, setHexValue] = useState<string>(
-    initialColor?.hex || ''
-  );
+  // 3. HEX Color
+  const [hexValue, setHexValue] = useState<string>('#82976F');
+  const [hasManualHex, setHasManualHex] = useState<boolean>(false);
 
   // 4. Internal SKU Code
-  const [colorCode, setColorCode] = useState<string>(
-    initialColor?.code || ''
-  );
+  const [colorCode, setColorCode] = useState<string>('');
+  const [hasManualCode, setHasManualCode] = useState<boolean>(false);
 
   // 5. Images
-  const [primaryImage, setPrimaryImage] = useState<string>(
-    initialColor?.primaryImage || sampleImageFallback
-  );
-  const [galleryImages, setGalleryImages] = useState<string[]>(
-    initialColor?.galleryImages && initialColor.galleryImages.length > 0
-      ? initialColor.galleryImages
-      : [initialColor?.primaryImage || sampleImageFallback]
-  );
+  const [primaryImage, setPrimaryImage] = useState<string>('');
+  const [galleryImages, setGalleryImages] = useState<string[]>([]);
   const [newImageUrl, setNewImageUrl] = useState('');
   const [showAddUrlInput, setShowAddUrlInput] = useState(false);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Suggestion rotation offset
-  const [suggestionOffset, setSuggestionOffset] = useState<number>(0);
+  // UI state for compact layout
+  const [showAllPresets, setShowAllPresets] = useState(false);
+  const [showSuggestionsDropdown, setShowSuggestionsDropdown] = useState(false);
+  const [showAdvancedDetails, setShowAdvancedDetails] = useState(false);
   const [isExtractingColor, setIsExtractingColor] = useState(false);
   const [copiedHex, setCopiedHex] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
-  // Get current base color metadata
+  const suggestionsRef = useRef<HTMLDivElement | null>(null);
+
+  // Reset / populate state whenever modal opens or initialColor changes
+  useEffect(() => {
+    if (!isOpen) return;
+
+    if (initialColor) {
+      const initBase = initialColor.baseColor || 'Green';
+      const validInitGallery = (initialColor.galleryImages || []).filter(Boolean);
+      const initPrimary = initialColor.primaryImage || validInitGallery[0] || '';
+      const mergedGallery =
+        validInitGallery.length > 0
+          ? validInitGallery
+          : initPrimary
+          ? [initPrimary]
+          : [];
+
+      setBaseColorName(initBase);
+      setCustomerName(initialColor.name || '');
+      setHexValue(initialColor.hex || '#82976F');
+      setHasManualHex(Boolean(initialColor.hex));
+      setColorCode(initialColor.code || getAutoColorCode(initialColor.name || ''));
+      setHasManualCode(Boolean(initialColor.code));
+      setPrimaryImage(initPrimary);
+      setGalleryImages(mergedGallery);
+      setShowAdvancedDetails(false);
+    } else {
+      const defaultBase = BASE_COLORS[0];
+      setBaseColorName(defaultBase.name);
+      setCustomerName('');
+      setHexValue(defaultBase.suggestions[0]?.hex || defaultBase.sampleHex);
+      setHasManualHex(false);
+      setColorCode('');
+      setHasManualCode(false);
+      setPrimaryImage('');
+      setGalleryImages([]);
+      setShowAdvancedDetails(false);
+    }
+
+    setNewImageUrl('');
+    setShowAddUrlInput(false);
+    setShowSuggestionsDropdown(false);
+    setShowAllPresets(false);
+    setValidationError(null);
+    setBrokenImages({});
+  }, [isOpen, initialColor]);
+
+  // Close suggestions dropdown on outside click
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (
+        suggestionsRef.current &&
+        !suggestionsRef.current.contains(e.target as Node)
+      ) {
+        setShowSuggestionsDropdown(false);
+      }
+    };
+    if (showSuggestionsDropdown) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showSuggestionsDropdown]);
+
+  if (!isOpen) return null;
+
+  // Current base color metadata
   const currentBaseMeta =
     BASE_COLORS.find(
       (b) => b.name.toLowerCase() === baseColorName.toLowerCase()
     ) || BASE_COLORS[0];
 
-  // Active suggestions with pagination / generate more
   const availableSuggestions = currentBaseMeta.suggestions;
-  const pageSize = 4;
-  const displayedSuggestions = availableSuggestions.slice(
-    (suggestionOffset % Math.max(1, availableSuggestions.length)),
-    (suggestionOffset % Math.max(1, availableSuggestions.length)) + pageSize
-  );
 
-  // If sliced list is short at end of array, wrap around
-  const wrappedSuggestions =
-    displayedSuggestions.length < pageSize
-      ? [
-          ...displayedSuggestions,
-          ...availableSuggestions.slice(0, pageSize - displayedSuggestions.length),
-        ]
-      : displayedSuggestions;
+  // Filter suggestions when user types, or show all for selected base color
+  const filteredSuggestions = customerName.trim()
+    ? availableSuggestions.filter((s) =>
+        s.name.toLowerCase().includes(customerName.trim().toLowerCase())
+      )
+    : availableSuggestions;
+
+  const suggestionsToDisplay =
+    filteredSuggestions.length > 0 ? filteredSuggestions : availableSuggestions;
+
+  // Compact palette presets (top 10 by default, expandable to all 20)
+  const visiblePresets = showAllPresets
+    ? QUICK_FANCY_PRESETS
+    : QUICK_FANCY_PRESETS.slice(0, 10);
 
   // Change base color
   const handleSelectBaseColor = (baseName: string) => {
     setBaseColorName(baseName);
-    setSuggestionOffset(0);
     setValidationError(null);
 
     const baseMeta = BASE_COLORS.find(
       (b) => b.name.toLowerCase() === baseName.toLowerCase()
     );
-    if (baseMeta && baseMeta.suggestions.length > 0) {
-      const topSuggestion = baseMeta.suggestions[0];
-      // Only set if not already set or admin hasn't customized
-      if (!customerName || !isEditing) {
-        setCustomerName(topSuggestion.name);
-        if (!hexValue) {
-          setHexValue(topSuggestion.hex);
-        }
-        setColorCode(topSuggestion.code);
+    if (baseMeta) {
+      if (!hasManualHex) {
+        setHexValue(baseMeta.suggestions[0]?.hex || baseMeta.sampleHex);
       }
     }
   };
 
-  // Pick a suggestion
-  const handleSelectSuggestion = (sug: { name: string; hex: string; code: string }) => {
+  // Pick a suggestion for Customer-Facing Premium Name
+  const handleSelectSuggestion = (sug: {
+    name: string;
+    hex: string;
+    code: string;
+  }) => {
     setCustomerName(sug.name);
-    // Suggest hex only if not already manually chosen or if empty
-    if (!hexValue) {
+    if (!hasManualHex) {
       setHexValue(sug.hex);
     }
-    setColorCode(sug.code);
+    if (!hasManualCode) {
+      setColorCode(sug.code);
+    }
+    setShowSuggestionsDropdown(false);
     setValidationError(null);
   };
 
-  // Generate more suggestions
-  const handleGenerateMore = () => {
-    setSuggestionOffset((prev) => prev + pageSize);
-  };
-
-  // Pick one-click quick preset
-  const handleApplyPreset = (preset: { name: string; hex: string; code: string }) => {
+  // Pick a quick color preset from Section A
+  const handleApplyPreset = (preset: {
+    name: string;
+    hex: string;
+    code: string;
+  }) => {
     setCustomerName(preset.name);
     setHexValue(preset.hex);
+    setHasManualHex(false);
     setColorCode(preset.code);
-    // Find matching base color
+    setHasManualCode(false);
+
     const matchedBase = BASE_COLORS.find((b) =>
-      b.suggestions.some((s) => s.name.toLowerCase() === preset.name.toLowerCase())
+      b.suggestions.some(
+        (s) => s.name.toLowerCase() === preset.name.toLowerCase()
+      )
     );
     if (matchedBase) {
       setBaseColorName(matchedBase.name);
@@ -169,10 +229,11 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
     setValidationError(null);
   };
 
-  // Color picker change
+  // Visual color picker change
   const handlePickerChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value.toUpperCase();
     setHexValue(val);
+    setHasManualHex(true);
     setValidationError(null);
   };
 
@@ -183,16 +244,29 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
       val = `#${val}`;
     }
     setHexValue(val.toUpperCase());
+    setHasManualHex(true);
     setValidationError(null);
   };
 
-  // Auto-calculate code when typing customer name if not manually modified
+  // Customer-Facing Premium Name input change
   const handleCustomerNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setCustomerName(val);
     setValidationError(null);
-    if (!colorCode || colorCode.length <= 2) {
-      setColorCode(getAutoColorCode(val));
+    setShowSuggestionsDropdown(true);
+
+    if (!hasManualCode) {
+      setColorCode(val.trim() ? getAutoColorCode(val) : '');
+    }
+
+    // If user typed a known suggestion name, sync hex unless manually overridden
+    if (!hasManualHex && val.trim()) {
+      const exactMatch = availableSuggestions.find(
+        (s) => s.name.toLowerCase() === val.trim().toLowerCase()
+      );
+      if (exactMatch) {
+        setHexValue(exactMatch.hex);
+      }
     }
   };
 
@@ -204,60 +278,81 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
     setTimeout(() => setCopiedHex(false), 2000);
   };
 
-  // Pick Color From Product Image (Requirement 14)
+  // Pick Color From Product Image
   const handleExtractFromImage = async () => {
-    if (!primaryImage) {
-      setValidationError('Please upload or set a primary image first.');
+    const targetImg = primaryImage || galleryImages[0];
+    if (!targetImg) {
+      setValidationError('Please upload or add a product image first to sample its color.');
       return;
     }
     setIsExtractingColor(true);
     setValidationError(null);
 
     try {
-      const result = await extractDominantColorFromImage(primaryImage);
+      const result = await extractDominantColorFromImage(targetImg);
       setHexValue(result.hex);
+      setHasManualHex(true);
       setBaseColorName(result.baseColorName);
       if (result.suggestedNames.length > 0 && (!customerName || !isEditing)) {
         setCustomerName(result.suggestedNames[0]);
-        setColorCode(getAutoColorCode(result.suggestedNames[0]));
+        if (!hasManualCode) {
+          setColorCode(getAutoColorCode(result.suggestedNames[0]));
+        }
       }
-    } catch (err: any) {
+    } catch (err) {
       console.warn('Could not extract color automatically:', err);
       setValidationError(
-        'Could not sample directly from external image (CORS or format). You can use the visual color picker below.'
+        'Could not sample from external image (CORS). Use the visual color swatch picker instead.'
       );
     } finally {
       setIsExtractingColor(false);
     }
   };
 
-  // Image Upload handler (Compressed & server-persisted)
-  const handleImageFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // Image File Upload (supports single or multiple files)
+  const handleImageFileUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    setIsUploadingImage(true);
+    setValidationError(null);
 
     try {
-      const persistedUrl = await uploadImageFile(file);
-      if (persistedUrl) {
-        setPrimaryImage(persistedUrl);
+      const uploadedUrls: string[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const persistedUrl = await uploadImageFile(files[i]);
+        if (persistedUrl) {
+          uploadedUrls.push(persistedUrl);
+        }
+      }
+
+      if (uploadedUrls.length > 0) {
         setGalleryImages((prev) => {
-          if (!prev.includes(persistedUrl)) {
-            return [persistedUrl, ...prev];
-          }
-          return prev;
+          const next = [...prev];
+          uploadedUrls.forEach((url) => {
+            if (!next.includes(url)) {
+              next.push(url);
+            }
+          });
+          return next;
         });
+        setPrimaryImage((prevPrimary) => prevPrimary || uploadedUrls[0]);
       }
     } catch (err) {
       console.error('Failed to upload image:', err);
+      setValidationError('Failed to upload image. Please try again.');
     } finally {
+      setIsUploadingImage(false);
       e.target.value = '';
     }
   };
 
   // Add custom image URL
   const handleAddCustomImageUrl = () => {
-    if (!newImageUrl.trim()) return;
     const clean = newImageUrl.trim();
+    if (!clean) return;
     if (!primaryImage) {
       setPrimaryImage(clean);
     }
@@ -273,33 +368,41 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
     const remaining = galleryImages.filter((i) => i !== img);
     setGalleryImages(remaining);
     if (primaryImage === img) {
-      setPrimaryImage(remaining[0] || sampleImageFallback);
+      setPrimaryImage(remaining[0] || '');
     }
   };
 
-  // Final validation and submission
+  // Reorder image in gallery (left/right)
+  const handleMoveImage = (index: number, direction: -1 | 1) => {
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= galleryImages.length) return;
+    const updated = [...galleryImages];
+    const [moved] = updated.splice(index, 1);
+    updated.splice(targetIndex, 0, moved);
+    setGalleryImages(updated);
+  };
+
+  // Submit handler
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
-    // 1. Missing customer name validation
+    // 1. Validate customer-facing color name
     if (!customerName.trim()) {
       setValidationError('Please enter or select a customer-facing color name.');
       return;
     }
 
-    // 2. Missing HEX validation - NEVER ALLOW EMPTY OR SAVE AS BLACK SILENTLY
-    if (!hexValue.trim()) {
-      setValidationError('Please select a color using the visual color picker.');
+    // 2. Fallback HEX to current base color sampleHex if left empty
+    const resolvedHex = hexValue.trim() || currentBaseMeta.sampleHex || '#82976F';
+
+    // 3. Validate HEX format
+    if (!isValidHex(resolvedHex)) {
+      setShowAdvancedDetails(true);
+      setValidationError('Please enter a valid HEX color code (e.g. #82976F).');
       return;
     }
 
-    // 3. HEX format validation
-    if (!isValidHex(hexValue)) {
-      setValidationError('Enter a valid HEX color code (e.g. #82976F).');
-      return;
-    }
-
-    // 4. Duplicate name check for this product
+    // 4. Duplicate color name check for this product
     const isDuplicate = existingColors.some(
       (c) =>
         (!initialColor || c.id !== initialColor.id) &&
@@ -307,22 +410,34 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
     );
     if (isDuplicate) {
       setValidationError(
-        `This color "${customerName}" already exists for this product.`
+        `The color "${customerName.trim()}" already exists for this product.`
       );
       return;
     }
 
-    // Internal code fallback
-    const finalCode = (colorCode.trim() || getAutoColorCode(customerName)).toUpperCase();
+    const finalCode = (
+      colorCode.trim() || getAutoColorCode(customerName)
+    ).toUpperCase();
+
+    const validGallery = galleryImages.filter((img) => img && !brokenImages[img]);
+    const finalPrimary =
+      primaryImage && !brokenImages[primaryImage]
+        ? primaryImage
+        : validGallery[0] || '';
 
     const colorDef: ColorDef = {
       id: initialColor?.id || `col-${Date.now()}`,
       name: customerName.trim(),
       baseColor: baseColorName,
-      hex: hexValue.toUpperCase(),
+      hex: resolvedHex.toUpperCase(),
       code: finalCode,
-      primaryImage: primaryImage || sampleImageFallback,
-      galleryImages: galleryImages.length > 0 ? galleryImages : [primaryImage || sampleImageFallback],
+      primaryImage: finalPrimary,
+      galleryImages:
+        validGallery.length > 0
+          ? validGallery
+          : finalPrimary
+          ? [finalPrimary]
+          : [],
     };
 
     onSave(colorDef);
@@ -330,458 +445,578 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
   };
 
   const isHexValid = isValidHex(hexValue);
+  const displayHex = isHexValid ? hexValue : currentBaseMeta.sampleHex;
+  const effectiveCode = (
+    colorCode.trim() ||
+    (customerName.trim() ? getAutoColorCode(customerName) : 'CL')
+  ).toUpperCase();
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-[2px] p-3 sm:p-4">
       <div
-        className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-2xl max-h-[92vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150"
+        className="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-xl max-h-[88vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150"
         role="dialog"
         aria-modal="true"
+        aria-labelledby="color-modal-title"
       >
-        {/* Modal Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50/70">
+        {/* Sticky Header */}
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 bg-white shrink-0">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-slate-900 text-white flex items-center justify-center shadow-2xs">
-              <Palette className="w-4 h-4" />
-            </div>
-            <div>
-              <h3 className="text-sm font-bold text-slate-900">
-                {isEditing ? 'Edit Color Variation' : 'Add Color Variation'}
-              </h3>
-              <p className="text-[11px] text-slate-500">
-                Select a simple base color; RedMode suggests customer names, swatch & SKU code.
-              </p>
-            </div>
+            <span
+              className="w-4 h-4 rounded-full border border-black/15 shrink-0 transition-colors"
+              style={{ backgroundColor: displayHex }}
+            />
+            <h3
+              id="color-modal-title"
+              className="text-sm font-semibold text-slate-900 tracking-tight"
+            >
+              {isEditing ? 'Edit Color Variation' : 'Add Color Variation'}
+            </h3>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded-lg transition cursor-pointer"
+            className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+            aria-label="Close modal"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Modal Body - Scrollable */}
-        <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-6">
+        {/* Scrollable Content */}
+        <form
+          id="color-variation-form"
+          onSubmit={handleSubmit}
+          className="flex-1 overflow-y-auto px-5 py-4 space-y-5 divide-y divide-slate-100"
+        >
           {/* Validation Alert */}
           {validationError && (
-            <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-2 text-xs text-rose-700">
-              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg flex items-center gap-2 text-xs text-rose-700">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
               <span>{validationError}</span>
             </div>
           )}
 
-          {/* Quick Presets Strip */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                Popular Quick Fancy Presets
-              </label>
-              <span className="text-[10px] text-slate-400">1-click populate</span>
-            </div>
-            <div className="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto p-2 bg-slate-50 rounded-xl border border-slate-200/80">
-              {QUICK_FANCY_PRESETS.map((p) => {
-                const isSelected =
-                  customerName.toLowerCase() === p.name.toLowerCase();
-                return (
-                  <button
-                    key={p.name}
-                    type="button"
-                    onClick={() => handleApplyPreset(p)}
-                    className={`px-2 py-1 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition cursor-pointer ${
-                      isSelected
-                        ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
-                        : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
-                    }`}
-                  >
-                    <span
-                      className="w-2.5 h-2.5 rounded-full border border-black/20 shrink-0"
-                      style={{ backgroundColor: p.hex }}
-                    />
-                    <span>{p.name}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Step 1: Base Color & Customer-Facing Name */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-4 rounded-xl bg-slate-50/70 border border-slate-200">
-            {/* Base Color Dropdown / Selection */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Base / Actual Color <span className="text-rose-500">*</span>
-              </label>
-              <p className="text-[10px] text-slate-400 mb-2">
-                What basic color is the garment? (e.g. Green, Pink, White)
-              </p>
-              <div className="relative">
-                <select
-                  value={baseColorName}
-                  onChange={(e) => handleSelectBaseColor(e.target.value)}
-                  className="w-full pl-3 pr-8 py-2 text-xs font-semibold bg-white border border-slate-200 rounded-xl outline-none focus:border-slate-900 text-slate-800 cursor-pointer shadow-2xs appearance-none"
-                >
-                  {BASE_COLORS.map((base) => (
-                    <option key={base.id} value={base.name}>
-                      {base.name}
-                    </option>
-                  ))}
-                </select>
-                <div className="absolute right-3 top-2.5 pointer-events-none text-slate-400">
-                  ▾
-                </div>
-              </div>
-
-              {/* Quick Base Color Chips */}
-              <div className="flex flex-wrap gap-1 mt-2">
-                {['Green', 'Pink', 'White', 'Black', 'Blue', 'Beige'].map((b) => (
-                  <button
-                    key={b}
-                    type="button"
-                    onClick={() => handleSelectBaseColor(b)}
-                    className={`px-1.5 py-0.5 rounded text-[10px] font-medium border cursor-pointer ${
-                      baseColorName.toLowerCase() === b.toLowerCase()
-                        ? 'bg-slate-800 text-white border-slate-800'
-                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
-                    }`}
-                  >
-                    {b}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Customer-Facing Premium Color Name */}
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-xs font-semibold text-slate-700">
-                  Customer-Facing Premium Name <span className="text-rose-500">*</span>
-                </label>
-                <span className="text-[10px] text-emerald-600 font-medium">Storefront Label</span>
-              </div>
-              <p className="text-[10px] text-slate-400 mb-2">
-                Displayed to customers (e.g. Sage Green, Dusty Rose).
-              </p>
-              <input
-                type="text"
-                placeholder="e.g. Sage Green"
-                value={customerName}
-                onChange={handleCustomerNameChange}
-                className="w-full px-3 py-2 text-xs font-semibold bg-white border border-slate-200 rounded-xl outline-none focus:border-slate-900 text-slate-900 shadow-2xs"
-              />
-            </div>
-          </div>
-
-          {/* Step 2: Automatic Premium Name Suggestions */}
+          {/* SECTION A — COLOR SELECTION (Compact Color Palette) */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                Suggested Premium Names for &ldquo;{baseColorName}&rdquo;
+              <span className="text-xs font-medium text-slate-700">
+                Quick Color Palette
               </span>
               <button
                 type="button"
-                onClick={handleGenerateMore}
-                className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 inline-flex items-center gap-1 cursor-pointer"
+                onClick={() => setShowAllPresets((prev) => !prev)}
+                className="text-[11px] font-medium text-slate-500 hover:text-slate-900 transition-colors cursor-pointer"
               >
-                <RotateCcw className="w-3 h-3" />
-                <span>+ Generate More</span>
+                {showAllPresets
+                  ? 'Show less'
+                  : `All presets (${QUICK_FANCY_PRESETS.length})`}
               </button>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              {wrappedSuggestions.map((sug) => {
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+              {visiblePresets.map((preset) => {
                 const isSelected =
-                  customerName.toLowerCase() === sug.name.toLowerCase();
+                  customerName.trim().toLowerCase() ===
+                  preset.name.toLowerCase();
                 return (
                   <button
-                    key={sug.name}
+                    key={preset.name}
                     type="button"
-                    onClick={() => handleSelectSuggestion(sug)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold border flex items-center gap-2 transition cursor-pointer ${
+                    onClick={() => handleApplyPreset(preset)}
+                    className={`px-2 py-1.5 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition-colors cursor-pointer truncate ${
                       isSelected
-                        ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
-                        : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-300'
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
                     }`}
+                    title={`${preset.name} (${preset.hex})`}
                   >
                     <span
-                      className="w-3 h-3 rounded-full border border-black/20 shrink-0"
-                      style={{ backgroundColor: sug.hex }}
+                      className="w-3 h-3 rounded-full border border-black/15 shrink-0"
+                      style={{ backgroundColor: preset.hex }}
                     />
-                    <span>{sug.name}</span>
-                    {isSelected && <Check className="w-3.5 h-3.5 text-emerald-400" />}
+                    <span className="truncate">{preset.name}</span>
                   </button>
                 );
               })}
             </div>
           </div>
 
-          {/* Step 3: Actual Garment Shade & Visual Color Picker */}
-          <div className="p-4 rounded-xl border border-slate-200 bg-white space-y-3">
-            <div className="flex items-center justify-between">
+          {/* SECTION B — COLOR INFORMATION */}
+          <div className="pt-4 space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 items-start">
+              {/* 1. Base / Actual Color */}
               <div>
-                <label className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
-                  <Palette className="w-3.5 h-3.5 text-indigo-500" />
-                  Actual Garment Color &amp; Visual Color Picker
+                <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                  Base / Actual Color <span className="text-rose-500">*</span>
                 </label>
-                <p className="text-[11px] text-slate-400">
-                  Pick the exact garment shade. Never forced to know or type HEX codes.
-                </p>
-              </div>
-
-              {/* Sample From Image Action */}
-              <button
-                type="button"
-                onClick={handleExtractFromImage}
-                disabled={isExtractingColor}
-                className="px-2.5 py-1 text-[11px] font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
-                title="Automatically analyze product photo to detect dominant garment color"
-              >
-                <Pipette className="w-3 h-3 text-indigo-600" />
-                <span>{isExtractingColor ? 'Sampling...' : 'Pick Color From Image'}</span>
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-center">
-              {/* Visual Color Input */}
-              <div className="flex items-center gap-2.5 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                <input
-                  type="color"
-                  value={isHexValid ? hexValue : '#82976F'}
-                  onChange={handlePickerChange}
-                  className="w-9 h-9 rounded-lg cursor-pointer border-0 bg-transparent shrink-0"
-                  title="Click to open visual color palette"
-                />
-                <div className="text-[11px] leading-tight">
-                  <span className="font-semibold text-slate-700 block">Visual Swatch</span>
-                  <span className="text-slate-400 text-[10px]">Click circle to tune shade</span>
+                <div className="relative flex items-center">
+                  <span
+                    className="w-3.5 h-3.5 rounded-full border border-black/15 absolute left-3 pointer-events-none"
+                    style={{ backgroundColor: currentBaseMeta.sampleHex }}
+                  />
+                  <select
+                    value={baseColorName}
+                    onChange={(e) => handleSelectBaseColor(e.target.value)}
+                    className="w-full pl-8 pr-8 py-2 text-xs font-medium bg-white border border-slate-200 rounded-lg outline-none focus:border-slate-900 text-slate-900 cursor-pointer appearance-none transition-colors"
+                  >
+                    {BASE_COLORS.map((base) => (
+                      <option key={base.id} value={base.name}>
+                        {base.name}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 pointer-events-none" />
                 </div>
               </div>
 
-              {/* HEX Display / Manual Input */}
-              <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <label className="text-[10px] font-semibold text-slate-500">HEX VALUE</label>
-                  {isHexValid && (
+              {/* 2. Customer-Facing Premium Name + Compact Autocomplete Dropdown */}
+              <div ref={suggestionsRef} className="relative">
+                <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                  Customer-Facing Premium Name{' '}
+                  <span className="text-rose-500">*</span>
+                </label>
+                <div className="relative flex items-center">
+                  <input
+                    type="text"
+                    placeholder={`e.g. ${
+                      availableSuggestions[0]?.name || 'Sage Green'
+                    }`}
+                    value={customerName}
+                    onFocus={() => setShowSuggestionsDropdown(true)}
+                    onChange={handleCustomerNameChange}
+                    className="w-full pl-3 pr-8 py-2 text-xs font-medium bg-white border border-slate-200 rounded-lg outline-none focus:border-slate-900 text-slate-900 transition-colors"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setShowSuggestionsDropdown((prev) => !prev)
+                    }
+                    className="absolute right-2 p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
+                    title="View color name suggestions"
+                  >
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                {/* Compact Autocomplete / Dropdown Menu */}
+                {showSuggestionsDropdown && suggestionsToDisplay.length > 0 && (
+                  <div className="absolute z-30 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg max-h-44 overflow-y-auto py-1">
+                    <div className="px-2.5 py-1 text-[10px] font-medium text-slate-400 flex items-center justify-between border-b border-slate-100">
+                      <span>Suggestions for {baseColorName}</span>
+                      <span>SKU</span>
+                    </div>
+                    {suggestionsToDisplay.map((sug) => {
+                      const isCurrent =
+                        customerName.trim().toLowerCase() ===
+                        sug.name.toLowerCase();
+                      return (
+                        <button
+                          key={sug.name}
+                          type="button"
+                          onClick={() => handleSelectSuggestion(sug)}
+                          className={`w-full px-2.5 py-1.5 text-left text-xs flex items-center justify-between hover:bg-slate-50 transition-colors cursor-pointer ${
+                            isCurrent
+                              ? 'bg-slate-50 font-semibold text-slate-900'
+                              : 'text-slate-700'
+                          }`}
+                        >
+                          <span className="flex items-center gap-2 truncate">
+                            <span
+                              className="w-3 h-3 rounded-full border border-black/15 shrink-0"
+                              style={{ backgroundColor: sug.hex }}
+                            />
+                            <span className="truncate">{sug.name}</span>
+                          </span>
+                          <span className="text-[10px] font-mono text-slate-400 ml-2 shrink-0">
+                            {sug.code}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Compact Inline Top Suggestions Below Name Input */}
+                <div className="flex flex-wrap items-center gap-1 mt-1.5">
+                  {availableSuggestions.slice(0, 4).map((sug) => {
+                    const isSelected =
+                      customerName.trim().toLowerCase() ===
+                      sug.name.toLowerCase();
+                    return (
+                      <button
+                        key={sug.name}
+                        type="button"
+                        onClick={() => handleSelectSuggestion(sug)}
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-medium border flex items-center gap-1 transition-colors cursor-pointer ${
+                          isSelected
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'bg-slate-50 hover:bg-slate-100 text-slate-600 border-slate-200'
+                        }`}
+                      >
+                        <span
+                          className="w-2 h-2 rounded-full border border-black/15 shrink-0"
+                          style={{ backgroundColor: sug.hex }}
+                        />
+                        <span>{sug.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* SECTION C — ADVANCED COLOR DETAILS (Collapsible) */}
+          <div className="pt-4">
+            <button
+              type="button"
+              onClick={() => setShowAdvancedDetails((prev) => !prev)}
+              className="w-full flex items-center justify-between py-1 text-left cursor-pointer group"
+            >
+              <span className="text-xs font-medium text-slate-700 group-hover:text-slate-900 flex items-center gap-1.5">
+                <Palette className="w-3.5 h-3.5 text-slate-400" />
+                <span>Advanced Color Details</span>
+                <span className="text-[11px] font-normal text-slate-400">
+                  (Shade picker, HEX &amp; SKU)
+                </span>
+              </span>
+
+              <div className="flex items-center gap-2">
+                {/* Compact Live Color Preview Summary */}
+                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-50 border border-slate-200 text-[11px] text-slate-600">
+                  <span
+                    className="w-2.5 h-2.5 rounded-full border border-black/15 shrink-0"
+                    style={{ backgroundColor: displayHex }}
+                  />
+                  <span className="font-mono text-[10px]">{displayHex}</span>
+                  <span className="text-slate-300">·</span>
+                  <span className="font-mono text-[10px] font-semibold text-slate-700">
+                    {effectiveCode}
+                  </span>
+                </div>
+                {showAdvancedDetails ? (
+                  <ChevronUp className="w-4 h-4 text-slate-400" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-slate-400" />
+                )}
+              </div>
+            </button>
+
+            {showAdvancedDetails && (
+              <div className="mt-3 p-3.5 rounded-xl border border-slate-200 bg-slate-50/50 space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+                  {/* Visual Swatch & Color Picker */}
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                      Visual Swatch
+                    </label>
+                    <label className="flex items-center gap-2 px-2.5 py-1.5 bg-white rounded-lg border border-slate-200 cursor-pointer hover:border-slate-300 transition-colors">
+                      <input
+                        type="color"
+                        value={displayHex}
+                        onChange={handlePickerChange}
+                        className="w-6 h-6 rounded cursor-pointer border-0 bg-transparent shrink-0"
+                        title="Select exact garment shade"
+                      />
+                      <span className="text-xs text-slate-700 font-medium truncate">
+                        Pick Shade
+                      </span>
+                    </label>
+                  </div>
+
+                  {/* Exact HEX Color Value */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[11px] font-medium text-slate-600">
+                        HEX Value
+                      </label>
+                      {isHexValid && (
+                        <button
+                          type="button"
+                          onClick={handleCopyHex}
+                          className="text-[10px] text-slate-500 hover:text-slate-900 inline-flex items-center gap-0.5 cursor-pointer"
+                        >
+                          {copiedHex ? (
+                            <Check className="w-2.5 h-2.5 text-emerald-600" />
+                          ) : (
+                            <Copy className="w-2.5 h-2.5" />
+                          )}
+                          <span>{copiedHex ? 'Copied' : 'Copy'}</span>
+                        </button>
+                      )}
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="#82976F"
+                      value={hexValue}
+                      onChange={handleHexInputChange}
+                      className={`w-full px-2.5 py-1.5 text-xs font-mono font-medium rounded-lg border outline-none transition-colors ${
+                        !hexValue || isHexValid
+                          ? 'bg-white border-slate-200 focus:border-slate-900 text-slate-900'
+                          : 'bg-rose-50 border-rose-300 text-rose-700'
+                      }`}
+                    />
+                  </div>
+
+                  {/* Internal SKU Code */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[11px] font-medium text-slate-600">
+                        SKU Code
+                      </label>
+                      <span className="text-[10px] text-slate-400">Auto</span>
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="SG"
+                      value={colorCode}
+                      onChange={(e) => {
+                        setColorCode(e.target.value.toUpperCase());
+                        setHasManualCode(true);
+                      }}
+                      maxLength={4}
+                      className="w-full px-2.5 py-1.5 text-xs font-mono font-medium uppercase rounded-lg border border-slate-200 bg-white outline-none focus:border-slate-900 text-slate-900 transition-colors"
+                    />
+                  </div>
+                </div>
+
+                {/* Compact Live Color Preview & Sample From Image Action */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/80">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="w-5 h-5 rounded-full border border-black/15 shrink-0"
+                      style={{ backgroundColor: displayHex }}
+                    />
+                    <div className="text-xs">
+                      <span className="font-semibold text-slate-800">
+                        {customerName.trim() || baseColorName}
+                      </span>
+                      <span className="text-slate-400 mx-1.5">·</span>
+                      <span className="font-mono text-[11px] text-slate-500">
+                        {displayHex}
+                      </span>
+                      <span className="text-slate-400 mx-1.5">·</span>
+                      <span className="font-mono text-[11px] text-slate-600">
+                        SKU: -{effectiveCode}
+                      </span>
+                    </div>
+                  </div>
+
+                  {(primaryImage || galleryImages.length > 0) && (
                     <button
                       type="button"
-                      onClick={handleCopyHex}
-                      className="text-[10px] text-slate-500 hover:text-slate-800 inline-flex items-center gap-0.5 cursor-pointer"
+                      onClick={handleExtractFromImage}
+                      disabled={isExtractingColor}
+                      className="px-2.5 py-1 text-[11px] font-medium text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg inline-flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
                     >
-                      {copiedHex ? (
-                        <Check className="w-3 h-3 text-emerald-600" />
-                      ) : (
-                        <Copy className="w-3 h-3" />
-                      )}
-                      <span>{copiedHex ? 'Copied' : 'Copy'}</span>
+                      <Pipette className="w-3 h-3 text-slate-500" />
+                      <span>
+                        {isExtractingColor ? 'Sampling...' : 'Sample From Image'}
+                      </span>
                     </button>
                   )}
                 </div>
-                <div className="relative">
-                  <input
-                    type="text"
-                    placeholder="e.g. #82976F"
-                    value={hexValue}
-                    onChange={handleHexInputChange}
-                    className={`w-full px-3 py-1.5 text-xs font-mono font-bold rounded-lg border outline-none ${
-                      !hexValue
-                        ? 'bg-slate-50 border-slate-200 text-slate-500'
-                        : isHexValid
-                        ? 'bg-white border-emerald-300 text-slate-900'
-                        : 'bg-rose-50 border-rose-300 text-rose-700'
-                    }`}
-                  />
-                  {isHexValid && (
-                    <Check className="w-3.5 h-3.5 text-emerald-600 absolute right-2.5 top-2" />
-                  )}
-                </div>
-                {!hexValue ? (
-                  <span className="text-[10px] text-amber-600 block">○ Color not selected yet</span>
-                ) : !isHexValid ? (
-                  <span className="text-[10px] text-rose-600 block">Invalid color code</span>
-                ) : null}
               </div>
-
-              {/* Internal SKU Color Code */}
-              <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <label className="text-[10px] font-semibold text-slate-500">SKU CODE</label>
-                  <span className="text-[10px] text-slate-400">Auto-suggested</span>
-                </div>
-                <input
-                  type="text"
-                  placeholder="e.g. SG"
-                  value={colorCode}
-                  onChange={(e) => setColorCode(e.target.value.toUpperCase())}
-                  maxLength={4}
-                  className="w-full px-3 py-1.5 text-xs font-mono font-bold uppercase rounded-lg border border-slate-200 bg-white outline-none focus:border-slate-900 text-slate-900"
-                  title="Short 2-letter internal code used in variant SKUs"
-                />
-                <span className="text-[10px] text-slate-400 block">Used for SKU (e.g. -{colorCode || 'CL'}-S)</span>
-              </div>
-            </div>
-
-            {/* Live Preview Card */}
-            <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-200/80">
-              <div className="flex items-center gap-3">
-                {isHexValid ? (
-                  <div
-                    className="w-7 h-7 rounded-full border-2 border-white shadow-xs shrink-0 ring-1 ring-black/10"
-                    style={{ backgroundColor: hexValue }}
-                  />
-                ) : (
-                  <div className="w-7 h-7 rounded-full border-2 border-dashed border-slate-300 bg-white flex items-center justify-center shrink-0">
-                    <span className="text-[9px] text-slate-400 font-mono">?</span>
-                  </div>
-                )}
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-slate-800">
-                      {customerName || 'Unnamed Color'}
-                    </span>
-                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-200 text-slate-700 font-bold">
-                      {colorCode || 'CL'}
-                    </span>
-                  </div>
-                  <span className="text-[11px] text-slate-500">
-                    {baseColorName} · {isHexValid ? hexValue : 'No HEX chosen'}
-                  </span>
-                </div>
-              </div>
-              <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
-                Live Preview
-              </span>
-            </div>
+            )}
           </div>
 
-          {/* Step 4: Color-Specific Images */}
-          <div className="space-y-3 p-4 rounded-xl border border-slate-200 bg-white">
+          {/* SECTION D — COLOR-SPECIFIC PRODUCT IMAGES */}
+          <div className="pt-4 space-y-3">
             <div className="flex items-center justify-between">
-              <div>
-                <label className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
-                  <ImageIcon className="w-3.5 h-3.5 text-slate-600" />
-                  Color-Specific Garment Images
-                </label>
-                <p className="text-[11px] text-slate-400">
-                  Customers will see these exact photos when selecting &ldquo;{customerName || 'this color'}&rdquo;.
-                </p>
+              <div className="flex items-center gap-1.5">
+                <ImageIcon className="w-3.5 h-3.5 text-slate-500" />
+                <span className="text-xs font-medium text-slate-700">
+                  Color-Specific Images
+                </span>
+                {galleryImages.length > 0 && (
+                  <span className="text-[11px] text-slate-400 tabular-nums">
+                    ({galleryImages.length})
+                  </span>
+                )}
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 <input
                   type="file"
                   ref={fileInputRef}
                   onChange={handleImageFileUpload}
                   accept="image/*"
+                  multiple
                   className="hidden"
                 />
                 <button
                   type="button"
+                  disabled={isUploadingImage}
                   onClick={() => fileInputRef.current?.click()}
-                  className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center gap-1 transition cursor-pointer"
+                  className="px-2.5 py-1 text-[11px] font-medium text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg inline-flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-50"
                 >
-                  <Upload className="w-3 h-3" />
-                  <span>Upload</span>
+                  {isUploadingImage ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <Upload className="w-3 h-3" />
+                  )}
+                  <span>{isUploadingImage ? 'Uploading...' : 'Upload'}</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => setShowAddUrlInput(!showAddUrlInput)}
-                  className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center gap-1 transition cursor-pointer"
+                  onClick={() => setShowAddUrlInput((prev) => !prev)}
+                  className="px-2.5 py-1 text-[11px] font-medium text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg inline-flex items-center gap-1 transition-colors cursor-pointer"
                 >
-                  <Plus className="w-3 h-3" />
+                  <LinkIcon className="w-3 h-3" />
                   <span>Add URL</span>
                 </button>
               </div>
             </div>
 
             {showAddUrlInput && (
-              <div className="flex items-center gap-2 p-2 bg-slate-50 rounded-xl border border-slate-200">
+              <div className="flex items-center gap-2">
                 <input
                   type="url"
-                  placeholder="Paste image URL (https://...)"
+                  placeholder="https://example.com/garment-image.jpg"
                   value={newImageUrl}
                   onChange={(e) => setNewImageUrl(e.target.value)}
-                  className="flex-1 px-2.5 py-1 text-xs bg-white border border-slate-200 rounded-lg outline-none"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddCustomImageUrl();
+                    }
+                  }}
+                  className="flex-1 px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg outline-none focus:border-slate-900"
                 />
                 <button
                   type="button"
                   onClick={handleAddCustomImageUrl}
-                  className="px-3 py-1 bg-slate-900 text-white rounded-lg text-xs font-semibold cursor-pointer"
+                  className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-medium cursor-pointer transition-colors"
                 >
                   Add
                 </button>
               </div>
             )}
 
-            {/* Gallery Thumbnails */}
-            <div className="flex flex-wrap gap-2.5 pt-1">
-              {galleryImages.map((img, idx) => {
-                const isPrimary = primaryImage === img;
-                return (
-                  <div
-                    key={img + idx}
-                    className={`relative w-16 h-20 rounded-lg overflow-hidden border-2 group transition ${
-                      isPrimary ? 'border-emerald-600 ring-2 ring-emerald-200' : 'border-slate-200'
-                    }`}
-                  >
-                    <img
-                      src={img}
-                      alt={`Color photo ${idx + 1}`}
-                      className="w-full h-full object-cover"
-                    />
-                    {isPrimary && (
-                      <span className="absolute top-1 left-1 bg-emerald-600 text-white text-[9px] font-bold px-1 rounded shadow-2xs">
-                        Main
-                      </span>
-                    )}
-                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center gap-1 transition">
-                      {!isPrimary && (
-                        <button
-                          type="button"
-                          onClick={() => setPrimaryImage(img)}
-                          className="p-1 bg-white text-slate-900 rounded hover:bg-slate-100 cursor-pointer"
-                          title="Set as Main"
-                        >
-                          <Check className="w-3 h-3" />
-                        </button>
-                      )}
-                      {galleryImages.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveGalleryImage(img)}
-                          className="p-1 bg-rose-600 text-white rounded hover:bg-rose-700 cursor-pointer"
-                          title="Remove Photo"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+            {/* Thumbnail Grid or Compact Empty State */}
+            {galleryImages.length > 0 ? (
+              <div className="grid grid-cols-4 sm:grid-cols-5 gap-2.5">
+                {galleryImages.map((img, idx) => {
+                  const isPrimary =
+                    primaryImage === img || (!primaryImage && idx === 0);
+                  const isBroken = brokenImages[img];
 
-          {/* Modal Footer Buttons */}
-          <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-200">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition cursor-pointer"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="px-5 py-2 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-xl transition cursor-pointer shadow-sm flex items-center gap-1.5"
-            >
-              <Check className="w-3.5 h-3.5 text-emerald-400" />
-              <span>{isEditing ? 'Save Color Changes' : 'Add Color to Product'}</span>
-            </button>
+                  return (
+                    <div
+                      key={`${img}-${idx}`}
+                      className={`relative aspect-3/4 rounded-lg overflow-hidden border group bg-slate-50 transition-all ${
+                        isPrimary
+                          ? 'border-slate-900 ring-1 ring-slate-900'
+                          : 'border-slate-200'
+                      }`}
+                    >
+                      {!isBroken ? (
+                        <img
+                          src={img}
+                          alt={`${customerName || baseColorName} view ${idx + 1}`}
+                          referrerPolicy="no-referrer"
+                          onError={() =>
+                            setBrokenImages((prev) => ({ ...prev, [img]: true }))
+                          }
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex flex-col items-center justify-center p-2 text-center bg-slate-100 text-slate-400">
+                          <ImageIcon className="w-4 h-4 mb-1" />
+                          <span className="text-[9px] leading-tight">
+                            Unavailable
+                          </span>
+                        </div>
+                      )}
+
+                      {isPrimary && (
+                        <span className="absolute top-1.5 left-1.5 bg-slate-900/90 text-white text-[9px] font-medium px-1.5 py-0.5 rounded">
+                          Main
+                        </span>
+                      )}
+
+                      {/* Hover Controls: Set Main, Reorder Left/Right, Delete */}
+                      <div className="absolute inset-0 bg-black/45 opacity-0 group-hover:opacity-100 flex flex-col justify-between p-1.5 transition-opacity">
+                        <div className="flex items-center justify-end gap-1">
+                          {!isPrimary && (
+                            <button
+                              type="button"
+                              onClick={() => setPrimaryImage(img)}
+                              className="p-1 bg-white/95 text-slate-900 rounded hover:bg-white cursor-pointer"
+                              title="Set as Main Image"
+                            >
+                              <Star className="w-3 h-3" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveGalleryImage(img)}
+                            className="p-1 bg-white/95 text-rose-600 rounded hover:bg-rose-50 cursor-pointer"
+                            title="Delete Image"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+
+                        {galleryImages.length > 1 && (
+                          <div className="flex items-center justify-between">
+                            <button
+                              type="button"
+                              disabled={idx === 0}
+                              onClick={() => handleMoveImage(idx, -1)}
+                              className="p-0.5 bg-white/90 text-slate-800 rounded disabled:opacity-30 cursor-pointer"
+                              title="Move Left"
+                            >
+                              <ChevronLeft className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={idx === galleryImages.length - 1}
+                              onClick={() => handleMoveImage(idx, 1)}
+                              className="p-0.5 bg-white/90 text-slate-800 rounded disabled:opacity-30 cursor-pointer"
+                              title="Move Right"
+                            >
+                              <ChevronRight className="w-3 h-3" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full py-4 px-3 rounded-lg border border-dashed border-slate-200 hover:border-slate-300 bg-slate-50/50 hover:bg-slate-50 flex items-center justify-center gap-2 text-xs text-slate-500 transition-colors cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5 text-slate-400" />
+                <span>Upload images for this color variation (optional)</span>
+              </button>
+            )}
           </div>
         </form>
+
+        {/* Sticky Footer */}
+        <div className="flex items-center justify-end gap-2.5 px-5 py-3 border-t border-slate-200 bg-white shrink-0">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-2 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            form="color-variation-form"
+            className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer flex items-center gap-1.5"
+          >
+            <Check className="w-3.5 h-3.5" />
+            <span>{isEditing ? 'Save Color' : 'Save Color'}</span>
+          </button>
+        </div>
       </div>
     </div>
   );
