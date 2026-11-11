@@ -193,13 +193,13 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   const [isFestive, setIsFestive] = useState(Boolean((initialProduct as any)?.isFestive));
   const [offerTag, setOfferTag] = useState(initialProduct?.offerTag || '');
 
-  // Shipping & Returns (Collapsible)
-  const [isShippingOpen, setIsShippingOpen] = useState(false);
+  // Shipping & Returns (Collapsible — autofilled with editable defaults)
+  const [isShippingOpen, setIsShippingOpen] = useState(true);
   const [dispatchTime, setDispatchTime] = useState(
-    initialProduct?.deliveryInfo || ''
+    initialProduct?.deliveryInfo || 'Shipping within 24–48 Hours'
   );
   const [returnWindow, setReturnWindow] = useState(
-    initialProduct?.returnPolicy || ''
+    initialProduct?.returnPolicy || '7-Day Easy Exchange Available'
   );
   const [isCodAvailable, setIsCodAvailable] = useState(true);
 
@@ -209,12 +209,12 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   const [metaDescription, setMetaDescription] = useState(initialProduct?.seo?.metaDescription || '');
   const [urlSlug, setUrlSlug] = useState(initialProduct?.slug || '');
 
-  // Advanced Details (Collapsible)
-  const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
+  // Advanced Details (Collapsible — Women Dresses dropdowns)
+  const [isAdvancedOpen, setIsAdvancedOpen] = useState(true);
   const [material, setMaterial] = useState(initialProduct?.material || '');
   const [fit, setFit] = useState(initialProduct?.fit || '');
   const [barcode, setBarcode] = useState((initialProduct as any)?.barcode || '');
-  const [hsnCode, setHsnCode] = useState((initialProduct as any)?.hsnCode || '');
+  const [hsnCode, setHsnCode] = useState((initialProduct as any)?.hsnCode || '6204');
 
   // Unassigned media buffer ONLY when no color variation exists yet
   const hasInitialColorSetup = Boolean(
@@ -2613,6 +2613,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                       </option>
                     ))}
                     {![
+                      'women dresses',
                       'shirt',
                       't-shirt',
                       'gym lower',
@@ -2620,6 +2621,9 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                       categories.some((c) => c.name.toLowerCase() === extra)
                     ) && (
                       <>
+                        {!categories.some((c) => c.name.toLowerCase() === 'women dresses') && (
+                          <option value="Women Dresses">Women Dresses</option>
+                        )}
                         {!categories.some((c) => c.name.toLowerCase() === 'shirt') && (
                           <option value="Shirt">Shirt</option>
                         )}
@@ -2640,43 +2644,62 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold text-slate-700">2. Subcategory</label>
                 <div className="relative">
-                  {activeCategoryObj?.subcategories && activeCategoryObj.subcategories.length > 0 ? (
-                    <select
-                      value={subcategory}
-                      onChange={(e) => {
-                        setSubcategory(e.target.value);
-                        setSubSubcategory('');
-                        setIsDirty(true);
-                      }}
-                      className="w-full px-3.5 py-2.5 rounded-xl text-xs font-medium text-slate-900 bg-slate-50 border border-slate-200 focus:bg-white focus:border-slate-900 outline-none appearance-none cursor-pointer pr-10"
-                    >
-                      <option value="">-- Select Subcategory --</option>
-                      {!activeCategoryObj.subcategories.some(
-                        (s) => (typeof s === 'string' ? s : s.name).toLowerCase() === category.toLowerCase()
-                      ) &&
-                        category && <option value={category}>{category}</option>}
-                      {activeCategoryObj.subcategories.map((sub) => {
-                        const subId = typeof sub === 'string' ? sub : sub.id || sub.slug || sub.name;
-                        const subName = typeof sub === 'string' ? sub : sub.name;
-                        return (
-                          <option key={subId} value={subName}>
-                            {subName}
-                          </option>
-                        );
-                      })}
-                    </select>
-                  ) : (
-                    <input
-                      type="text"
-                      placeholder={category ? `e.g. ${category}, Printed ${category}` : 'Select a category first or type subcategory'}
-                      value={subcategory}
-                      onChange={(e) => {
-                        setSubcategory(e.target.value);
-                        setIsDirty(true);
-                      }}
-                      className="w-full px-3.5 py-2.5 rounded-xl text-xs text-slate-900 bg-slate-50 border border-slate-200 focus:bg-white outline-none"
-                    />
-                  )}
+                  <select
+                    value={subcategory}
+                    onChange={(e) => {
+                      setSubcategory(e.target.value);
+                      setSubSubcategory('');
+                      setIsDirty(true);
+                    }}
+                    className="w-full px-3.5 py-2.5 rounded-xl text-xs font-medium text-slate-900 bg-slate-50 border border-slate-200 focus:bg-white focus:border-slate-900 outline-none appearance-none cursor-pointer pr-10"
+                  >
+                    <option value="">-- Select Subcategory --</option>
+                    {activeCategoryObj?.subcategories && activeCategoryObj.subcategories.length > 0 ? (
+                      <>
+                        {!activeCategoryObj.subcategories.some(
+                          (s) => (typeof s === 'string' ? s : s.name).toLowerCase() === category.toLowerCase()
+                        ) &&
+                          category && <option value={category}>{category}</option>}
+                        {activeCategoryObj.subcategories.map((sub) => {
+                          const subId = typeof sub === 'string' ? sub : sub.id || sub.slug || sub.name;
+                          const subName = typeof sub === 'string' ? sub : sub.name;
+                          return (
+                            <option key={subId} value={subName}>
+                              {subName}
+                            </option>
+                          );
+                        })}
+                      </>
+                    ) : (
+                      [
+                        'Midi Dress',
+                        'Maxi Dress',
+                        'A-Line Dress',
+                        'Fit & Flare Dress',
+                        'Floral Printed Dress',
+                        'Tiered Cotton Dress',
+                        'Ethnic Fusion Dress',
+                        'Co-ord Dress Set',
+                        'Party & Festive Dress',
+                        'Printed Kurti',
+                        'Embroidered Kurti',
+                        'Chikankari Kurti',
+                        'Short Kurti',
+                        'Long Kurti',
+                        'Anarkali Kurti',
+                      ].map((defaultSub) => (
+                        <option key={defaultSub} value={defaultSub}>
+                          {defaultSub}
+                        </option>
+                      ))
+                    )}
+                    {subcategory &&
+                      !(activeCategoryObj?.subcategories || []).some(
+                        (s) => (typeof s === 'string' ? s : s.name) === subcategory
+                      ) && (
+                        <option value={subcategory}>{subcategory}</option>
+                      )}
+                  </select>
                   <ChevronDown className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
                 </div>
               </div>
@@ -2752,6 +2775,9 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                     }
                     if (lowerCat.includes('t-shirt') || lowerCat.includes('tshirt')) {
                       return ['Oversized T-Shirt', 'Regular Fit T-Shirt', 'Polo T-Shirt', 'Crop T-Shirt'];
+                    }
+                    if (lowerCat.includes('dress')) {
+                      return ['A-Line Midi Dress', 'Floral Maxi Dress', 'Fit & Flare Dress', 'Tiered Cotton Dress'];
                     }
                     if (lowerCat.includes('shirt')) {
                       return ['Half Sleeve Shirt', 'Full Sleeve Shirt', 'Casual Shirt', 'Formal Shirt'];
@@ -2903,36 +2929,100 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                 >
                   <span className="flex items-center gap-2">
                     <Truck className="w-4 h-4 text-slate-500" />
-                    <span>Shipping & Returns</span>
+                    <span>Shipping &amp; Returns</span>
                   </span>
                   {isShippingOpen ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
                 </button>
                 {isShippingOpen && (
-                  <div className="p-5 pt-0 space-y-3 border-t border-slate-100 text-xs">
-                    <div className="space-y-1">
-                      <label className="font-semibold text-slate-700">Dispatch Time</label>
+                  <div className="p-5 pt-3 space-y-3 border-t border-slate-100 text-xs">
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <label className="font-semibold text-slate-700">Dispatch Time</label>
+                        <span className="text-[10px] text-emerald-600 font-medium">Auto-filled &amp; Editable</span>
+                      </div>
+                      <div className="relative">
+                        <select
+                          value={
+                            [
+                              'Shipping within 24–48 Hours',
+                              'Dispatched within 24–48 Hours',
+                              'Same Day / 24 Hours Express Dispatch',
+                              'Shipping within 2–3 Working Days',
+                              'Made to Order (Shipping in 4–5 Days)',
+                            ].includes(dispatchTime)
+                              ? dispatchTime
+                              : '__custom__'
+                          }
+                          onChange={(e) => {
+                            if (e.target.value !== '__custom__') {
+                              setDispatchTime(e.target.value);
+                              setIsDirty(true);
+                            }
+                          }}
+                          className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 font-medium outline-none focus:bg-white focus:border-slate-900 appearance-none cursor-pointer pr-8"
+                        >
+                          <option value="Shipping within 24–48 Hours">Shipping within 24–48 Hours</option>
+                          <option value="Dispatched within 24–48 Hours">Dispatched within 24–48 Hours</option>
+                          <option value="Same Day / 24 Hours Express Dispatch">Same Day / 24 Hours Express Dispatch</option>
+                          <option value="Shipping within 2–3 Working Days">Shipping within 2–3 Working Days</option>
+                          <option value="Made to Order (Shipping in 4–5 Days)">Made to Order (Shipping in 4–5 Days)</option>
+                          <option value="__custom__">Custom Dispatch Time (Edit below)</option>
+                        </select>
+                        <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                      </div>
                       <input
                         type="text"
-                        placeholder="e.g. Dispatched within 24–48 hours"
+                        placeholder="e.g. Shipping within 24–48 Hours"
                         value={dispatchTime}
                         onChange={(e) => {
                           setDispatchTime(e.target.value);
                           setIsDirty(true);
                         }}
-                        className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 outline-none"
+                        className="w-full px-3 py-2 rounded-xl bg-white border border-slate-200 text-slate-800 outline-none focus:border-slate-900"
                       />
                     </div>
-                    <div className="space-y-1">
-                      <label className="font-semibold text-slate-700">Return Policy</label>
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <label className="font-semibold text-slate-700">Return Policy</label>
+                        <span className="text-[10px] text-emerald-600 font-medium">Auto-filled &amp; Editable</span>
+                      </div>
+                      <div className="relative">
+                        <select
+                          value={
+                            [
+                              '7-Day Easy Exchange Available',
+                              '7-Day Easy Exchange & Return Available',
+                              '5-Day Size Exchange Available',
+                              'No Return / Exchange on Sale Items',
+                            ].includes(returnWindow)
+                              ? returnWindow
+                              : '__custom__'
+                          }
+                          onChange={(e) => {
+                            if (e.target.value !== '__custom__') {
+                              setReturnWindow(e.target.value);
+                              setIsDirty(true);
+                            }
+                          }}
+                          className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 font-medium outline-none focus:bg-white focus:border-slate-900 appearance-none cursor-pointer pr-8"
+                        >
+                          <option value="7-Day Easy Exchange Available">7-Day Easy Exchange Available</option>
+                          <option value="7-Day Easy Exchange & Return Available">7-Day Easy Exchange &amp; Return Available</option>
+                          <option value="5-Day Size Exchange Available">5-Day Size Exchange Available</option>
+                          <option value="No Return / Exchange on Sale Items">No Return / Exchange on Sale Items</option>
+                          <option value="__custom__">Custom Return Policy (Edit below)</option>
+                        </select>
+                        <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                      </div>
                       <input
                         type="text"
-                        placeholder="e.g. 7-Day Easy Exchange & Returns"
+                        placeholder="e.g. 7-Day Easy Exchange Available"
                         value={returnWindow}
                         onChange={(e) => {
                           setReturnWindow(e.target.value);
                           setIsDirty(true);
                         }}
-                        className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 outline-none"
+                        className="w-full px-3 py-2 rounded-xl bg-white border border-slate-200 text-slate-800 outline-none focus:border-slate-900"
                       />
                     </div>
                     <label className="flex items-center gap-2 text-slate-700 cursor-pointer pt-1">
@@ -2960,12 +3050,12 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                 >
                   <span className="flex items-center gap-2">
                     <Link className="w-4 h-4 text-slate-500" />
-                    <span>SEO & Search</span>
+                    <span>SEO &amp; Search</span>
                   </span>
                   {isSeoOpen ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
                 </button>
                 {isSeoOpen && (
-                  <div className="p-5 pt-0 space-y-3 border-t border-slate-100 text-xs">
+                  <div className="p-5 pt-3 space-y-3 border-t border-slate-100 text-xs">
                     <div className="space-y-1">
                       <label className="font-semibold text-slate-700">SEO Title</label>
                       <input
@@ -3008,7 +3098,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                 )}
               </div>
 
-              {/* Advanced Attributes */}
+              {/* Advanced Attributes (Women Dresses & Kurtis Dropdowns) */}
               <div className="bg-white rounded-2xl border border-slate-200/80 shadow-2xs overflow-hidden">
                 <button
                   type="button"
@@ -3022,37 +3112,151 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                   {isAdvancedOpen ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
                 </button>
                 {isAdvancedOpen && (
-                  <div className="p-5 pt-0 space-y-3 border-t border-slate-100 text-xs">
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-1">
+                  <div className="p-5 pt-3 space-y-3.5 border-t border-slate-100 text-xs">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {/* Material / Fabric Dropdown */}
+                      <div className="space-y-1.5">
                         <label className="font-semibold text-slate-700">Material / Fabric</label>
+                        <div className="relative">
+                          <select
+                            value={material}
+                            onChange={(e) => {
+                              setMaterial(e.target.value);
+                              setIsDirty(true);
+                            }}
+                            className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 font-medium outline-none focus:bg-white focus:border-slate-900 appearance-none cursor-pointer pr-8"
+                          >
+                            <option value="">-- Select Fabric --</option>
+                            {[
+                              '100% Pure Cotton',
+                              'Khadi Cotton',
+                              'Mulmul / Malmal Cotton',
+                              'Cotton Cambric',
+                              'Cotton Slub',
+                              'Rayon / Viscose',
+                              'Georgette',
+                              'Chiffon',
+                              'Organza',
+                              'Chanderi Silk',
+                              'Modal Silk',
+                              'Muslin',
+                              'Crepe',
+                              'Satin Blend',
+                              'Linen Blend',
+                              'Schiffli Embroidered Cotton',
+                              'Velvet',
+                            ].map((fab) => (
+                              <option key={fab} value={fab}>
+                                {fab}
+                              </option>
+                            ))}
+                            {material &&
+                              ![
+                                '100% Pure Cotton',
+                                'Khadi Cotton',
+                                'Mulmul / Malmal Cotton',
+                                'Cotton Cambric',
+                                'Cotton Slub',
+                                'Rayon / Viscose',
+                                'Georgette',
+                                'Chiffon',
+                                'Organza',
+                                'Chanderi Silk',
+                                'Modal Silk',
+                                'Muslin',
+                                'Crepe',
+                                'Satin Blend',
+                                'Linen Blend',
+                                'Schiffli Embroidered Cotton',
+                                'Velvet',
+                              ].includes(material) && (
+                                <option value={material}>{material}</option>
+                              )}
+                          </select>
+                          <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                        </div>
                         <input
                           type="text"
-                          placeholder="e.g. 100% Pure Cotton"
+                          placeholder="Or type custom fabric..."
                           value={material}
                           onChange={(e) => {
                             setMaterial(e.target.value);
                             setIsDirty(true);
                           }}
-                          className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 outline-none"
+                          className="w-full px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-slate-800 outline-none focus:border-slate-900 text-[11px]"
                         />
                       </div>
-                      <div className="space-y-1">
+
+                      {/* Fit Type Dropdown */}
+                      <div className="space-y-1.5">
                         <label className="font-semibold text-slate-700">Fit Type</label>
+                        <div className="relative">
+                          <select
+                            value={fit}
+                            onChange={(e) => {
+                              setFit(e.target.value);
+                              setIsDirty(true);
+                            }}
+                            className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 font-medium outline-none focus:bg-white focus:border-slate-900 appearance-none cursor-pointer pr-8"
+                          >
+                            <option value="">-- Select Fit Type --</option>
+                            {[
+                              'Regular Fit',
+                              'A-Line Fit',
+                              'Fit & Flare',
+                              'Straight Fit',
+                              'Anarkali / Flared Fit',
+                              'Empire Waist Fit',
+                              'Relaxed / Comfort Fit',
+                              'Maxi / Flowing Fit',
+                              'Midi / Body Skimming Fit',
+                              'Peplum / Short Kurti Fit',
+                              'Tiered Dress Fit',
+                              'Wrap Dress Fit',
+                              'Kaftan / Free Fit',
+                              'Slim / Tailored Fit',
+                            ].map((fitOpt) => (
+                              <option key={fitOpt} value={fitOpt}>
+                                {fitOpt}
+                              </option>
+                            ))}
+                            {fit &&
+                              ![
+                                'Regular Fit',
+                                'A-Line Fit',
+                                'Fit & Flare',
+                                'Straight Fit',
+                                'Anarkali / Flared Fit',
+                                'Empire Waist Fit',
+                                'Relaxed / Comfort Fit',
+                                'Maxi / Flowing Fit',
+                                'Midi / Body Skimming Fit',
+                                'Peplum / Short Kurti Fit',
+                                'Tiered Dress Fit',
+                                'Wrap Dress Fit',
+                                'Kaftan / Free Fit',
+                                'Slim / Tailored Fit',
+                              ].includes(fit) && (
+                                <option value={fit}>{fit}</option>
+                              )}
+                          </select>
+                          <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                        </div>
                         <input
                           type="text"
-                          placeholder="e.g. Regular Fit"
+                          placeholder="Or type custom fit..."
                           value={fit}
                           onChange={(e) => {
                             setFit(e.target.value);
                             setIsDirty(true);
                           }}
-                          className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 outline-none"
+                          className="w-full px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-slate-800 outline-none focus:border-slate-900 text-[11px]"
                         />
                       </div>
                     </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-1">
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
                         <label className="font-semibold text-slate-700">Barcode / EAN</label>
                         <input
                           type="text"
@@ -3065,18 +3269,28 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                           className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 outline-none font-mono"
                         />
                       </div>
-                      <div className="space-y-1">
+                      <div className="space-y-1.5">
                         <label className="font-semibold text-slate-700">HSN Code</label>
-                        <input
-                          type="text"
-                          placeholder="e.g. 6204"
-                          value={hsnCode}
-                          onChange={(e) => {
-                            setHsnCode(e.target.value);
-                            setIsDirty(true);
-                          }}
-                          className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 outline-none font-mono"
-                        />
+                        <div className="relative">
+                          <select
+                            value={hsnCode}
+                            onChange={(e) => {
+                              setHsnCode(e.target.value);
+                              setIsDirty(true);
+                            }}
+                            className="w-full px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 font-mono outline-none focus:bg-white focus:border-slate-900 appearance-none cursor-pointer pr-8"
+                          >
+                            <option value="6204">6204 — Women Dresses &amp; Kurtis</option>
+                            <option value="6104">6104 — Knitted Women Dresses</option>
+                            <option value="6206">6206 — Women Tops &amp; Tunics</option>
+                            <option value="6211">6211 — Ethnic Sets &amp; Co-ords</option>
+                            <option value="6214">6214 — Dupattas &amp; Stoles</option>
+                            {hsnCode && !['6204', '6104', '6206', '6211', '6214'].includes(hsnCode) && (
+                              <option value={hsnCode}>{hsnCode}</option>
+                            )}
+                          </select>
+                          <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                        </div>
                       </div>
                     </div>
                   </div>
