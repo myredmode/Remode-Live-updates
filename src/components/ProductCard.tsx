@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Product } from '../types';
 import { useStore } from '../context/StoreContext';
-import { Bookmark, ShoppingBag, X, Check } from 'lucide-react';
+import { Bookmark, ShoppingBag, X, Check, Bell } from 'lucide-react';
 import { getCacheBustedUrl } from '../utils/cacheBuster';
 
 interface ProductCardProps {
@@ -37,6 +37,18 @@ export const ProductCard: React.FC<ProductCardProps> = ({
   const [isSizeSelectorOpen, setIsSizeSelectorOpen] = useState(false);
   const [addedSize, setAddedSize] = useState<string | null>(null);
   const [isImageLoaded, setIsImageLoaded] = useState(false);
+  const [isNotifyDrawerOpen, setIsNotifyDrawerOpen] = useState(false);
+  const [notifyContact, setNotifyContact] = useState(userProfile.mobileOrEmail || '');
+  const [isNotified, setIsNotified] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('redmode_notify_me_list');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return Array.isArray(parsed) && parsed.some((item: any) => item.productId === product.id);
+      }
+    } catch {}
+    return false;
+  });
 
   // Active color state: can be updated via variant prop or user clicking swatches
   const [activeColor, setActiveColor] = useState<string>(
@@ -153,7 +165,46 @@ export const ProductCard: React.FC<ProductCardProps> = ({
   const stockMap = activeColorOption?.stockBySize || product.stockBySize || {};
   const stockEntries = Object.entries(stockMap);
   const totalStock = stockEntries.reduce((sum, [, count]) => sum + (Number(count) || 0), 0);
-  const isOutOfStock = totalStock <= 0 && stockEntries.length > 0;
+  const isOutOfStock = product.inStock === false || (totalStock <= 0 && stockEntries.length > 0);
+
+  const saveNotifyRequest = (contactVal: string) => {
+    try {
+      const saved = localStorage.getItem('redmode_notify_me_list');
+      const list = saved ? JSON.parse(saved) : [];
+      const next = [
+        {
+          productId: product.id,
+          productName: product.name,
+          color: effectiveColor || '',
+          contact: contactVal || userProfile.mobileOrEmail || 'Customer',
+          createdAt: new Date().toISOString(),
+        },
+        ...(Array.isArray(list) ? list.filter((i: any) => i.productId !== product.id) : []),
+      ];
+      localStorage.setItem('redmode_notify_me_list', JSON.stringify(next));
+    } catch {}
+    setIsNotified(true);
+    setIsNotifyDrawerOpen(false);
+  };
+
+  const handleNotifyMeClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isNotified) return;
+    if (userProfile.isLoggedIn && userProfile.mobileOrEmail) {
+      saveNotifyRequest(userProfile.mobileOrEmail);
+      return;
+    }
+    setNotifyContact(userProfile.mobileOrEmail || '');
+    setIsNotifyDrawerOpen((prev) => !prev);
+  };
+
+  const handleNotifySubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!notifyContact.trim()) return;
+    saveNotifyRequest(notifyContact.trim());
+  };
 
   // Pricing
   const cardPrice = activeColorOption?.price ?? product.price;
@@ -356,15 +407,79 @@ export const ProductCard: React.FC<ProductCardProps> = ({
           </button>
         )}
 
-        {/* Out of Stock Overlay */}
+        {/* Out of Stock Badge & Notify Me (Photo remains 100% clear, no blur) */}
         {isOutOfStock && (
-          <div className="absolute inset-0 bg-white/70 backdrop-blur-[2px] flex items-center justify-center z-10">
-            <span className="font-sans bg-zinc-900 text-white text-[10px] uppercase tracking-widest px-2.5 py-1 font-normal">
-              Sold Out
+          <div className="absolute inset-x-0 bottom-0 p-2 flex items-center justify-between gap-1.5 bg-gradient-to-t from-black/65 via-black/25 to-transparent z-10">
+            <span className="font-sans bg-zinc-950/90 text-white text-[9.5px] sm:text-[10px] uppercase tracking-wider px-2 py-1 font-semibold">
+              Out of Stock
             </span>
+            {!photoOnly && (
+              <button
+                type="button"
+                onClick={handleNotifyMeClick}
+                className={`font-sans text-[9.5px] sm:text-[10px] uppercase tracking-wider px-2.5 py-1 font-semibold flex items-center gap-1 transition cursor-pointer shadow-xs ${
+                  isNotified
+                    ? 'bg-emerald-600 text-white'
+                    : 'bg-white text-zinc-950 hover:bg-zinc-100'
+                }`}
+              >
+                {isNotified ? (
+                  <>
+                    <Check className="w-3 h-3" />
+                    <span>Notified</span>
+                  </>
+                ) : (
+                  <>
+                    <Bell className="w-3 h-3" />
+                    <span>Notify Me</span>
+                  </>
+                )}
+              </button>
+            )}
           </div>
         )}
       </div>
+
+      {/* Quick Notify Me Drawer (Opens when product is Out of Stock and user clicks Notify Me) */}
+      {!photoOnly && isOutOfStock && isNotifyDrawerOpen && !isNotified && (
+        <form
+          onSubmit={handleNotifySubmit}
+          onClick={(e) => e.stopPropagation()}
+          className="bg-zinc-50 border-t border-b border-zinc-200 px-2.5 py-2 space-y-1.5"
+        >
+          <div className="flex items-center justify-between">
+            <span className="font-sans text-[10px] uppercase tracking-wider font-semibold text-zinc-900">
+              Get Restock Alert
+            </span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsNotifyDrawerOpen(false);
+              }}
+              className="text-zinc-400 hover:text-zinc-900 p-0.5 cursor-pointer"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+          <div className="flex items-center gap-1">
+            <input
+              type="text"
+              required
+              placeholder="Mobile or Email..."
+              value={notifyContact}
+              onChange={(e) => setNotifyContact(e.target.value)}
+              className="flex-1 min-w-0 px-2 py-1 text-[11px] bg-white border border-zinc-300 text-zinc-900 outline-none focus:border-zinc-950"
+            />
+            <button
+              type="submit"
+              className="px-2.5 py-1 bg-zinc-950 text-white text-[10px] font-semibold uppercase tracking-wider hover:bg-zinc-800 cursor-pointer shrink-0"
+            >
+              Notify
+            </button>
+          </div>
+        </form>
+      )}
 
       {/* Quick Size Selector Drawer (Opens when clicking cart icon) */}
       {!photoOnly && isSizeSelectorOpen && (
@@ -443,20 +558,36 @@ export const ProductCard: React.FC<ProductCardProps> = ({
       {!photoOnly && (
         <div className="pt-2 sm:pt-2.5 px-0.5 sm:px-1 pb-1 flex-1 flex flex-col justify-between text-zinc-900 bg-white">
           <div className="space-y-1">
-            {/* 2. PRODUCT TITLE & QUICK ACTION BAG ICON */}
+            {/* 2. PRODUCT TITLE & QUICK ACTION BAG / NOTIFY ICON */}
             <div className="flex items-center justify-between gap-1.5">
               <h3 className="font-sans text-xs sm:text-[13px] font-normal text-zinc-900 tracking-normal truncate flex-1 leading-snug">
                 {displayTitle}
               </h3>
-              <button
-                type="button"
-                onClick={handleBagIconClick}
-                className="p-0.5 text-zinc-400 hover:text-zinc-950 transition cursor-pointer shrink-0"
-                title="Quick Add to Bag"
-                aria-label="Quick Add to Bag"
-              >
-                <ShoppingBag className="w-3.5 h-3.5 stroke-[1.2]" />
-              </button>
+              {isOutOfStock ? (
+                <button
+                  type="button"
+                  onClick={handleNotifyMeClick}
+                  className={`px-1.5 py-0.5 text-[10px] font-medium flex items-center gap-1 border transition cursor-pointer shrink-0 ${
+                    isNotified
+                      ? 'border-emerald-600 text-emerald-700 bg-emerald-50'
+                      : 'border-zinc-300 text-zinc-800 hover:border-zinc-950 bg-zinc-50'
+                  }`}
+                  title={isNotified ? 'Restock alert active' : 'Notify me when back in stock'}
+                >
+                  {isNotified ? <Check className="w-3 h-3" /> : <Bell className="w-3 h-3" />}
+                  <span>{isNotified ? 'Notified' : 'Notify Me'}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleBagIconClick}
+                  className="p-0.5 text-zinc-400 hover:text-zinc-950 transition cursor-pointer shrink-0"
+                  title="Quick Add to Bag"
+                  aria-label="Quick Add to Bag"
+                >
+                  <ShoppingBag className="w-3.5 h-3.5 stroke-[1.2]" />
+                </button>
+              )}
             </div>
 
             {/* 3. OPTIONAL PRODUCT VARIANT / COLOR / SHORT DETAIL */}

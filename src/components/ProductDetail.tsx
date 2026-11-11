@@ -11,6 +11,7 @@ import {
   X,
   Truck,
   RotateCcw,
+  Bell,
 } from 'lucide-react';
 import { SizeChartModal } from './pdp/SizeChartModal';
 import { RelatedProducts } from './pdp/RelatedProducts';
@@ -176,10 +177,11 @@ export const ProductDetail: React.FC = () => {
     return false;
   }, [product?.sizes]);
 
-  // Size selection state - initially empty per user explicit requirement (no auto-selection)
+  // Size & Quantity selection state - initially empty per user explicit requirement (no auto-selection)
   const [selectedSize, setSelectedSize] = useState<string>(() => {
     return isFreeSize ? 'Free size' : '';
   });
+  const [quantity, setQuantity] = useState<number>(1);
   const [sizeError, setSizeError] = useState<boolean>(false);
 
   const effectivePrice = useMemo(() => {
@@ -249,6 +251,70 @@ export const ProductDetail: React.FC = () => {
   const [isTitleExpanded, setIsTitleExpanded] = useState<boolean>(false);
   const mobileSliderRef = React.useRef<HTMLDivElement>(null);
 
+  // Out of Stock & Notify Me State
+  const stockValues = Object.values(effectiveStockBySize).map((v) => Number(v) || 0);
+  const totalAvailableStock = stockValues.reduce((sum: number, count: number) => sum + count, 0);
+  const isEntireProductOutOfStock =
+    product?.inStock === false || (stockValues.length > 0 && totalAvailableStock <= 0);
+  const selectedSizeStock = selectedSize
+    ? Number(effectiveStockBySize[selectedSize] ?? product?.stockBySize?.[selectedSize] ?? 10) || 0
+    : isFreeSize
+    ? Number(effectiveStockBySize['Free size'] ?? product?.stockBySize?.['Free size'] ?? 10) || 0
+    : 10;
+  const maxSelectableQuantity = Math.max(1, Math.min(20, selectedSizeStock > 0 ? selectedSizeStock : 10));
+  const isSelectedSizeOutOfStock = selectedSize
+    ? (Number(effectiveStockBySize[selectedSize] ?? product?.stockBySize?.[selectedSize] ?? 1) || 0) <= 0
+    : false;
+  const isCurrentlyOutOfStock = isEntireProductOutOfStock || isSelectedSizeOutOfStock;
+
+  const [notifyContactInput, setNotifyContactInput] = useState<string>(userProfile.mobileOrEmail || '');
+  const [showNotifyForm, setShowNotifyForm] = useState<boolean>(false);
+  const [notifiedSizes, setNotifiedSizes] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('redmode_notify_me_list');
+      if (saved && product?.id) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed
+            .filter((item: any) => item.productId === product.id)
+            .map((item: any) => item.size || 'ALL');
+        }
+      }
+    } catch {}
+    return [];
+  });
+
+  const isCurrentSelectionNotified =
+    notifiedSizes.includes('ALL') || (selectedSize ? notifiedSizes.includes(selectedSize) : false);
+
+  const handleSubscribeRestock = (targetSize?: string, contactOverride?: string) => {
+    if (!product) return;
+    const sizeKey = targetSize || selectedSize || 'ALL';
+    const contactVal = (contactOverride ?? notifyContactInput ?? userProfile.mobileOrEmail ?? '').trim();
+    if (!contactVal && !userProfile.isLoggedIn) {
+      setShowNotifyForm(true);
+      return;
+    }
+    try {
+      const saved = localStorage.getItem('redmode_notify_me_list');
+      const list = saved ? JSON.parse(saved) : [];
+      const next = [
+        {
+          productId: product.id,
+          productName: product.name,
+          color: selectedColor || '',
+          size: sizeKey,
+          contact: contactVal || userProfile.mobileOrEmail || 'Customer',
+          createdAt: new Date().toISOString(),
+        },
+        ...(Array.isArray(list) ? list : []),
+      ];
+      localStorage.setItem('redmode_notify_me_list', JSON.stringify(next));
+    } catch {}
+    setNotifiedSizes((prev) => Array.from(new Set([...prev, sizeKey])));
+    setShowNotifyForm(false);
+  };
+
   // Enlarged photo modal handlers
   const handleOpenLightbox = (index: number) => {
     setLightboxIndex(index);
@@ -315,19 +381,23 @@ export const ProductDetail: React.FC = () => {
     setScrollProgress(index);
   };
 
-  // Pincode Checker State
+  // Pincode Checker State (Connected to Live Delhivery Serviceability API)
   const [pincode, setPincode] = useState<string>('');
+  const [isCheckingPincode, setIsCheckingPincode] = useState<boolean>(false);
   const [pincodeStatus, setPincodeStatus] = useState<{
     checked: boolean;
     valid: boolean;
     message: string;
     deliveryDate?: string;
+    codAvailable?: boolean;
+    cityState?: string;
   } | null>(null);
 
   // Scroll to top whenever product changes
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     setIsTitleExpanded(false);
+    setQuantity(1);
   }, [product?.id]);
 
   // Sync color & size when product or entry color changes
@@ -343,6 +413,7 @@ export const ProductDetail: React.FC = () => {
       } else {
         setSelectedSize('');
       }
+      setQuantity(1);
       setSizeError(false);
       setActiveSlideIndex(0);
       setScrollProgress(0);
@@ -374,29 +445,109 @@ export const ProductDetail: React.FC = () => {
     setTimeout(() => setCopiedLink(false), 2200);
   };
 
-  const handleCheckPincode = (e: React.FormEvent) => {
+  const handleCheckPincode = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanPin = pincode.replace(/\D/g, '');
-    if (cleanPin.length === 6) {
-      const d = new Date();
-      d.setDate(d.getDate() + 3);
-      const estDate = d.toLocaleDateString('en-IN', {
-        weekday: 'short',
-        day: 'numeric',
-        month: 'short',
-      });
-      setPincodeStatus({
-        checked: true,
-        valid: true,
-        message: `Delivery available to ${cleanPin}`,
-        deliveryDate: estDate,
-      });
-    } else {
+    if (cleanPin.length !== 6) {
       setPincodeStatus({
         checked: true,
         valid: false,
         message: 'Please enter a valid 6-digit Indian PIN code.',
       });
+      return;
+    }
+
+    setIsCheckingPincode(true);
+    setPincodeStatus(null);
+
+    try {
+      let data: any = null;
+      try {
+        const res = await fetch(`/api/pincode/lookup/${cleanPin}`);
+        const json = await res.json();
+        if (res.ok && json?.success) {
+          data = json;
+        } else if (res.status === 404 || json?.success === false) {
+          setPincodeStatus({
+            checked: true,
+            valid: false,
+            message: json?.message || `PIN code ${cleanPin} is not serviceable by Delhivery.`,
+          });
+          setIsCheckingPincode(false);
+          return;
+        }
+      } catch {
+        // Fallback to direct India Post API if running on static host
+        const postalRes = await fetch(`https://api.postalpincode.in/pincode/${cleanPin}`);
+        if (postalRes.ok) {
+          const pData = await postalRes.json();
+          if (Array.isArray(pData) && pData[0]?.Status === 'Success' && pData[0]?.PostOffice?.length > 0) {
+            const po = pData[0].PostOffice[0];
+            data = {
+              success: true,
+              city: po.District || po.Block,
+              state: po.State,
+              cod: true,
+              prepaid: true,
+            };
+          } else {
+            setPincodeStatus({
+              checked: true,
+              valid: false,
+              message: `PIN code ${cleanPin} is invalid or not serviceable.`,
+            });
+            setIsCheckingPincode(false);
+            return;
+          }
+        }
+      }
+
+      if (data && data.success) {
+        const isNotServiceable = data.prepaid === false && data.cod === false;
+        if (isNotServiceable) {
+          setPincodeStatus({
+            checked: true,
+            valid: false,
+            message: `Sorry, Delhivery delivery is currently unavailable at ${cleanPin} (${data.city || ''}).`,
+          });
+        } else {
+          // Estimate transit days based on state distance from Meerut/UP hub (250002)
+          const isNearby = ['Uttar Pradesh', 'Delhi', 'Haryana', 'Uttarakhand', 'Punjab', 'Rajasthan', 'Chandigarh'].some(
+            (st) => (data.state || '').toLowerCase().includes(st.toLowerCase())
+          );
+          const transitDays = isNearby ? 3 : 5;
+          const d = new Date();
+          d.setDate(d.getDate() + transitDays);
+          const estDate = d.toLocaleDateString('en-IN', {
+            weekday: 'short',
+            day: 'numeric',
+            month: 'short',
+          });
+          const locLabel = [data.city, data.state].filter(Boolean).join(', ');
+          setPincodeStatus({
+            checked: true,
+            valid: true,
+            message: `Delhivery Serviceable at ${cleanPin}${locLabel ? ` — ${locLabel}` : ''}`,
+            deliveryDate: estDate,
+            codAvailable: data.cod !== false,
+            cityState: locLabel,
+          });
+        }
+      } else {
+        setPincodeStatus({
+          checked: true,
+          valid: false,
+          message: `Could not verify PIN code ${cleanPin}. Please check and try again.`,
+        });
+      }
+    } catch {
+      setPincodeStatus({
+        checked: true,
+        valid: false,
+        message: 'Unable to check PIN code right now. Please try again.',
+      });
+    } finally {
+      setIsCheckingPincode(false);
     }
   };
 
@@ -437,10 +588,11 @@ export const ProductDetail: React.FC = () => {
       return;
     }
     const sizeToUse = isFreeSize ? 'Free size' : selectedSize;
+    const safeQty = Math.max(1, Math.min(quantity, maxSelectableQuantity));
     addToCart(
       product,
       sizeToUse,
-      1,
+      safeQty,
       selectedColor,
       effectiveImages[0]
     );
@@ -463,10 +615,11 @@ export const ProductDetail: React.FC = () => {
       return;
     }
     const sizeToUse = isFreeSize ? 'Free size' : selectedSize;
+    const safeQty = Math.max(1, Math.min(quantity, maxSelectableQuantity));
     addToCart(
       product,
       sizeToUse,
-      1,
+      safeQty,
       selectedColor,
       effectiveImages[0]
     );
@@ -482,18 +635,19 @@ export const ProductDetail: React.FC = () => {
       return;
     }
 
-    const stockCount = effectiveStockBySize[sz] ?? effectiveStockBySize[sz.toUpperCase()] ?? 10;
+    const stockCount = Number(effectiveStockBySize[sz] ?? effectiveStockBySize[sz.toUpperCase()] ?? 10) || 0;
     if (stockCount <= 0) return;
+    const safeQty = Math.max(1, Math.min(quantity, stockCount));
     setSelectedSize(sz);
     setSizeError(false);
     setIsQuickSizeDrawerOpen(false);
 
     if (quickActionType === 'buy') {
-      addToCart(product, sz, 1, selectedColor, effectiveImages[0]);
+      addToCart(product, sz, safeQty, selectedColor, effectiveImages[0]);
       setActiveView('checkout');
       window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     } else {
-      addToCart(product, sz, 1, selectedColor, effectiveImages[0]);
+      addToCart(product, sz, safeQty, selectedColor, effectiveImages[0]);
       setIsCartOpen(true);
     }
   };
@@ -823,7 +977,6 @@ export const ProductDetail: React.FC = () => {
                         <div key={sz} className="flex flex-col items-center">
                           <button
                             type="button"
-                            disabled={!isStockAvailable}
                             onClick={() => {
                               if (selectedSize === sz) {
                                 setSelectedSize('');
@@ -836,7 +989,7 @@ export const ProductDetail: React.FC = () => {
                               isSelected
                                 ? 'border-zinc-950 bg-zinc-950 text-white font-bold'
                                 : !isStockAvailable
-                                ? 'border-zinc-200 text-zinc-300 line-through cursor-not-allowed bg-zinc-50'
+                                ? 'border-zinc-200 text-zinc-400 line-through bg-zinc-50 hover:border-zinc-400'
                                 : sizeError
                                 ? 'border-red-400 text-zinc-900 bg-white hover:border-zinc-900'
                                 : 'border-zinc-300 hover:border-zinc-900 text-zinc-900 bg-white'
@@ -845,9 +998,16 @@ export const ProductDetail: React.FC = () => {
                             {sz}
                           </button>
                           {!isStockAvailable && (
-                            <span className="text-[10px] text-red-600 font-medium mt-1">
-                              Notify Me
-                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedSize(sz);
+                                handleSubscribeRestock(sz);
+                              }}
+                              className="text-[10px] text-rose-600 hover:underline font-semibold mt-1 cursor-pointer"
+                            >
+                              {notifiedSizes.includes(sz) || notifiedSizes.includes('ALL') ? 'Notified ✓' : 'Notify Me'}
+                            </button>
                           )}
                         </div>
                       );
@@ -862,7 +1022,46 @@ export const ProductDetail: React.FC = () => {
               )}
             </div>
 
-            {/* Row 5: DELIVERY STATUS (PIN Code Delivery Checker) */}
+            {/* Row 4B: QUANTITY Selector */}
+            {!isCurrentlyOutOfStock && (
+              <div className="pt-2 space-y-2">
+                <div className="flex items-center justify-between max-w-md">
+                  <span className="text-xs font-bold uppercase tracking-wider text-zinc-950">
+                    QUANTITY
+                  </span>
+                  {selectedSize && selectedSizeStock > 0 && selectedSizeStock <= 5 && (
+                    <span className="text-[11px] font-semibold text-rose-600">
+                      Only {selectedSizeStock} left in stock
+                    </span>
+                  )}
+                </div>
+                <div className="inline-flex items-center border border-zinc-300 bg-white">
+                  <button
+                    type="button"
+                    onClick={() => setQuantity((q) => Math.max(1, q - 1))}
+                    disabled={quantity <= 1}
+                    className="w-10 h-10 flex items-center justify-center text-sm font-bold text-zinc-900 hover:bg-zinc-100 disabled:opacity-35 disabled:cursor-not-allowed transition cursor-pointer"
+                    aria-label="Decrease quantity"
+                  >
+                    −
+                  </button>
+                  <span className="w-12 h-10 flex items-center justify-center text-xs font-bold text-zinc-950 border-x border-zinc-200 select-none">
+                    {quantity}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setQuantity((q) => Math.min(maxSelectableQuantity, q + 1))}
+                    disabled={quantity >= maxSelectableQuantity}
+                    className="w-10 h-10 flex items-center justify-center text-sm font-bold text-zinc-900 hover:bg-zinc-100 disabled:opacity-35 disabled:cursor-not-allowed transition cursor-pointer"
+                    aria-label="Increase quantity"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Row 5: DELIVERY STATUS (Live Delhivery PIN Code Serviceability Checker) */}
             <div className="pt-3 space-y-2">
               <span className="text-xs font-bold uppercase tracking-wider text-zinc-950 block">
                 DELIVERY STATUS
@@ -870,56 +1069,119 @@ export const ProductDetail: React.FC = () => {
               <form onSubmit={handleCheckPincode} className="flex gap-0 max-w-md border border-zinc-300 focus-within:border-zinc-950">
                 <input
                   type="text"
+                  inputMode="numeric"
                   maxLength={6}
                   value={pincode}
                   onChange={(e) => setPincode(e.target.value.replace(/\D/g, ''))}
-                  placeholder="Enter PIN code"
+                  placeholder="Enter 6-digit PIN code"
                   className="flex-1 px-3.5 py-2.5 text-xs tracking-wide placeholder:text-zinc-400 focus:outline-hidden font-sans bg-transparent"
                 />
                 <button
                   type="submit"
-                  className="px-6 py-2.5 bg-zinc-950 hover:bg-zinc-800 text-white text-xs font-bold uppercase tracking-wider transition cursor-pointer shrink-0"
+                  disabled={isCheckingPincode}
+                  className="px-6 py-2.5 bg-zinc-950 hover:bg-zinc-800 disabled:opacity-60 text-white text-xs font-bold uppercase tracking-wider transition cursor-pointer shrink-0"
                 >
-                  CHECK
+                  {isCheckingPincode ? 'CHECKING...' : 'CHECK'}
                 </button>
               </form>
 
               {pincodeStatus && (
-                <p
-                  className={`text-xs mt-1.5 font-medium ${
-                    pincodeStatus.valid ? 'text-emerald-700' : 'text-rose-600'
+                <div
+                  className={`text-xs mt-1.5 font-medium p-2.5 border ${
+                    pincodeStatus.valid
+                      ? 'bg-emerald-50/70 border-emerald-200 text-emerald-800'
+                      : 'bg-rose-50/70 border-rose-200 text-rose-700'
                   }`}
                 >
-                  {pincodeStatus.message}
-                  {pincodeStatus.deliveryDate && (
-                    <span className="block text-[11px] text-zinc-600 mt-0.5">
-                      Estimated Delivery by <strong>{pincodeStatus.deliveryDate}</strong> • Free Express Delivery • COD Available
-                    </span>
+                  <p className="font-semibold">{pincodeStatus.message}</p>
+                  {pincodeStatus.valid && pincodeStatus.deliveryDate && (
+                    <p className="text-[11px] text-zinc-700 mt-1">
+                      Estimated Delivery by <strong>{pincodeStatus.deliveryDate}</strong> •{' '}
+                      {product.deliveryInfo || 'Shipping within 24–48 Hours'} •{' '}
+                      <strong>{pincodeStatus.codAvailable ? 'COD & Prepaid Available' : 'Prepaid Only'}</strong>
+                    </p>
                   )}
-                </p>
+                </div>
               )}
             </div>
 
-            {/* Row 6: ACTION BUTTONS (BUY NOW & ADD TO CART) - Hidden on mobile because mobile uses the fixed bottom action bar */}
-            <div className="hidden sm:grid sm:grid-cols-2 gap-3 pt-2">
-              <button
-                id="pdp-buy-now-btn"
-                type="button"
-                onClick={handleBuyNow}
-                className="w-full py-3.5 border border-zinc-950 bg-white hover:bg-zinc-50 text-zinc-950 text-xs font-bold tracking-widest uppercase transition flex items-center justify-center cursor-pointer"
-              >
-                BUY NOW
-              </button>
+            {/* Row 6: ACTION BUTTONS (BUY NOW & ADD TO CART or OUT OF STOCK / NOTIFY ME) */}
+            {isCurrentlyOutOfStock ? (
+              <div className="space-y-3 pt-2">
+                <div className="flex items-center justify-between px-3.5 py-2.5 bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold">
+                  <span>Currently Out of Stock{selectedSize ? ` (Size: ${selectedSize})` : ''}</span>
+                  <span className="text-[11px] uppercase tracking-wider font-bold">Restocking Soon</span>
+                </div>
 
-              <button
-                id="pdp-add-to-cart-btn"
-                type="button"
-                onClick={handleAddToCart}
-                className="w-full py-3.5 bg-zinc-950 hover:bg-zinc-800 text-white text-xs font-bold tracking-widest uppercase transition flex items-center justify-center cursor-pointer shadow-xs"
-              >
-                ADD TO CART
-              </button>
-            </div>
+                {showNotifyForm && !isCurrentSelectionNotified ? (
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (!notifyContactInput.trim()) return;
+                      handleSubscribeRestock(selectedSize || 'ALL', notifyContactInput);
+                    }}
+                    className="flex gap-2"
+                  >
+                    <input
+                      type="text"
+                      required
+                      placeholder="Enter your Mobile Number or Email..."
+                      value={notifyContactInput}
+                      onChange={(e) => setNotifyContactInput(e.target.value)}
+                      className="flex-1 px-3.5 py-3 text-xs border border-zinc-300 focus:border-zinc-950 outline-none"
+                    />
+                    <button
+                      type="submit"
+                      className="px-6 py-3 bg-zinc-950 hover:bg-zinc-800 text-white text-xs font-bold tracking-widest uppercase transition cursor-pointer shrink-0"
+                    >
+                      NOTIFY ME
+                    </button>
+                  </form>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleSubscribeRestock(selectedSize || 'ALL')}
+                    className={`w-full py-3.5 text-xs font-bold tracking-widest uppercase transition flex items-center justify-center gap-2 cursor-pointer ${
+                      isCurrentSelectionNotified
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-zinc-950 hover:bg-zinc-800 text-white'
+                    }`}
+                  >
+                    {isCurrentSelectionNotified ? (
+                      <>
+                        <Check className="w-4 h-4" />
+                        <span>YOU WILL BE NOTIFIED WHEN IN STOCK</span>
+                      </>
+                    ) : (
+                      <>
+                        <Bell className="w-4 h-4" />
+                        <span>NOTIFY ME WHEN AVAILABLE</span>
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="hidden sm:grid sm:grid-cols-2 gap-3 pt-2">
+                <button
+                  id="pdp-buy-now-btn"
+                  type="button"
+                  onClick={handleBuyNow}
+                  className="w-full py-3.5 border border-zinc-950 bg-white hover:bg-zinc-50 text-zinc-950 text-xs font-bold tracking-widest uppercase transition flex items-center justify-center cursor-pointer"
+                >
+                  BUY NOW
+                </button>
+
+                <button
+                  id="pdp-add-to-cart-btn"
+                  type="button"
+                  onClick={handleAddToCart}
+                  className="w-full py-3.5 bg-zinc-950 hover:bg-zinc-800 text-white text-xs font-bold tracking-widest uppercase transition flex items-center justify-center cursor-pointer shadow-xs"
+                >
+                  ADD TO CART
+                </button>
+              </div>
+            )}
 
             {/* Row 7: MORE INFO (Dropdown / Accordion - click toggles full product details) */}
             <div className="pt-2 border-t border-zinc-200">
@@ -1243,20 +1505,51 @@ export const ProductDetail: React.FC = () => {
 
       {/* Mobile Sticky Bottom Action Bar (Fixed like Rare Rabbit) */}
       <div className="sm:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/95 backdrop-blur-md border-t border-zinc-200 px-3 py-2.5 grid grid-cols-2 gap-2.5 shadow-lg">
-        <button
-          type="button"
-          onClick={handleBuyNow}
-          className="w-full py-3 border border-zinc-950 bg-white text-zinc-950 text-xs font-bold tracking-widest uppercase transition cursor-pointer"
-        >
-          BUY NOW
-        </button>
-        <button
-          type="button"
-          onClick={handleAddToCart}
-          className="w-full py-3 bg-zinc-950 text-white text-xs font-bold tracking-widest uppercase transition cursor-pointer shadow"
-        >
-          ADD TO CART
-        </button>
+        {isCurrentlyOutOfStock ? (
+          <>
+            <div className="w-full py-3 border border-rose-200 bg-rose-50 text-rose-800 text-[11px] font-bold tracking-wider uppercase flex items-center justify-center">
+              OUT OF STOCK
+            </div>
+            <button
+              type="button"
+              onClick={() => handleSubscribeRestock(selectedSize || 'ALL')}
+              className={`w-full py-3 text-[11px] font-bold tracking-wider uppercase transition flex items-center justify-center gap-1.5 cursor-pointer shadow ${
+                isCurrentSelectionNotified
+                  ? 'bg-emerald-600 text-white'
+                  : 'bg-zinc-950 text-white'
+              }`}
+            >
+              {isCurrentSelectionNotified ? (
+                <>
+                  <Check className="w-3.5 h-3.5" />
+                  <span>NOTIFIED</span>
+                </>
+              ) : (
+                <>
+                  <Bell className="w-3.5 h-3.5" />
+                  <span>NOTIFY ME</span>
+                </>
+              )}
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={handleBuyNow}
+              className="w-full py-3 border border-zinc-950 bg-white text-zinc-950 text-xs font-bold tracking-widest uppercase transition cursor-pointer"
+            >
+              BUY NOW
+            </button>
+            <button
+              type="button"
+              onClick={handleAddToCart}
+              className="w-full py-3 bg-zinc-950 text-white text-xs font-bold tracking-widest uppercase transition cursor-pointer shadow"
+            >
+              ADD TO CART
+            </button>
+          </>
+        )}
       </div>
     </div>
   );

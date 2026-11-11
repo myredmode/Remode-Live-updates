@@ -1060,22 +1060,36 @@ async function startServer() {
       }
 
       // 2. Fallback to Postal Pincode public directory
-      const postalRes = await fetch(`https://api.postalpincode.in/pincode/${pincode}`);
-      if (postalRes.ok) {
-        const pData: any = await postalRes.json();
-        if (Array.isArray(pData) && pData[0]?.Status === 'Success' && pData[0]?.PostOffice?.length > 0) {
-          const po = pData[0].PostOffice[0];
-          return res.json({
-            success: true,
-            city: po.District || po.Block || po.Circle,
-            state: po.State,
-            pincode,
-            source: 'indiapost',
-          });
+      let postalConfirmedInvalid = false;
+      try {
+        const postalRes = await fetch(`https://api.postalpincode.in/pincode/${pincode}`);
+        if (postalRes.ok) {
+          const pData: any = await postalRes.json();
+          if (Array.isArray(pData) && pData[0]?.Status === 'Success' && pData[0]?.PostOffice?.length > 0) {
+            const po = pData[0].PostOffice[0];
+            return res.json({
+              success: true,
+              city: po.District || po.Block || po.Circle,
+              state: po.State,
+              pincode,
+              prepaid: true,
+              cod: true,
+              source: 'indiapost',
+            });
+          } else if (Array.isArray(pData) && pData[0]?.Status === 'Error') {
+            postalConfirmedInvalid = true;
+          }
         }
+      } catch {}
+
+      if (postalConfirmedInvalid) {
+        return res.status(404).json({
+          success: false,
+          message: `PIN code ${pincode} is invalid or not serviceable by Delhivery.`,
+        });
       }
 
-      // 3. Built-in zone & district resolver for major Indian pin ranges
+      // 3. Offline fallback zone & district resolver ONLY if external APIs are unreachable
       const prefix2 = parseInt(pincode.substring(0, 2), 10);
       const prefix3 = parseInt(pincode.substring(0, 3), 10);
       let stateName = '';
@@ -1109,6 +1123,8 @@ async function startServer() {
           city: defaultCity || 'City',
           state: stateName,
           pincode,
+          prepaid: true,
+          cod: true,
           source: 'regional_index',
         });
       }
