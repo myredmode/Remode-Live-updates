@@ -216,12 +216,17 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   const [barcode, setBarcode] = useState((initialProduct as any)?.barcode || '');
   const [hsnCode, setHsnCode] = useState((initialProduct as any)?.hsnCode || '');
 
-  // Unassigned media buffer when photos are uploaded before selecting any color variation
+  // Unassigned media buffer ONLY when no color variation exists yet
+  const hasInitialColorSetup = Boolean(
+    initialProduct &&
+      ((initialProduct.colorOptions && initialProduct.colorOptions.length > 0) ||
+        initialProduct.color)
+  );
   const [unassignedPrimaryImage, setUnassignedPrimaryImage] = useState<string>(
-    !initialProduct ? '' : initialProduct.mainImage || ''
+    !initialProduct || hasInitialColorSetup ? '' : initialProduct.mainImage || ''
   );
   const [unassignedGalleryImages, setUnassignedGalleryImages] = useState<string[]>(
-    !initialProduct
+    !initialProduct || hasInitialColorSetup
       ? []
       : initialProduct.images && initialProduct.images.length > 0
       ? initialProduct.images
@@ -283,7 +288,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   const [showImageModal, setShowImageModal] = useState(false);
   const [inputImageUrl, setInputImageUrl] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const { images: uploadedImages, addImage: saveToLibrary } = useUploadedImages();
+  const { images: uploadedImages, addImage: saveToLibrary, removeImage: removeFromLibrary } = useUploadedImages();
 
   // Toast feedback
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -707,6 +712,17 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   const handleSaveColor = (savedColor: ColorDef) => {
     setIsDirty(true);
     if (editingColor) {
+      // Permanently purge any photo that was removed inside ColorEditorModal
+      const prevImgs = new Set([editingColor.primaryImage, ...(editingColor.galleryImages || [])].filter(Boolean));
+      const nextImgs = new Set([savedColor.primaryImage, ...(savedColor.galleryImages || [])].filter(Boolean));
+      prevImgs.forEach((oldUrl) => {
+        if (oldUrl && !nextImgs.has(oldUrl)) {
+          removeFromLibrary(oldUrl);
+          setUnassignedGalleryImages((prev) => prev.filter((u) => u !== oldUrl));
+          setUnassignedPrimaryImage((curr) => (curr === oldUrl ? '' : curr));
+        }
+      });
+
       setColors((prev) =>
         prev.map((c) => (c.id === savedColor.id ? savedColor : c))
       );
@@ -734,6 +750,10 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
               galleryImages: unassignedGalleryImages,
             }
           : savedColor;
+      if (colors.length === 0) {
+        setUnassignedGalleryImages([]);
+        setUnassignedPrimaryImage('');
+      }
       setColors((prev) => [...prev, colorWithInheritedMedia]);
       setActiveColorIndex(colors.length);
       showToast(`Added color "${savedColor.name}" (${savedColor.code})`);
@@ -756,6 +776,16 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   const performDeleteColor = (col: ColorDef) => {
     const idx = colors.findIndex((c) => c.id === col.id);
     const updated = colors.filter((c) => c.id !== col.id);
+    const remainingColorUrls = new Set(
+      updated.flatMap((c) => [c.primaryImage, ...(c.galleryImages || [])]).filter(Boolean)
+    );
+    [col.primaryImage, ...(col.galleryImages || [])].forEach((u) => {
+      if (u && !remainingColorUrls.has(u)) {
+        removeFromLibrary(u);
+        setUnassignedGalleryImages((prev) => prev.filter((img) => img !== u));
+        setUnassignedPrimaryImage((curr) => (curr === u ? '' : curr));
+      }
+    });
     setColors(updated);
     setActiveColorIndex(Math.max(0, idx - 1));
     setVariants((prev) =>
@@ -765,7 +795,7 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
     );
     setColorToDelete(null);
     setIsDirty(true);
-    showToast(`Deleted color "${col.name}" and its variants`);
+    showToast(`Deleted color "${col.name}" and its photos`);
   };
 
   const handleDeactivateColor = (col: ColorDef) => {
@@ -1038,31 +1068,33 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
   };
 
   const removeImageFromActiveColor = (imgUrl: string) => {
+    if (!imgUrl) return;
     setIsDirty(true);
-    if (colors.length === 0) {
-      setUnassignedGalleryImages((prev) => {
-        const remaining = prev.filter((img) => img !== imgUrl);
-        setUnassignedPrimaryImage((curr) => (curr === imgUrl ? remaining[0] || '' : curr));
-        return remaining;
-      });
-      showToast('Photo removed');
-      return;
+    // Permanently remove from local uploaded image library and unassigned buffer as well
+    removeFromLibrary(imgUrl);
+    setUnassignedGalleryImages((prev) => {
+      const remaining = prev.filter((img) => img !== imgUrl);
+      setUnassignedPrimaryImage((curr) => (curr === imgUrl ? remaining[0] || '' : curr));
+      return remaining;
+    });
+
+    if (colors.length > 0) {
+      setColors((prev) =>
+        prev.map((col, idx) => {
+          if (idx !== activeColorIndex) return col;
+          const remaining = (col.galleryImages || []).filter((img) => img !== imgUrl);
+          return {
+            ...col,
+            galleryImages: remaining,
+            primaryImage:
+              col.primaryImage === imgUrl
+                ? remaining[0] || ''
+                : col.primaryImage,
+          };
+        })
+      );
     }
-    setColors((prev) =>
-      prev.map((col, idx) => {
-        if (idx !== activeColorIndex) return col;
-        const remaining = col.galleryImages.filter((img) => img !== imgUrl);
-        return {
-          ...col,
-          galleryImages: remaining,
-          primaryImage:
-            col.primaryImage === imgUrl
-              ? remaining[0] || ''
-              : col.primaryImage,
-        };
-      })
-    );
-    showToast('Photo removed');
+    showToast('Photo permanently deleted');
   };
 
   // Direct native File Upload Handler
@@ -1166,14 +1198,16 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
       return;
     }
 
-    const candidateCovers = [
-      activeColor?.primaryImage,
-      colors[0]?.primaryImage,
-      ...(activeColor?.galleryImages || []),
-      ...(colors[0]?.galleryImages || []),
-      unassignedPrimaryImage,
-      ...unassignedGalleryImages,
-    ].filter(Boolean) as string[];
+    const candidateCovers = (
+      colors.length > 0
+        ? [
+            activeColor?.primaryImage,
+            colors[0]?.primaryImage,
+            ...(activeColor?.galleryImages || []),
+            ...(colors[0]?.galleryImages || []),
+          ]
+        : [unassignedPrimaryImage, ...unassignedGalleryImages]
+    ).filter(Boolean) as string[];
 
     // Prefer a real uploaded image (data:image/ or non-Unsplash URL) over any sample placeholder
     const mainCover =
@@ -1283,11 +1317,12 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
     const inactiveRowKeys = variants.filter((v) => !v.active).map((v) => v.key);
 
     const allRawProductImages = Array.from(
-      new Set([
-        mainCover,
-        ...unassignedGalleryImages,
-        ...colors.flatMap((c) => [c.primaryImage, ...(c.galleryImages || [])]),
-      ].filter(Boolean))
+      new Set(
+        (colors.length > 0
+          ? [mainCover, ...colors.flatMap((c) => [c.primaryImage, ...(c.galleryImages || [])])]
+          : [mainCover, ...unassignedGalleryImages]
+        ).filter(Boolean)
+      )
     );
     const hasRealProductImg = allRawProductImages.some((u) => !isSampleOrEphemeralUrl(u));
     const finalProductImages = hasRealProductImg
@@ -2437,8 +2472,20 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                       alt={name || 'Product Image'}
                       className="w-full h-full object-cover object-center"
                     />
+                    {/* Direct Delete Cover Photo button */}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeImageFromActiveColor(currentPrimaryImage);
+                      }}
+                      className="absolute top-2.5 right-2.5 z-10 p-2 rounded-xl bg-rose-600/90 hover:bg-rose-600 text-white shadow-md transition cursor-pointer"
+                      title="Permanently Delete Photo"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                     {/* Subtle hover overlay only when image exists */}
-                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
                       <span className="px-3 py-1.5 rounded-xl bg-white/95 text-slate-900 text-xs font-bold shadow-md">
                         Change Cover Photo
                       </span>

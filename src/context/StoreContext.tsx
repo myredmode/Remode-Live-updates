@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useIpGeolocation } from '../hooks/useIpGeolocation';
+import { deleteSavedUploadedImage } from '../utils/userUploadedImages';
 import {
   Product,
   Category,
@@ -109,6 +110,34 @@ function productHasRealImage(p?: Partial<Product>): boolean {
     return true;
   }
   return false;
+}
+
+function collectAllProductImageUrls(p?: Partial<Product>): string[] {
+  if (!p) return [];
+  const urls = new Set<string>();
+  if (p.mainImage && typeof p.mainImage === 'string') urls.add(p.mainImage);
+  if (Array.isArray(p.images)) {
+    p.images.forEach((u) => {
+      if (u && typeof u === 'string') urls.add(u);
+    });
+  }
+  if (Array.isArray(p.colorOptions)) {
+    p.colorOptions.forEach((co) => {
+      if (co?.image && typeof co.image === 'string') urls.add(co.image);
+      if (Array.isArray(co?.images)) {
+        co.images.forEach((u) => {
+          if (u && typeof u === 'string') urls.add(u);
+        });
+      }
+    });
+  }
+  return Array.from(urls);
+}
+
+function productHasFakePlaceholderOnly(p?: Partial<Product>): boolean {
+  if (!p || productHasRealImage(p)) return false;
+  const urls = collectAllProductImageUrls(p);
+  return urls.some((u) => u.includes('images.unsplash.com') || u.startsWith('/uploads/'));
 }
 
 async function compressSingleDataUrl(dataUrl: string, maxChars = 85000): Promise<string> {
@@ -1804,10 +1833,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           map.set(incoming.id, incoming);
         } else {
           const existingHasReal = !initialIdSet.has(existing.id) && productHasRealImage(existing);
-          const incomingHasReal = !initialIdSet.has(incoming.id) && productHasRealImage(incoming);
+          const incomingHasFakeOnly = !initialIdSet.has(incoming.id) && productHasFakePlaceholderOnly(incoming);
 
-          // Never let a placeholder/Unsplash image overwrite a real uploaded photo on a custom product
-          if (existingHasReal && !incomingHasReal) {
+          // Only protect existing real images if incoming has a known fake Unsplash/ephemeral URL
+          if (existingHasReal && incomingHasFakeOnly) {
             map.set(incoming.id, {
               ...incoming,
               mainImage: existing.mainImage,
@@ -1819,7 +1848,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
           const existingTime = getProductTimeMs(existing);
           const incomingTime = getProductTimeMs(incoming);
-          if (incomingTime >= existingTime || (incomingHasReal && !existingHasReal)) {
+          if (incomingTime >= existingTime) {
             map.set(incoming.id, incoming);
           }
         }
@@ -2925,6 +2954,17 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       updatedAt: nowIso,
     } as Product;
 
+    // Permanently delete any removed photo from the local uploaded image library
+    if (targetProduct) {
+      const oldUrls = collectAllProductImageUrls(targetProduct);
+      const newUrls = new Set(collectAllProductImageUrls(updatedProd));
+      oldUrls.forEach((oldUrl) => {
+        if (!newUrls.has(oldUrl)) {
+          deleteSavedUploadedImage(oldUrl);
+        }
+      });
+    }
+
     setProducts((prev) => {
       const exists = prev.some((p) => p.id === id);
       const next = exists ? prev.map((p) => (p.id === id ? updatedProd : p)) : [updatedProd, ...prev];
@@ -2937,11 +2977,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return next;
     });
 
-    // Immediately sync the deduplicated product to Cloud Firestore across all devices
+    // Immediately overwrite the full product document in Cloud Firestore across all devices so deleted photos never linger
     ensureCompactProductForFirestore(updatedProd)
       .then((compactProd) => {
         const firestorePayload = prepareProductForFirestore(compactProd);
-        return setDoc(doc(db, 'products', id), firestorePayload, { merge: true });
+        return setDoc(doc(db, 'products', id), firestorePayload);
       })
       .catch((err) => {
         console.error('Firestore product update sync error:', err);
@@ -2974,6 +3014,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const deleteProduct = (id: string) => {
+    // 0. Permanently purge all photos belonging to this product from the local image library
+    const target = products.find((p) => p.id === id);
+    if (target) {
+      collectAllProductImageUrls(target).forEach((url) => {
+        deleteSavedUploadedImage(url);
+      });
+    }
+
     // 1. Immediately remove from local reactive state & storage
     setProducts((prev) => {
       const next = prev.filter((p) => p.id !== id);

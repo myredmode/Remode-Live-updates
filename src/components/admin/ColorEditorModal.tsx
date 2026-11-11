@@ -26,6 +26,7 @@ import {
   extractDominantColorFromImage,
 } from './colorData';
 import { uploadImageFile } from '../../utils/imageUpload';
+import { deleteSavedUploadedImage } from '../../utils/userUploadedImages';
 
 export interface ColorDef {
   id: string;
@@ -371,6 +372,7 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
 
   // Remove image from gallery
   const handleRemoveGalleryImage = (img: string) => {
+    deleteSavedUploadedImage(img);
     const remaining = galleryImages.filter((i) => i !== img);
     setGalleryImages(remaining);
     if (primaryImage === img) {

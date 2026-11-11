@@ -212,6 +212,25 @@ async function startServer() {
     }
   });
 
+  const collectServerProductUploads = (p: any): string[] => {
+    if (!p || typeof p !== 'object') return [];
+    const list: string[] = [];
+    const check = (u?: string) => {
+      if (u && typeof u === 'string' && u.startsWith('/uploads/')) {
+        list.push(path.basename(u.split('?')[0]));
+      }
+    };
+    check(p.mainImage);
+    if (Array.isArray(p.images)) p.images.forEach(check);
+    if (Array.isArray(p.colorOptions)) {
+      p.colorOptions.forEach((c: any) => {
+        check(c?.image);
+        if (Array.isArray(c?.images)) c.images.forEach(check);
+      });
+    }
+    return Array.from(new Set(list));
+  };
+
   app.put('/api/products/:id', (req: Request, res: Response) => {
     try {
       const id = req.params.id;
@@ -224,6 +243,16 @@ async function startServer() {
       const existing = readServerProducts();
       const idx = existing.findIndex((p) => p.id === id);
       if (idx >= 0) {
+        const oldFiles = collectServerProductUploads(existing[idx]);
+        const newFiles = new Set(collectServerProductUploads(normalized));
+        oldFiles.forEach((fileName) => {
+          if (!newFiles.has(fileName)) {
+            try {
+              const fp = path.join(uploadsDir, fileName);
+              if (fs.existsSync(fp)) fs.unlinkSync(fp);
+            } catch {}
+          }
+        });
         existing[idx] = { ...existing[idx], ...normalized };
       } else {
         existing.unshift(normalized);
@@ -238,7 +267,17 @@ async function startServer() {
   app.delete('/api/products/:id', (req: Request, res: Response) => {
     try {
       const id = req.params.id;
-      const existing = readServerProducts().filter((p) => p.id !== id);
+      const all = readServerProducts();
+      const target = all.find((p) => p.id === id);
+      if (target) {
+        collectServerProductUploads(target).forEach((fileName) => {
+          try {
+            const fp = path.join(uploadsDir, fileName);
+            if (fs.existsSync(fp)) fs.unlinkSync(fp);
+          } catch {}
+        });
+      }
+      const existing = all.filter((p) => p.id !== id);
       writeServerProducts(existing);
       return res.json({ success: true, deletedId: id });
     } catch (err: any) {
