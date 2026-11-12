@@ -920,6 +920,7 @@ export const ProductDetail: React.FC = () => {
                 <div className="flex items-center gap-2.5 flex-wrap">
                   {product.colorOptions.map((opt) => {
                     const isSelected = (selectedColor || '').toLowerCase() === opt.name.toLowerCase();
+                    const isMulti = opt.name.toLowerCase().includes('multi');
                     const hex = COLOR_HEX_MAP[opt.name.toLowerCase()] || opt.hex || '#6b7280';
                     return (
                       <button
@@ -931,7 +932,14 @@ export const ProductDetail: React.FC = () => {
                             ? 'border-zinc-950 ring-2 ring-zinc-950 ring-offset-1 scale-105'
                             : 'border-zinc-300 hover:border-zinc-700'
                         }`}
-                        style={{ backgroundColor: hex }}
+                        style={
+                          isMulti
+                            ? {
+                                background:
+                                  'linear-gradient(135deg, #ef4444 0%, #f59e0b 25%, #10b981 50%, #3b82f6 75%, #ec4899 100%)',
+                              }
+                            : { backgroundColor: hex }
+                        }
                         title={opt.name}
                         aria-label={opt.name}
                       />

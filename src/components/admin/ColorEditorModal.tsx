@@ -21,6 +21,8 @@ import {
 import {
   BASE_COLORS,
   QUICK_FANCY_PRESETS,
+  MULTI_COLOR_GRADIENT,
+  isMultiColorName,
   getAutoColorCode,
   isValidHex,
   extractDominantColorFromImage,
@@ -482,7 +484,11 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
           <div className="flex items-center gap-2.5">
             <span
               className="w-4 h-4 rounded-full border border-black/15 shrink-0 transition-colors"
-              style={{ backgroundColor: displayHex }}
+              style={
+                isMultiColorName(customerName, baseColorName)
+                  ? { background: MULTI_COLOR_GRADIENT }
+                  : { backgroundColor: displayHex }
+              }
             />
             <h3
               id="color-modal-title"
@@ -551,7 +557,11 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
                   >
                     <span
                       className="w-3 h-3 rounded-full border border-black/15 shrink-0"
-                      style={{ backgroundColor: preset.hex }}
+                      style={
+                        isMultiColorName(preset.name)
+                          ? { background: MULTI_COLOR_GRADIENT }
+                          : { backgroundColor: preset.hex }
+                      }
                     />
                     <span className="truncate">{preset.name}</span>
                   </button>
@@ -571,7 +581,11 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
                 <div className="relative flex items-center">
                   <span
                     className="w-3.5 h-3.5 rounded-full border border-black/15 absolute left-3 pointer-events-none"
-                    style={{ backgroundColor: currentBaseMeta.sampleHex }}
+                    style={
+                      isMultiColorName(baseColorName)
+                        ? { background: MULTI_COLOR_GRADIENT }
+                        : { backgroundColor: currentBaseMeta.sampleHex }
+                    }
                   />
                   <select
                     value={baseColorName}
@@ -642,7 +656,11 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
                           <span className="flex items-center gap-2 truncate">
                             <span
                               className="w-3 h-3 rounded-full border border-black/15 shrink-0"
-                              style={{ backgroundColor: sug.hex }}
+                              style={
+                                isMultiColorName(sug.name, baseColorName)
+                                  ? { background: MULTI_COLOR_GRADIENT }
+                                  : { backgroundColor: sug.hex }
+                              }
                             />
                             <span className="truncate">{sug.name}</span>
                           </span>
@@ -674,7 +692,11 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
                       >
                         <span
                           className="w-2 h-2 rounded-full border border-black/15 shrink-0"
-                          style={{ backgroundColor: sug.hex }}
+                          style={
+                            isMultiColorName(sug.name, baseColorName)
+                              ? { background: MULTI_COLOR_GRADIENT }
+                              : { backgroundColor: sug.hex }
+                          }
                         />
                         <span>{sug.name}</span>
                       </button>
@@ -705,7 +727,11 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
                 <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-50 border border-slate-200 text-[11px] text-slate-600">
                   <span
                     className="w-2.5 h-2.5 rounded-full border border-black/15 shrink-0"
-                    style={{ backgroundColor: displayHex }}
+                    style={
+                      isMultiColorName(customerName, baseColorName)
+                        ? { background: MULTI_COLOR_GRADIENT }
+                        : { backgroundColor: displayHex }
+                    }
                   />
                   <span className="font-mono text-[10px]">{displayHex}</span>
                   <span className="text-slate-300">·</span>
@@ -804,7 +830,11 @@ export const ColorEditorModal: React.FC<ColorEditorModalProps> = ({
                   <div className="flex items-center gap-2">
                     <span
                       className="w-5 h-5 rounded-full border border-black/15 shrink-0"
-                      style={{ backgroundColor: displayHex }}
+                      style={
+                        isMultiColorName(customerName, baseColorName)
+                          ? { background: MULTI_COLOR_GRADIENT }
+                          : { backgroundColor: displayHex }
+                      }
                     />
                     <div className="text-xs">
                       <span className="font-semibold text-slate-800">

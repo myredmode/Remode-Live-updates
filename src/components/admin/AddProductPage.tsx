@@ -38,6 +38,8 @@ import { DeleteColorModal } from './DeleteColorModal';
 import {
   BASE_COLORS,
   QUICK_FANCY_PRESETS,
+  MULTI_COLOR_GRADIENT,
+  isMultiColorName,
   getAutoColorCode,
   isValidHex,
   extractDominantColorFromImage,
@@ -2071,7 +2073,11 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                           >
                             <span
                               className="w-2.5 h-2.5 rounded-full border border-black/20 shrink-0"
-                              style={{ backgroundColor: base.sampleHex }}
+                              style={
+                                isMultiColorName(base.name)
+                                  ? { background: MULTI_COLOR_GRADIENT }
+                                  : { backgroundColor: base.sampleHex }
+                              }
                             />
                             <span>{base.name}</span>
                           </button>
@@ -2148,7 +2154,11 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                             >
                               <span
                                 className="w-3 h-3 rounded-full border border-black/20 shrink-0"
-                                style={{ backgroundColor: preset.hex }}
+                                style={
+                                  isMultiColorName(preset.name, selectedBaseColorFamily)
+                                    ? { background: MULTI_COLOR_GRADIENT }
+                                    : { backgroundColor: preset.hex }
+                                }
                               />
                               <span>{preset.name}</span>
                               {isCurrentlyActive ? (
@@ -2193,7 +2203,11 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                             <div className="flex items-center gap-2.5 min-w-0">
                               <span
                                 className="w-4 h-4 rounded-full border border-black/20 shrink-0 shadow-2xs"
-                                style={{ backgroundColor: col.hex }}
+                                style={
+                                  isMultiColorName(col.name, col.baseColor)
+                                    ? { background: MULTI_COLOR_GRADIENT }
+                                    : { backgroundColor: col.hex }
+                                }
                               />
                               <span className="font-bold text-xs text-slate-900 truncate">
                                 {col.name}
@@ -2336,7 +2350,11 @@ export const AddProductPage: React.FC<AddProductPageProps> = ({
                                 <div className="flex items-center gap-2">
                                   <span
                                     className="w-3 h-3 rounded-full border border-black/20 shrink-0"
-                                    style={{ backgroundColor: v.colorHex }}
+                                    style={
+                                      isMultiColorName(v.colorName)
+                                        ? { background: MULTI_COLOR_GRADIENT }
+                                        : { backgroundColor: v.colorHex }
+                                    }
                                   />
                                   <span>{v.colorName}</span>
                                 </div>

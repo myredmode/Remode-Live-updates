@@ -14,7 +14,31 @@ export interface BaseColorMeta {
   suggestions: ColorSuggestion[];
 }
 
+export const MULTI_COLOR_GRADIENT =
+  'conic-gradient(from 0deg, #ef4444, #f59e0b, #10b981, #3b82f6, #8b5cf6, #ec4899, #ef4444)';
+
+export const isMultiColorName = (name?: string, baseColor?: string): boolean => {
+  const n = (name || '').toLowerCase();
+  const b = (baseColor || '').toLowerCase();
+  return n.includes('multi') || b.includes('multi');
+};
+
 export const BASE_COLORS: BaseColorMeta[] = [
+  {
+    id: 'multi',
+    name: 'Multi Color',
+    sampleHex: '#EC4899',
+    suggestions: [
+      { name: 'Multi Color', hex: '#EC4899', code: 'MC' },
+      { name: 'Floral Multi', hex: '#F43F5E', code: 'FM' },
+      { name: 'Printed Multi', hex: '#8B5CF6', code: 'PM' },
+      { name: 'Festive Multi', hex: '#D97706', code: 'FSM' },
+      { name: 'Pastel Multi', hex: '#F472B6', code: 'PSM' },
+      { name: 'Tie-Dye Multi', hex: '#6366F1', code: 'TDM' },
+      { name: 'Ethnic Multi', hex: '#E11D48', code: 'EM' },
+      { name: 'Abstract Multi', hex: '#10B981', code: 'AM' },
+    ],
+  },
   {
     id: 'green',
     name: 'Green',
@@ -260,6 +284,7 @@ export const BASE_COLORS: BaseColorMeta[] = [
 
 // Quick presets requested explicitly in Requirement 15
 export const QUICK_FANCY_PRESETS: ColorSuggestion[] = [
+  { name: 'Multi Color', hex: '#EC4899', code: 'MC' },
   { name: 'Ivory White', hex: '#FFFFF0', code: 'IW' },
   { name: 'Pearl White', hex: '#F8F6F0', code: 'PW' },
   { name: 'Jet Black', hex: '#1C1C1C', code: 'JB' },

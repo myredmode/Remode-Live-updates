@@ -619,6 +619,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
               <div className="hidden md:flex items-center gap-1.5 pt-1">
                 {displayedSwatches.map((opt) => {
                   const hex = getColorHex(opt.name);
+                  const isMulti = opt.name.toLowerCase().includes('multi');
                   const isCurrent = (effectiveColor || '').toLowerCase() === opt.name.toLowerCase();
                   return (
                     <button
@@ -633,7 +634,14 @@ export const ProductCard: React.FC<ProductCardProps> = ({
                           ? 'ring-1 ring-zinc-950 border-zinc-900 scale-105'
                           : 'border-zinc-300 hover:border-zinc-500'
                       }`}
-                      style={{ backgroundColor: hex }}
+                      style={
+                        isMulti
+                          ? {
+                              background:
+                                'linear-gradient(135deg, #ef4444 0%, #f59e0b 25%, #10b981 50%, #3b82f6 75%, #ec4899 100%)',
+                            }
+                          : { backgroundColor: hex }
+                      }
                       title={opt.name}
                       aria-label={opt.name}
                     />
