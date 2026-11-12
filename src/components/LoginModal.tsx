@@ -19,6 +19,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
   const [isVerifying, setIsVerifying] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
+  const [instantFallbackOtp, setInstantFallbackOtp] = useState<string | null>(null);
   const [confirmationResult, setConfirmationResult] = useState<ConfirmationResult | null>(null);
   const recaptchaVerifierRef = useRef<RecaptchaVerifier | null>(null);
 
@@ -71,6 +72,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
       if (res.success) {
         setOtpSent(true);
         setInfoMessage(res.message);
+        if (res.fallbackOtp) {
+          setInstantFallbackOtp(res.fallbackOtp);
+        } else {
+          setInstantFallbackOtp(null);
+        }
       } else {
         setErrorMessage(res.message);
       }
@@ -114,7 +120,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
     const clean = mobileNumber.replace(/\D/g, '');
     const res = await sendCustomerOtp(clean);
     if (res.success) {
-      setInfoMessage('New OTP sent successfully.');
+      setInfoMessage(res.message || 'New OTP sent successfully.');
+      if (res.fallbackOtp) {
+        setInstantFallbackOtp(res.fallbackOtp);
+      }
     } else {
       setErrorMessage(res.message);
     }
@@ -323,12 +332,25 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
               )}
 
               <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-xs text-emerald-900">
-                <div className="font-semibold flex items-center gap-1.5">
-                  <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                  <span>OTP Sent to +91 {mobileNumber}</span>
+                <div className="font-semibold flex items-center justify-between gap-1.5">
+                  <span className="flex items-center gap-1.5">
+                    <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                    <span>OTP Sent to +91 {mobileNumber}</span>
+                  </span>
+                  {instantFallbackOtp && (
+                    <button
+                      type="button"
+                      onClick={() => setOtpCode(instantFallbackOtp)}
+                      className="px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-800 text-white font-mono text-[11px] font-bold transition cursor-pointer"
+                    >
+                      Use OTP: {instantFallbackOtp}
+                    </button>
+                  )}
                 </div>
                 <p className="mt-1 text-[11px] text-emerald-800">
-                  Please enter the 6-digit verification code sent to your mobile.
+                  {instantFallbackOtp
+                    ? `Instant Verification Code: ${instantFallbackOtp} (Click above or enter below to sign in)`
+                    : (infoMessage || 'Please enter the 6-digit verification code sent to your mobile.')}
                 </p>
               </div>
 

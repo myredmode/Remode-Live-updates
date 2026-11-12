@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Smartphone,
   Check,
@@ -42,9 +42,9 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
         provider: 'meta_whatsapp',
         enabled: true,
         isPrimary: true,
-        phoneNumberId: '109845729104823',
-        wabaId: '392019482910482',
-        accessToken: 'EAAG9xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+        phoneNumberId: '1375149605673144',
+        wabaId: '2745819689145292',
+        accessToken: '',
         templateName: 'redmode_otp_verification',
         languageCode: 'en_US',
         otpVerificationEnabled: true,
@@ -68,13 +68,13 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
         id: 'fast2sms',
         name: 'Fast2SMS Quick OTP Gateway',
         provider: 'fast2sms',
-        enabled: false,
+        enabled: true,
         isPrimary: false,
         apiKey: '',
         route: 'otp',
         otpVerificationEnabled: true,
         orderUpdatesEnabled: false,
-        codVerificationEnabled: false,
+        codVerificationEnabled: true,
       },
       {
         id: 'msg91',
@@ -93,23 +93,104 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
     ],
   };
 
-  const [smsData, setSmsData] = useState<SmsIntegrationSettings>(
-    settings.smsSettings || defaultSettings
+  const [envConnected, setEnvConnected] = useState<{
+    fast2sms: boolean;
+    meta_whatsapp: boolean;
+    twofactor: boolean;
+  }>({
+    fast2sms: true,
+    meta_whatsapp: true,
+    twofactor: false,
+  });
+
+  useEffect(() => {
+    fetch('/api/admin/sms-settings')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data?.envConnected) {
+          setEnvConnected(data.envConnected);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const sanitizeSmsSettings = (raw?: SmsIntegrationSettings): SmsIntegrationSettings => {
+    const base = raw && Array.isArray(raw.gateways) ? raw : defaultSettings;
+    return {
+      ...base,
+      gateways: base.gateways.map((g) => {
+        if (g.provider === 'meta_whatsapp') {
+          return {
+            ...g,
+            phoneNumberId:
+              !g.phoneNumberId || g.phoneNumberId === '109845729104823'
+                ? '1375149605673144'
+                : g.phoneNumberId,
+            wabaId:
+              !g.wabaId || g.wabaId === '392019482910482'
+                ? '2745819689145292'
+                : g.wabaId,
+            accessToken:
+              g.accessToken && g.accessToken.includes('EAAG9xxxxxxx')
+                ? ''
+                : g.accessToken,
+          };
+        }
+        if (g.provider === 'fast2sms') {
+          return {
+            ...g,
+            enabled: true,
+          };
+        }
+        return g;
+      }),
+    };
+  };
+
+  const [smsData, setSmsData] = useState<SmsIntegrationSettings>(() =>
+    sanitizeSmsSettings(settings.smsSettings)
   );
 
-  const [activeTabGateway, setActiveTabGateway] = useState<string>('meta_whatsapp');
+  // Sync when settings.smsSettings finishes loading from Cloud Firestore
+  useEffect(() => {
+    if (settings.smsSettings && Array.isArray(settings.smsSettings.gateways)) {
+      setSmsData(sanitizeSmsSettings(settings.smsSettings));
+    }
+  }, [settings.smsSettings]);
+
+  const [activeTabGateway, setActiveTabGateway] = useState<string>(
+    settings.smsSettings?.activeProviderId || 'meta_whatsapp'
+  );
   const [showTokens, setShowTokens] = useState<Record<string, boolean>>({});
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
 
-  // Live Test OTP Simulator
-  const [testMobile, setTestMobile] = useState<string>('7302797464');
-  const [testProvider, setTestProvider] = useState<string>('meta_whatsapp');
+  // Live Test OTP Simulator (Default to a sample customer mobile since 7302797464 is the WhatsApp Business Sender Number itself)
+  const [testMobile, setTestMobile] = useState<string>('');
+  const [testProvider, setTestProvider] = useState<string>(
+    settings.smsSettings?.activeProviderId || 'meta_whatsapp'
+  );
   const [isSendingTestOtp, setIsSendingTestOtp] = useState<boolean>(false);
   const [testResult, setTestResult] = useState<{
     success: boolean;
     message: string;
     details?: string;
+    testOtp?: string;
   } | null>(null);
+
+  const isGatewayConfigured = (g: SmsGatewayConfig): boolean => {
+    if (g.provider === 'meta_whatsapp') {
+      const pid = (g.phoneNumberId || '').trim();
+      return Boolean((pid && pid !== '109845729104823') || envConnected.meta_whatsapp);
+    }
+    if (g.provider === 'fast2sms') {
+      return Boolean((g.apiKey || '').trim().length >= 6 || envConnected.fast2sms);
+    }
+    if (g.provider === 'twofactor') {
+      return Boolean((g.apiKey || '').trim().length >= 6 || envConnected.twofactor);
+    }
+    const key = (g.apiKey || '').trim();
+    return key.length >= 6;
+  };
 
   const toggleShowToken = (key: string) => {
     setShowTokens((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -127,6 +208,8 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
   };
 
   const handleSelectPrimary = (gatewayId: string) => {
+    setActiveTabGateway(gatewayId);
+    setTestProvider(gatewayId);
     setSmsData((prev) => ({
       ...prev,
       activeProviderId: gatewayId,
@@ -147,7 +230,7 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
     setTimeout(() => setSaveSuccessMsg(null), 3500);
   };
 
-  const handleSendTestOtp = async () => {
+  const handleSendTestOtp = async (simulate: boolean = false) => {
     const cleanNumber = testMobile.replace(/\D/g, '').slice(-10);
     if (cleanNumber.length !== 10) {
       setTestResult({
@@ -156,6 +239,9 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
       });
       return;
     }
+
+    // Auto-save current form edits before testing so backend has latest keys
+    updateSmsSettings(smsData);
 
     setIsSendingTestOtp(true);
     setTestResult(null);
@@ -171,6 +257,7 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
           mobile: cleanNumber,
           providerId: testProvider,
           gatewayConfig: smsData.gateways.find((g) => g.id === testProvider),
+          simulate,
         }),
       });
 
@@ -178,12 +265,14 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
       if (response.ok && data.success) {
         setTestResult({
           success: true,
+          testOtp: data.testOtp,
           message: data.message || `Test OTP dispatched to +91 ${cleanNumber} successfully!`,
           details: data.details || `Delivered via ${data.channel?.toUpperCase() || testProvider.toUpperCase()} gateway`,
         });
       } else {
         setTestResult({
           success: false,
+          testOtp: data.testOtp,
           message: data.message || 'Failed to dispatch test OTP via this gateway.',
           details: data.error || 'Please verify API credentials, template ID, or balance.',
         });
@@ -333,11 +422,15 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
         {smsData.gateways.map((g) => {
           const isSelected = g.id === activeTabGateway;
           const isPrimary = g.id === smsData.activeProviderId;
+          const hasRealKey = isGatewayConfigured(g);
           return (
             <button
               key={g.id}
               type="button"
-              onClick={() => setActiveTabGateway(g.id)}
+              onClick={() => {
+                setActiveTabGateway(g.id);
+                setTestProvider(g.id);
+              }}
               className={`px-3.5 py-2 rounded-t-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer flex items-center gap-2 border-b-2 ${
                 isSelected
                   ? 'border-slate-900 text-slate-900 bg-white shadow-2xs font-bold'
@@ -350,8 +443,12 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
                   Primary
                 </span>
               )}
-              {g.enabled && !isPrimary && (
-                <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+              {hasRealKey ? (
+                <span className="w-2 h-2 rounded-full bg-emerald-500" title="Live API Key Configured"></span>
+              ) : (
+                <span className="px-1.5 py-0.2 rounded text-[9px] font-semibold bg-amber-100 text-amber-800">
+                  Key Needed
+                </span>
               )}
             </button>
           );
@@ -362,7 +459,7 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
       <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pb-4 border-b border-slate-100">
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <h4 className="text-sm font-semibold text-slate-900">{currentGateway.name}</h4>
               <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
                 currentGateway.enabled
@@ -371,6 +468,11 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
               }`}>
                 {currentGateway.enabled ? 'GATEWAY ENABLED' : 'GATEWAY DISABLED'}
               </span>
+              {!isGatewayConfigured(currentGateway) && (
+                <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+                  LIVE API KEY NOT ENTERED YET (SANDBOX FALLBACK ACTIVE)
+                </span>
+              )}
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
               {currentGateway.provider === 'meta_whatsapp' && 'Official WhatsApp Cloud API. 1,000 free conversations per month, instant delivery without DLT registration.'}
@@ -556,13 +658,26 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
 
         {currentGateway.provider === 'fast2sms' && (
           <div className="space-y-4">
-            <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-lg text-xs text-amber-900 flex items-start gap-2">
-              <Info className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-              <div>
-                <span className="font-semibold">Fast2SMS Quick SMS Route:</span> Quick setup with wallet recharge at{' '}
-                <a href="https://www.fast2sms.com" target="_blank" rel="noreferrer" className="underline font-bold inline-flex items-center gap-0.5">
-                  fast2sms.com <ExternalLink className="w-2.5 h-2.5" />
-                </a>.
+            <div className="p-3.5 bg-amber-50/90 border border-amber-200 rounded-lg text-xs text-amber-950 space-y-2">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-start gap-2">
+                  <Info className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold">Fast2SMS Quick & OTP Route:</span> Connected with your server API key. Manage wallet & DLT at{' '}
+                    <a href="https://www.fast2sms.com" target="_blank" rel="noreferrer" className="underline font-bold inline-flex items-center gap-0.5">
+                      fast2sms.com <ExternalLink className="w-2.5 h-2.5" />
+                    </a>.
+                  </div>
+                </div>
+                {(envConnected.fast2sms || (currentGateway.apiKey && currentGateway.apiKey.trim().length > 8)) && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 shrink-0">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                    API Key Connected
+                  </span>
+                )}
+              </div>
+              <div className="p-2.5 bg-white/90 border border-amber-300 rounded-md text-[11px] text-amber-900 leading-relaxed">
+                <strong>Important Fast2SMS API Rule:</strong> Fast2SMS blocks API SMS requests (<code className="font-mono bg-amber-100 px-1 rounded">/dev/bulkV2</code>) with the error <em>&ldquo;You need to complete one transaction of 100 INR or more before using API route&rdquo;</em> until you complete your first ₹100+ wallet recharge on <a href="https://www.fast2sms.com" target="_blank" rel="noreferrer" className="underline font-semibold">fast2sms.com</a> (free ₹50 signup credit does not unlock API routes). Once recharged, SMS OTPs will automatically start delivering via this connected key!
               </div>
             </div>
 
@@ -570,6 +685,11 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
               <div className="flex items-center justify-between mb-1">
                 <label className="text-xs font-semibold text-slate-700">
                   Fast2SMS API Key (Authorization Key) <span className="text-rose-500">*</span>
+                  {envConnected.fast2sms && !currentGateway.apiKey && (
+                    <span className="ml-2 text-[10px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">
+                      ✓ Loaded from Server Environment (FAST2SMS_API_KEY)
+                    </span>
+                  )}
                 </label>
                 <button
                   type="button"
@@ -584,7 +704,7 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
                 type={showTokens['fast2sms_token'] ? 'text' : 'password'}
                 value={currentGateway.apiKey || ''}
                 onChange={(e) => handleUpdateGateway(currentGateway.id, { apiKey: e.target.value })}
-                placeholder="Enter Fast2SMS API Key"
+                placeholder={envConnected.fast2sms ? 'Connected via Server FAST2SMS_API_KEY (Leave blank or paste new key to override)' : 'Enter Fast2SMS API Key'}
                 className="w-full text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-slate-900 focus:outline-none"
               />
             </div>
@@ -727,24 +847,33 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
             />
           </div>
 
-          <div className="flex items-end">
+          <div className="flex items-end gap-2">
             <button
               type="button"
-              onClick={handleSendTestOtp}
+              onClick={() => handleSendTestOtp(false)}
               disabled={isSendingTestOtp}
-              className="w-full py-2 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer"
+              className="flex-1 py-2 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer"
             >
               {isSendingTestOtp ? (
                 <>
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  <span>Dispatching...</span>
+                  <span>Sending...</span>
                 </>
               ) : (
                 <>
                   <Send className="w-3.5 h-3.5" />
-                  <span>Send Test OTP</span>
+                  <span>Send Live OTP</span>
                 </>
               )}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSendTestOtp(true)}
+              disabled={isSendingTestOtp}
+              className="py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-xs font-semibold transition cursor-pointer"
+              title="Generate instant Sandbox OTP without external SMS gateway"
+            >
+              Sandbox Test
             </button>
           </div>
         </div>
@@ -758,16 +887,23 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
                 : 'bg-rose-950/80 border border-rose-500/40 text-rose-200'
             }`}
           >
-            <div className="flex items-center gap-2 font-semibold">
-              {testResult.success ? (
-                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-              ) : (
-                <AlertCircle className="w-4 h-4 text-rose-400" />
+            <div className="flex items-center justify-between gap-2 font-semibold flex-wrap">
+              <div className="flex items-center gap-2">
+                {testResult.success ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                )}
+                <span>{testResult.message}</span>
+              </div>
+              {testResult.testOtp && (
+                <span className="px-2 py-0.5 rounded bg-white/10 font-mono text-white text-xs border border-white/20">
+                  Active Test OTP: {testResult.testOtp}
+                </span>
               )}
-              <span>{testResult.message}</span>
             </div>
             {testResult.details && (
-              <p className="text-[11px] opacity-80 pl-6">{testResult.details}</p>
+              <p className="text-[11px] opacity-85 pl-6">{testResult.details}</p>
             )}
           </div>
         )}
