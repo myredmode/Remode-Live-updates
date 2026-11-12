@@ -1,5 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useStore } from '../context/StoreContext';
+import { auth } from '../firebase';
+import { RecaptchaVerifier, signInWithPhoneNumber, ConfirmationResult } from 'firebase/auth';
 import { X, ShieldCheck, Phone, CheckCircle2, UserCheck, ArrowRight, RefreshCw, AlertCircle, Package, MapPin, Smartphone } from 'lucide-react';
 
 interface LoginModalProps {
@@ -8,7 +10,7 @@ interface LoginModalProps {
 }
 
 export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
-  const { userProfile, sendCustomerOtp, verifyCustomerOtp, logoutUser, isLoginOpen, setIsLoginOpen, orders, setActiveView } = useStore();
+  const { userProfile, sendCustomerOtp, verifyCustomerOtp, loginUser, logoutUser, isLoginOpen, setIsLoginOpen, orders, setActiveView } = useStore();
   const [mobileNumber, setMobileNumber] = useState('');
   const [saveForThisDevice, setSaveForThisDevice] = useState(true);
   const [otpSent, setOtpSent] = useState(false);
@@ -18,6 +20,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [instantFallbackOtp, setInstantFallbackOtp] = useState<string | null>(null);
+  const [confirmationResult, setConfirmationResult] = useState<ConfirmationResult | null>(null);
+  const recaptchaVerifierRef = useRef<RecaptchaVerifier | null>(null);
 
   const show = isOpen !== undefined ? isOpen : isLoginOpen;
   const handleClose = () => {
@@ -45,6 +49,21 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
 
     setIsSending(true);
     try {
+      // Trigger Google Firebase Phone Auth (Sends official Google SMS without TRAI DLT registration)
+      try {
+        if (!recaptchaVerifierRef.current) {
+          recaptchaVerifierRef.current = new RecaptchaVerifier(auth, 'customer-firebase-recaptcha', {
+            size: 'invisible',
+            callback: () => {},
+          });
+        }
+        signInWithPhoneNumber(auth, `+91${clean}`, recaptchaVerifierRef.current)
+          .then((confirmation) => {
+            setConfirmationResult(confirmation);
+          })
+          .catch(() => {});
+      } catch {}
+
       const res = await sendCustomerOtp(clean);
       if (res.success) {
         setOtpSent(true);
@@ -64,7 +83,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
     }
   };
 
-  const handleVerifyOtp = (e: React.FormEvent) => {
+  const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
 
@@ -75,6 +94,19 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
 
     setIsVerifying(true);
     const clean = mobileNumber.replace(/\D/g, '');
+
+    // 1. Check if OTP matches Google Firebase SMS OTP
+    if (confirmationResult) {
+      try {
+        await confirmationResult.confirm(otpCode.trim());
+        loginUser(clean);
+        setIsVerifying(false);
+        handleClose();
+        return;
+      } catch {}
+    }
+
+    // 2. Verify with 2Factor / WhatsApp / Instant OTP
     const res = verifyCustomerOtp(clean, otpCode.trim(), saveForThisDevice);
 
     if (res.success) {

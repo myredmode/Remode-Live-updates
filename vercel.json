@@ -1,6 +1,9 @@
 {
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/$1" },
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
+    { "source": "/api/otp/send-otp", "destination": "/api/otp/send-otp" },
+    { "source": "/api/otp/verify-otp", "destination": "/api/otp/verify-otp" },
+    { "source": "/api/sms/test-send", "destination": "/api/sms/test-send" },
+    { "source": "/api/:path*", "destination": "/api/gateway?route=:path*" },
+    { "source": "/:path*", "destination": "/index.html" }
   ]
 }

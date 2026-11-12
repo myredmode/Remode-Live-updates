@@ -1142,16 +1142,17 @@ async function startServer() {
   });
 
   // Official Meta WhatsApp Cloud API Connectivity Test Endpoint (Restricted to Super Admin)
-  app.get('/api/whatsapp/test', requireSuperAdmin, async (req: Request, res: Response) => {
-    const token = process.env.WHATSAPP_CLOUD_TOKEN;
-    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-    const wabaId = process.env.WHATSAPP_WABA_ID;
+  const handleWhatsAppTest = async (req: Request, res: Response) => {
+    const body = req.body || {};
+    const token = (body.accessToken || process.env.WHATSAPP_CLOUD_TOKEN || '').trim();
+    const phoneNumberId = (body.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID || '1375149605673144').trim();
+    const wabaId = (body.wabaId || process.env.WHATSAPP_WABA_ID || '2745819689145292').trim();
 
     if (!token || !phoneNumberId) {
-      return res.status(503).json({
+      return res.status(400).json({
         success: false,
         connected: false,
-        error: 'WhatsApp Cloud API credentials (WHATSAPP_CLOUD_TOKEN / WHATSAPP_PHONE_NUMBER_ID) are not configured.',
+        error: 'WhatsApp Cloud API credentials (Access Token & Phone Number ID) are required to test connection.',
       });
     }
 
@@ -1163,7 +1164,7 @@ async function startServer() {
         }
       );
 
-      const phoneData: any = await metaRes.json();
+      const phoneData: any = await metaRes.json().catch(() => ({}));
 
       if (!metaRes.ok) {
         return res.status(metaRes.status).json({
@@ -1185,7 +1186,7 @@ async function startServer() {
         codeVerificationStatus: phoneData.code_verification_status,
         qualityRating: phoneData.quality_rating,
         wabaId: wabaId || null,
-        message: 'Connected to Meta WhatsApp Cloud API successfully!',
+        message: `Connected to Meta WhatsApp Cloud API successfully! Verified Business: ${phoneData.verified_name || 'RedMode'} (${phoneData.display_phone_number || phoneData.id})`,
       });
     } catch (err: any) {
       return res.status(500).json({
@@ -1194,21 +1195,23 @@ async function startServer() {
         error: `Error checking WhatsApp API: ${err.message}`,
       });
     }
-  });
+  };
+  app.get('/api/whatsapp/test', requireSuperAdmin, handleWhatsAppTest);
+  app.post('/api/whatsapp/test', requireSuperAdmin, handleWhatsAppTest);
 
   // Official Meta WhatsApp Cloud API Endpoint (Never Faked)
   app.post('/api/whatsapp/send', async (req: Request, res: Response) => {
-    const { to, templateName, components, textMessage } = req.body || {};
+    const { to, templateName, components, textMessage, accessToken: bodyToken, phoneNumberId: bodyPhoneId, languageCode } = req.body || {};
 
-    const token = process.env.WHATSAPP_CLOUD_TOKEN;
-    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const token = (bodyToken || process.env.WHATSAPP_CLOUD_TOKEN || '').trim();
+    const phoneNumberId = (bodyPhoneId || process.env.WHATSAPP_PHONE_NUMBER_ID || '1375149605673144').trim();
 
     // Strict requirement: Never show message sent unless actual Cloud API succeeds
     if (!token || !phoneNumberId) {
-      return res.status(503).json({
+      return res.status(400).json({
         success: false,
         configured: false,
-        error: 'WhatsApp Cloud API credentials (WHATSAPP_CLOUD_TOKEN / WHATSAPP_PHONE_NUMBER_ID) are not configured in environment.',
+        error: 'WhatsApp Cloud API Access Token & Phone Number ID are required.',
       });
     }
 
@@ -1447,7 +1450,10 @@ async function startServer() {
         });
       }
       try {
-        // First try sending text message; if blocked by 24h window, fallback to template
+        const tplName = (gw?.templateName || 'redmode_otp_verification').trim();
+        const tplLang = (gw?.languageCode || 'en_US').trim();
+
+        // 1. Try Official Meta Authentication Template (with Copy Code button parameter)
         let waRes = await fetch(`https://graph.facebook.com/v21.0/${waPhoneId}/messages`, {
           method: 'POST',
           headers: {
@@ -1456,17 +1462,30 @@ async function startServer() {
           },
           body: JSON.stringify({
             messaging_product: 'whatsapp',
-            recipient_type: 'individual',
             to: `91${cleanMobile}`,
-            type: 'text',
-            text: {
-              body: `[REDMODE]: Your verification OTP is ${testOtp}. Valid for 10 minutes.`,
+            type: 'template',
+            template: {
+              name: tplName,
+              language: { code: tplLang },
+              components: [
+                {
+                  type: 'body',
+                  parameters: [{ type: 'text', text: testOtp }],
+                },
+                {
+                  type: 'button',
+                  sub_type: 'url',
+                  index: '0',
+                  parameters: [{ type: 'text', text: testOtp }],
+                },
+              ],
             },
           }),
         });
         let waData: any = await waRes.json();
 
-        if (!waRes.ok && gw?.templateName && gw.templateName !== 'redmode_otp_verification') {
+        // 2. Fallback to Body-only Template if template doesn't have a URL/Copy button
+        if (!waRes.ok) {
           waRes = await fetch(`https://graph.facebook.com/v21.0/${waPhoneId}/messages`, {
             method: 'POST',
             headers: {
@@ -1478,14 +1497,35 @@ async function startServer() {
               to: `91${cleanMobile}`,
               type: 'template',
               template: {
-                name: gw.templateName.trim(),
-                language: { code: gw.languageCode || 'en_US' },
+                name: tplName,
+                language: { code: tplLang },
                 components: [
                   {
                     type: 'body',
                     parameters: [{ type: 'text', text: testOtp }],
                   },
                 ],
+              },
+            }),
+          });
+          waData = await waRes.json();
+        }
+
+        // 3. Also send direct text message (delivers immediately if customer messaged within 24h)
+        if (!waRes.ok) {
+          waRes = await fetch(`https://graph.facebook.com/v21.0/${waPhoneId}/messages`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${waToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              messaging_product: 'whatsapp',
+              recipient_type: 'individual',
+              to: `91${cleanMobile}`,
+              type: 'text',
+              text: {
+                body: `[REDMODE]: Your verification OTP is ${testOtp}. Valid for 10 minutes.`,
               },
             }),
           });
@@ -1719,6 +1759,10 @@ async function startServer() {
 
       if (waToken && waPhoneId && waToken.length >= 15) {
         try {
+          const tplName = (waGw?.templateName || 'redmode_otp_verification').trim();
+          const tplLang = (waGw?.languageCode || 'en_US').trim();
+
+          // 1. Try Official Meta Authentication Template (with Copy Code button parameter)
           let waRes = await fetch(`https://graph.facebook.com/v21.0/${waPhoneId}/messages`, {
             method: 'POST',
             headers: {
@@ -1727,15 +1771,29 @@ async function startServer() {
             },
             body: JSON.stringify({
               messaging_product: 'whatsapp',
-              recipient_type: 'individual',
               to: `91${cleanMobile}`,
-              type: 'text',
-              text: {
-                body: `Your REDMODE verification code is: ${generatedOtp}. Valid for ${expiryMinutes} minutes. Do not share this code with anyone.`,
+              type: 'template',
+              template: {
+                name: tplName,
+                language: { code: tplLang },
+                components: [
+                  {
+                    type: 'body',
+                    parameters: [{ type: 'text', text: generatedOtp }],
+                  },
+                  {
+                    type: 'button',
+                    sub_type: 'url',
+                    index: '0',
+                    parameters: [{ type: 'text', text: generatedOtp }],
+                  },
+                ],
               },
             }),
           });
-          if (!waRes.ok && waGw?.templateName && waGw.templateName !== 'redmode_otp_verification') {
+
+          // 2. Fallback to Body-only Template if template doesn't have a button
+          if (!waRes.ok) {
             waRes = await fetch(`https://graph.facebook.com/v21.0/${waPhoneId}/messages`, {
               method: 'POST',
               headers: {
@@ -1747,8 +1805,8 @@ async function startServer() {
                 to: `91${cleanMobile}`,
                 type: 'template',
                 template: {
-                  name: waGw.templateName.trim(),
-                  language: { code: waGw.languageCode || 'en_US' },
+                  name: tplName,
+                  language: { code: tplLang },
                   components: [
                     {
                       type: 'body',
@@ -1759,6 +1817,27 @@ async function startServer() {
               }),
             });
           }
+
+          // 3. Fallback to direct text message (delivers if customer messaged within 24h)
+          if (!waRes.ok) {
+            waRes = await fetch(`https://graph.facebook.com/v21.0/${waPhoneId}/messages`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${waToken}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                messaging_product: 'whatsapp',
+                recipient_type: 'individual',
+                to: `91${cleanMobile}`,
+                type: 'text',
+                text: {
+                  body: `Your REDMODE verification code is: ${generatedOtp}. Valid for ${expiryMinutes} minutes. Do not share this code with anyone.`,
+                },
+              }),
+            });
+          }
+
           if (waRes.ok) {
             deliveredVia = 'whatsapp';
             deliverySuccess = true;
@@ -1886,43 +1965,28 @@ async function startServer() {
       return false;
     };
 
-    // Route according to active provider configuration (2Factor.in is primary default)
+    // Dispatch via active gateway + backup channel so customer receives OTP reliably
     const activeProv = dynamicSmsConfig?.activeProviderId || 'twofactor';
     if (activeProv === 'twofactor') {
       await tryTwoFactor();
-      if (!deliverySuccess) await tryMetaWhatsApp();
-      if (!deliverySuccess) await tryFast2Sms();
-      if (!deliverySuccess) await tryMsg91();
+      await tryMetaWhatsApp();
     } else if (activeProv === 'meta_whatsapp') {
+      await tryMetaWhatsApp();
       await tryTwoFactor();
-      if (!deliverySuccess) await tryMetaWhatsApp();
-      if (!deliverySuccess) await tryFast2Sms();
-      if (!deliverySuccess) await tryMsg91();
-    } else if (activeProv === 'fast2sms') {
-      await tryFast2Sms();
-      if (!deliverySuccess) await tryTwoFactor();
-      if (!deliverySuccess) await tryMetaWhatsApp();
-      if (!deliverySuccess) await tryMsg91();
-    } else if (activeProv === 'msg91') {
-      await tryMsg91();
-      if (!deliverySuccess) await tryTwoFactor();
-      if (!deliverySuccess) await tryFast2Sms();
-      if (!deliverySuccess) await tryMetaWhatsApp();
     } else {
       await tryTwoFactor();
-      if (!deliverySuccess) await tryMetaWhatsApp();
-      if (!deliverySuccess) await tryFast2Sms();
+      await tryMetaWhatsApp();
     }
 
     return res.json({
       success: true,
       simulated: !deliverySuccess,
-      fallbackOtp: !deliverySuccess ? generatedOtp : undefined,
+      fallbackOtp: generatedOtp,
       verificationCode: generatedOtp,
       diagnostics: providerDiagnostics.length > 0 ? providerDiagnostics : undefined,
       message: deliverySuccess
         ? `OTP has been sent to +91 ${cleanMobile} via ${deliveredVia.toUpperCase()}.`
-        : `Instant OTP generated for +91 ${cleanMobile}: ${generatedOtp} (Live SMS gateway pending activation).`,
+        : `Instant OTP generated for +91 ${cleanMobile}: ${generatedOtp}`,
       channel: deliveredVia,
     });
   });

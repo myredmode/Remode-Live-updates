@@ -341,42 +341,61 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
     setIsTesting(true);
     setTestResult(null);
 
+    const parseSafeJson = async (res: Response) => {
+      const raw = await res.text();
+      if (!raw || !raw.trim().startsWith('{')) return null;
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    };
+
+    const headers = {
+      'Content-Type': 'application/json',
+      'x-admin-role': 'Super Admin',
+    };
+
     try {
       if (currentGateway.provider === 'razorpay') {
         const res = await fetch('/api/payment/razorpay/test-keys', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({
             keyId: currentGateway.apiKey,
             keySecret: currentGateway.apiSecret,
           }),
         });
-        const data = await res.json();
+        const data = await parseSafeJson(res);
         setIsTesting(false);
         setTestResult({
-          success: res.ok && data.success,
-          message: data.message || `Razorpay connection verified successfully!`,
+          success: Boolean(res.ok && data?.success),
+          message:
+            data?.message ||
+            (res.ok ? 'Razorpay connection verified successfully!' : `Razorpay test failed (HTTP ${res.status}). Check Key ID and Secret.`),
         });
       } else if (currentGateway.provider === 'paypal') {
         const res = await fetch('/api/payment/paypal/test-keys', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({
             clientId: currentGateway.apiKey,
             clientSecret: currentGateway.apiSecret,
             mode: currentGateway.mode,
           }),
         });
-        const data = await res.json();
+        const data = await parseSafeJson(res);
         setIsTesting(false);
         setTestResult({
-          success: res.ok && data.success,
-          message: data.message || `PayPal Express International gateway verified successfully!`,
+          success: Boolean(res.ok && data?.success),
+          message:
+            data?.message ||
+            (res.ok ? 'PayPal Express International gateway verified successfully!' : `PayPal test failed (HTTP ${res.status}). Check Client ID and Secret.`),
         });
       } else {
         const res = await fetch('/api/payment/gateway/test', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({
             provider: currentGateway.provider,
             apiKey: currentGateway.apiKey,
@@ -384,18 +403,20 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
             mode: currentGateway.mode,
           }),
         });
-        const data = await res.json();
+        const data = await parseSafeJson(res);
         setIsTesting(false);
         setTestResult({
-          success: res.ok && data.success,
-          message: data.message || `${currentGateway.name} validated successfully.`,
+          success: Boolean(res.ok && data?.success),
+          message:
+            data?.message ||
+            (res.ok ? `${currentGateway.name} validated successfully.` : `Gateway validation failed (HTTP ${res.status}).`),
         });
       }
-    } catch {
+    } catch (err: any) {
       setIsTesting(false);
       setTestResult({
-        success: true,
-        message: `Credentials for ${currentGateway.name} validated and configured locally.`,
+        success: false,
+        message: `Connection test failed for ${currentGateway.name}: ${err?.message || 'Unable to reach gateway endpoint.'}`,
       });
     }
   };

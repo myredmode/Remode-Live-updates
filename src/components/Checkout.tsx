@@ -227,6 +227,16 @@ export const Checkout: React.FC = () => {
     setConfirmedOrder(newOrder);
   };
 
+  const parseSafeJson = async (res: Response) => {
+    const raw = await res.text();
+    if (!raw || !raw.trim().startsWith('{')) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  };
+
   // PayPal International Export Payment Flow
   const handleInitiatePayPal = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -236,6 +246,7 @@ export const Checkout: React.FC = () => {
     setFormError(null);
 
     const activePaypal =
+      settings.paymentGateways?.find((g) => g.id === settings.activeInternationalGatewayId) ||
       settings.paymentGateways?.find((g) => g.provider === 'paypal') || {
         apiKey: 'paypal_sandbox_export_client_id',
         apiSecret: 'paypal_sandbox_export_secret_key',
@@ -256,9 +267,9 @@ export const Checkout: React.FC = () => {
         }),
       });
 
-      const orderData = await res.json();
-      if (!res.ok || !orderData.success) {
-        throw new Error(orderData.message || 'Failed to initialize PayPal export order.');
+      const orderData = await parseSafeJson(res);
+      if (!res.ok || !orderData?.success) {
+        throw new Error(orderData?.message || 'Failed to initialize PayPal export order.');
       }
 
       // 2. Capture / Confirm international payment
@@ -270,8 +281,8 @@ export const Checkout: React.FC = () => {
         }),
       });
 
-      const captureData = await captureRes.json();
-      if (captureData.success) {
+      const captureData = await parseSafeJson(captureRes);
+      if (captureData?.success) {
         const newOrder = placeOrder(address, 'Prepaid', 'Paid', {
           razorpayPaymentId: captureData.orderId || `PP-${Date.now()}`,
           razorpayOrderId: `PAYPAL-USD-${orderData.amountUsd}`,
@@ -303,7 +314,7 @@ export const Checkout: React.FC = () => {
     });
   };
 
-  // Prepaid Order Flow with Razorpay
+  // Prepaid Order Flow with Razorpay / Active Domestic Gateway
   const handleInitiatePrepaid = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!validateAddress()) return;
@@ -311,9 +322,14 @@ export const Checkout: React.FC = () => {
     setIsProcessingPayment(true);
     setFormError(null);
 
+    const activeDomesticGw =
+      settings.paymentGateways?.find((g) => g.id === settings.activePaymentGatewayId) ||
+      settings.paymentGateways?.find((g) => g.provider === 'razorpay' && g.enabled);
     const rzpSettings = settings.razorpaySettings;
-    const keyId = (rzpSettings?.keyId || '').trim();
-    const keySecret = (rzpSettings?.keySecret || '').trim();
+    const keyId = ((activeDomesticGw?.provider === 'razorpay' ? activeDomesticGw.apiKey : '') || rzpSettings?.keyId || '').trim();
+    const keySecret = ((activeDomesticGw?.provider === 'razorpay' ? activeDomesticGw.apiSecret : '') || rzpSettings?.keySecret || '').trim();
+    const merchantDisplayName = activeDomesticGw?.merchantName || rzpSettings?.merchantName || 'REDMODE';
+    const themeHex = activeDomesticGw?.themeColor || rzpSettings?.themeColor || '#111827';
 
     try {
       // 1. Create order on backend
@@ -333,10 +349,10 @@ export const Checkout: React.FC = () => {
         }),
       });
 
-      const orderData = await res.json();
+      const orderData = await parseSafeJson(res);
 
-      if (!res.ok || !orderData.success) {
-        throw new Error(orderData.message || 'Failed to initialize payment gateway.');
+      if (!res.ok || !orderData?.success) {
+        throw new Error(orderData?.message || 'Failed to initialize payment gateway.');
       }
 
       // Check if real key is configured and Razorpay script loads
@@ -356,7 +372,7 @@ export const Checkout: React.FC = () => {
           key: orderData.keyId || keyId,
           amount: orderData.amount,
           currency: 'INR',
-          name: rzpSettings?.merchantName || 'REDMODE',
+          name: merchantDisplayName,
           description: `Order Payment for ${cart.length} item(s)`,
           image: resolvedLogo,
           order_id: orderData.orderId,
@@ -366,7 +382,7 @@ export const Checkout: React.FC = () => {
             email: userProfile.mobileOrEmail.includes('@') ? userProfile.mobileOrEmail : `${address.mobile}@redmode.in`,
           },
           theme: {
-            color: rzpSettings?.themeColor || '#111827',
+            color: themeHex,
             backdrop_color: 'rgba(0, 0, 0, 0.75)',
             hide_topbar: false,
           },
@@ -393,8 +409,8 @@ export const Checkout: React.FC = () => {
                 }),
               });
 
-              const verifyData = await verifyRes.json();
-              if (verifyData.success) {
+              const verifyData = await parseSafeJson(verifyRes);
+              if (verifyData?.success) {
                 const newOrder = placeOrder(address, 'Prepaid', 'Paid', {
                   razorpayPaymentId: response.razorpay_payment_id,
                   razorpayOrderId: response.razorpay_order_id,

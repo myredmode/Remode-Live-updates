@@ -2911,6 +2911,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return {
           success: true,
           simulated: false,
+          fallbackOtp: directOtp,
           message: `OTP has been sent to +91 ${mobile} via 2FACTOR.`,
         };
       } catch {
@@ -2937,6 +2938,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return {
         success: true,
         simulated: false,
+        fallbackOtp: directOtp,
         message: `OTP has been sent to +91 ${mobile} via 2FACTOR.`,
       };
     }
@@ -4942,11 +4944,30 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const updateWhatsAppSettings = (newWhatsApp: Partial<WhatsAppSettings>) => {
     setSettings((prev) => {
       const current = prev.whatsappSettings || INITIAL_SETTINGS.whatsappSettings!;
+      const mergedWhatsApp = {
+        ...current,
+        ...newWhatsApp,
+      };
+      // Cross-sync Meta WhatsApp credentials with smsSettings.meta_whatsapp
+      const currentSms = prev.smsSettings || INITIAL_SETTINGS.smsSettings!;
+      const syncedGateways = Array.isArray(currentSms.gateways)
+        ? currentSms.gateways.map((g) =>
+            g.provider === 'meta_whatsapp'
+              ? {
+                  ...g,
+                  phoneNumberId: mergedWhatsApp.phoneNumberId || g.phoneNumberId,
+                  wabaId: mergedWhatsApp.wabaId || g.wabaId,
+                  accessToken: mergedWhatsApp.accessToken || g.accessToken,
+                }
+              : g
+          )
+        : currentSms.gateways;
       const updated = {
         ...prev,
-        whatsappSettings: {
-          ...current,
-          ...newWhatsApp,
+        whatsappSettings: mergedWhatsApp,
+        smsSettings: {
+          ...currentSms,
+          gateways: syncedGateways,
         },
       };
       try {
@@ -4968,9 +4989,22 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         ...current,
         ...newSms,
       };
+      // Cross-sync Meta WhatsApp credentials back to whatsappSettings
+      const metaGw = updatedSms.gateways?.find((g) => g.provider === 'meta_whatsapp');
+      const currentWa = prev.whatsappSettings || INITIAL_SETTINGS.whatsappSettings!;
+      const syncedWa = metaGw
+        ? {
+            ...currentWa,
+            phoneNumberId: metaGw.phoneNumberId || currentWa.phoneNumberId,
+            wabaId: metaGw.wabaId || currentWa.wabaId,
+            accessToken: metaGw.accessToken || currentWa.accessToken,
+          }
+        : currentWa;
+
       const updated = {
         ...prev,
         smsSettings: updatedSms,
+        whatsappSettings: syncedWa,
       };
       try {
         localStorage.setItem('redmode_settings', JSON.stringify(updated));

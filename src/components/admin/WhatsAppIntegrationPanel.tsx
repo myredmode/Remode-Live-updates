@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   MessageSquare,
   Check,
@@ -9,8 +9,6 @@ import {
   X,
   ExternalLink,
   ShieldCheck,
-  Sparkles,
-  Info,
 } from 'lucide-react';
 import { useStore } from '../../context/StoreContext';
 import { WhatsAppSettings } from '../../types';
@@ -19,31 +17,51 @@ interface WhatsAppIntegrationPanelProps {
   onSaveNotification?: (msg: string) => void;
 }
 
+const sanitizeWhatsAppSettings = (raw?: WhatsAppSettings, fallbackPhone?: string): WhatsAppSettings => {
+  const pid =
+    raw?.phoneNumberId && raw.phoneNumberId !== '109845729104823'
+      ? raw.phoneNumberId
+      : '1375149605673144';
+  const waba =
+    raw?.wabaId && raw.wabaId !== '392019482910482'
+      ? raw.wabaId
+      : '2745819689145292';
+  const token =
+    raw?.accessToken && !raw.accessToken.includes('EAAG9xxxxxxx')
+      ? raw.accessToken
+      : '';
+
+  return {
+    enabled: raw?.enabled ?? true,
+    provider: 'meta_cloud_api',
+    phoneNumber: raw?.phoneNumber || fallbackPhone || '+91 73027 97464',
+    phoneNumberId: pid,
+    wabaId: waba,
+    accessToken: token,
+    webhookVerifyToken: raw?.webhookVerifyToken || 'redmode_wa_verify_2026',
+    orderConfirmationEnabled: raw?.orderConfirmationEnabled ?? true,
+    orderDispatchTrackingEnabled: raw?.orderDispatchTrackingEnabled ?? true,
+    reminder23hEnabled: raw?.reminder23hEnabled ?? true,
+    codVerificationOtpEnabled: raw?.codVerificationOtpEnabled ?? true,
+    deliveredReviewEnabled: raw?.deliveredReviewEnabled ?? true,
+    apiEndpoint: raw?.apiEndpoint || 'https://graph.facebook.com/v21.0',
+  };
+};
+
 export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> = ({
   onSaveNotification,
 }) => {
-  const { settings, updateWhatsAppSettings } = useStore();
+  const { settings, updateWhatsAppSettings, currentAdminUser } = useStore();
 
-  const currentSettings: WhatsAppSettings = settings.whatsappSettings || {
-    enabled: true,
-    provider: 'meta_cloud_api',
-    phoneNumber: settings.whatsappNumber || '+91 73027 97464',
-    phoneNumberId: '109845729104823',
-    wabaId: '392019482910482',
-    accessToken: 'EAAG9xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-    webhookVerifyToken: 'redmode_wa_verify_2026',
-    orderConfirmationEnabled: true,
-    orderDispatchTrackingEnabled: true,
-    reminder23hEnabled: true,
-    codVerificationOtpEnabled: true,
-    deliveredReviewEnabled: true,
-    apiEndpoint: 'https://graph.facebook.com/v19.0',
-  };
+  const [formData, setFormData] = useState<WhatsAppSettings>(() =>
+    sanitizeWhatsAppSettings(settings.whatsappSettings, settings.whatsappNumber)
+  );
 
-  const [formData, setFormData] = useState<WhatsAppSettings>({
-    ...currentSettings,
-    provider: 'meta_cloud_api',
-  });
+  useEffect(() => {
+    if (settings.whatsappSettings) {
+      setFormData(sanitizeWhatsAppSettings(settings.whatsappSettings, settings.whatsappNumber));
+    }
+  }, [settings.whatsappSettings, settings.whatsappNumber]);
 
   const [showToken, setShowToken] = useState<boolean>(false);
   const [webhookCopied, setWebhookCopied] = useState<boolean>(false);
@@ -77,33 +95,58 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
     setTimeout(() => setSaveNotification(null), 3500);
   };
 
-  const handleTestConnection = () => {
+  const parseJsonSafe = async (res: Response) => {
+    const raw = await res.text();
+    if (!raw || !raw.trim().startsWith('{')) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  };
+
+  const handleTestConnection = async () => {
     setIsTestingConnection(true);
     setTestConnectionResult(null);
 
-    setTimeout(() => {
-      setIsTestingConnection(false);
-      if (!formData.accessToken || formData.accessToken.length < 15) {
+    try {
+      const res = await fetch('/api/whatsapp/test', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-role': currentAdminUser?.role || 'Super Admin',
+        },
+        body: JSON.stringify({
+          accessToken: (formData.accessToken || '').trim(),
+          phoneNumberId: (formData.phoneNumberId || '').trim(),
+          wabaId: (formData.wabaId || '').trim(),
+        }),
+      });
+      const data = await parseJsonSafe(res);
+      if (res.ok && data?.success) {
         setTestConnectionResult({
-          success: false,
-          message: 'Please provide a valid Meta WhatsApp Cloud Token to test connection.',
-        });
-      } else if (!formData.phoneNumberId) {
-        setTestConnectionResult({
-          success: false,
-          message: 'Please provide a valid Meta Phone Number ID.',
+          success: true,
+          message: data.message || `Connected to Meta WhatsApp Cloud API (${data.verifiedName || data.phoneNumberId})`,
         });
       } else {
         setTestConnectionResult({
-          success: true,
-          message: `Connected to Meta WhatsApp Cloud API successfully! Phone ID: ${formData.phoneNumberId} (WABA ID: ${formData.wabaId || 'Verified'})`,
+          success: false,
+          message: data?.error || data?.message || `Meta API verification failed (HTTP ${res.status}). Check Access Token & Phone Number ID.`,
         });
       }
-    }, 700);
+    } catch (err: any) {
+      setTestConnectionResult({
+        success: false,
+        message: `Network error testing Meta WhatsApp API: ${err?.message || 'Unable to connect'}`,
+      });
+    } finally {
+      setIsTestingConnection(false);
+    }
   };
 
-  const handleSendTestMessage = () => {
-    if (!testPhone || testPhone.length < 10) {
+  const handleSendTestMessage = async () => {
+    const clean = testPhone.replace(/\D/g, '').slice(-10);
+    if (clean.length !== 10) {
       setMessageFeedback({
         success: false,
         message: 'Please enter a valid 10-digit mobile number.',
@@ -114,14 +157,46 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
     setIsSendingMessage(true);
     setMessageFeedback(null);
 
-    setTimeout(() => {
-      setIsSendingMessage(false);
-      const clean = testPhone.replace(/[^0-9]/g, '').slice(-10);
-      setMessageFeedback({
-        success: true,
-        message: `Official Meta Cloud API template dispatched to +91 ${clean} successfully!`,
+    const previewMap: Record<'confirmation' | 'dispatch' | 'reminder', string> = {
+      confirmation: 'Namaste! Your REDMODE test order #RM-TEST is confirmed. Reply YES to confirm or CANCEL to cancel.',
+      dispatch: 'Good news! Your REDMODE parcel has been dispatched via Delhivery Express. Tracking AWB: RM606696001.',
+      reminder: 'Friendly reminder from REDMODE: Your order is ready for dispatch. Reply YES to confirm handover.',
+    };
+
+    try {
+      const res = await fetch('/api/whatsapp/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-role': currentAdminUser?.role || 'Super Admin',
+        },
+        body: JSON.stringify({
+          to: clean,
+          textMessage: previewMap[testTemplate],
+          accessToken: (formData.accessToken || '').trim(),
+          phoneNumberId: (formData.phoneNumberId || '').trim(),
+        }),
       });
-    }, 600);
+      const data = await parseJsonSafe(res);
+      if (res.ok && data?.success) {
+        setMessageFeedback({
+          success: true,
+          message: `Message sent via Meta Cloud API to +91 ${clean}! Message ID: ${data.messageId || 'Dispatched'}`,
+        });
+      } else {
+        setMessageFeedback({
+          success: false,
+          message: data?.error || `Meta Cloud API rejected message (HTTP ${res.status}). Note: Free-form text requires an open 24h customer window or an approved template.`,
+        });
+      }
+    } catch (err: any) {
+      setMessageFeedback({
+        success: false,
+        message: `Failed to reach WhatsApp API: ${err?.message || 'Network error'}`,
+      });
+    } finally {
+      setIsSendingMessage(false);
+    }
   };
 
   const handleOpenDirectWhatsAppTest = () => {
