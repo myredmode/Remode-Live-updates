@@ -2180,10 +2180,74 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 ) {
                   merged.supportEmail = 'MyRedMode@gmail.com';
                 }
-                try {
-                  localStorage.setItem('redmode_settings', JSON.stringify(merged));
-                } catch {}
                 if (merged.smsSettings) {
+                  const rawGateways = Array.isArray(merged.smsSettings.gateways) ? merged.smsSettings.gateways : [];
+                  const hadMoreThanTwo = rawGateways.some((g) => g.provider !== 'twofactor' && g.provider !== 'meta_whatsapp');
+                  const existingTf = rawGateways.find((g) => g.provider === 'twofactor');
+                  const tfMissingKey = !existingTf?.apiKey || existingTf.apiKey.trim().length < 8;
+                  const shouldPromoteTf =
+                    tfMissingKey ||
+                    merged.smsSettings.activeProviderId === 'fast2sms' ||
+                    merged.smsSettings.activeProviderId === 'msg91' ||
+                    !merged.smsSettings.activeProviderId;
+
+                  const nextActiveId = shouldPromoteTf ? 'twofactor' : merged.smsSettings.activeProviderId;
+                  const nextFallbackId = nextActiveId === 'twofactor' ? 'meta_whatsapp' : 'twofactor';
+
+                  const cleanedGateways = INITIAL_SETTINGS.smsSettings!.gateways.map((defGw) => {
+                    const found = rawGateways.find((g) => g.provider === defGw.provider);
+                    if (defGw.provider === 'twofactor') {
+                      return {
+                        ...defGw,
+                        ...(found || {}),
+                        id: 'twofactor',
+                        provider: 'twofactor' as const,
+                        enabled: true,
+                        isPrimary: nextActiveId === 'twofactor',
+                        apiKey:
+                          found?.apiKey && found.apiKey.trim().length >= 8
+                            ? found.apiKey.trim()
+                            : '699e72b1-de86-11f1-bb6c-0200cd936042',
+                      };
+                    }
+                    return {
+                      ...defGw,
+                      ...(found || {}),
+                      id: 'meta_whatsapp',
+                      provider: 'meta_whatsapp' as const,
+                      enabled: found?.enabled ?? true,
+                      isPrimary: nextActiveId === 'meta_whatsapp',
+                      phoneNumberId:
+                        !found?.phoneNumberId || found.phoneNumberId === '109845729104823'
+                          ? '1375149605673144'
+                          : found.phoneNumberId,
+                      wabaId:
+                        !found?.wabaId || found.wabaId === '392019482910482'
+                          ? '2745819689145292'
+                          : found.wabaId,
+                      accessToken:
+                        found?.accessToken && found.accessToken.includes('EAAG9xxxxxxx')
+                          ? ''
+                          : (found?.accessToken || ''),
+                    };
+                  });
+
+                  merged.smsSettings = {
+                    ...merged.smsSettings,
+                    enabled: merged.smsSettings.enabled ?? true,
+                    activeProviderId: nextActiveId,
+                    fallbackProviderId: nextFallbackId,
+                    gateways: cleanedGateways,
+                  };
+
+                  if (hadMoreThanTwo || tfMissingKey) {
+                    setDoc(
+                      doc(db, 'settings', 'store_settings'),
+                      cleanForFirestore({ smsSettings: merged.smsSettings }),
+                      { merge: true }
+                    ).catch(() => {});
+                  }
+
                   fetch('/api/admin/sms-settings', {
                     method: 'POST',
                     headers: {
@@ -2193,6 +2257,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     body: JSON.stringify(merged.smsSettings),
                   }).catch(() => {});
                 }
+                try {
+                  localStorage.setItem('redmode_settings', JSON.stringify(merged));
+                } catch {}
                 return merged;
               });
             }
@@ -2803,8 +2870,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       });
       const data = await res.json();
       if (data.success) {
-        if (data.fallbackOtp) {
-          setActiveCustomerOtps((prev) => ({ ...prev, [mobile]: String(data.fallbackOtp) }));
+        const codeToTrack = data.verificationCode || data.fallbackOtp;
+        if (codeToTrack) {
+          setActiveCustomerOtps((prev) => ({ ...prev, [mobile]: String(codeToTrack) }));
         }
         return {
           success: true,
@@ -2833,12 +2901,18 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return { success: false, message: 'Invalid OTP code. Please enter the 6-digit code received on your phone.' };
     }
 
-    const expectedFallback = activeCustomerOtps[mobile];
+    const expectedOtp = activeCustomerOtps[mobile];
     const isOwnerMaster = mobile === '7302797464' && (cleanOtp === '730279' || cleanOtp === '100200');
-    if (expectedFallback && cleanOtp !== expectedFallback && !isOwnerMaster) {
+    if (!expectedOtp && !isOwnerMaster) {
       return {
         success: false,
-        message: `Invalid OTP code. Please enter the 6-digit verification code (${expectedFallback}).`,
+        message: 'OTP session expired or not requested yet. Please click "Resend OTP" to get a fresh 6-digit code.',
+      };
+    }
+    if (expectedOtp && cleanOtp !== expectedOtp && !isOwnerMaster) {
+      return {
+        success: false,
+        message: 'Incorrect OTP code. Please enter the exact 6-digit OTP received on your mobile.',
       };
     }
 

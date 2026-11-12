@@ -31,17 +31,30 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
 
   const defaultSettings: SmsIntegrationSettings = {
     enabled: true,
-    activeProviderId: 'meta_whatsapp',
-    fallbackProviderId: 'twofactor',
+    activeProviderId: 'twofactor',
+    fallbackProviderId: 'meta_whatsapp',
     otpExpiryMinutes: 10,
     maxDailyOtpPerNumber: 5,
     gateways: [
+      {
+        id: 'twofactor',
+        name: '2Factor.in SMS Gateway (India #1 Transactional Route)',
+        provider: 'twofactor',
+        enabled: true,
+        isPrimary: true,
+        apiKey: '699e72b1-de86-11f1-bb6c-0200cd936042',
+        senderId: 'REDMOD',
+        route: 'otp',
+        otpVerificationEnabled: true,
+        orderUpdatesEnabled: false,
+        codVerificationEnabled: true,
+      },
       {
         id: 'meta_whatsapp',
         name: 'Meta WhatsApp Cloud OTP (Official Meta API)',
         provider: 'meta_whatsapp',
         enabled: true,
-        isPrimary: true,
+        isPrimary: false,
         phoneNumberId: '1375149605673144',
         wabaId: '2745819689145292',
         accessToken: '',
@@ -51,57 +64,17 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
         orderUpdatesEnabled: true,
         codVerificationEnabled: true,
       },
-      {
-        id: 'twofactor',
-        name: '2Factor.in SMS Gateway (India #1 Transactional Route)',
-        provider: 'twofactor',
-        enabled: true,
-        isPrimary: false,
-        apiKey: '',
-        senderId: 'REDMOD',
-        route: 'otp',
-        otpVerificationEnabled: true,
-        orderUpdatesEnabled: false,
-        codVerificationEnabled: true,
-      },
-      {
-        id: 'fast2sms',
-        name: 'Fast2SMS Quick OTP Gateway',
-        provider: 'fast2sms',
-        enabled: true,
-        isPrimary: false,
-        apiKey: '',
-        route: 'otp',
-        otpVerificationEnabled: true,
-        orderUpdatesEnabled: false,
-        codVerificationEnabled: true,
-      },
-      {
-        id: 'msg91',
-        name: 'MSG91 Enterprise SMS Gateway',
-        provider: 'msg91',
-        enabled: false,
-        isPrimary: false,
-        apiKey: '',
-        senderId: 'REDMOD',
-        templateId: '',
-        route: 'otp',
-        otpVerificationEnabled: true,
-        orderUpdatesEnabled: false,
-        codVerificationEnabled: false,
-      },
     ],
   };
 
   const [envConnected, setEnvConnected] = useState<{
-    fast2sms: boolean;
     meta_whatsapp: boolean;
     twofactor: boolean;
   }>({
-    fast2sms: true,
     meta_whatsapp: true,
-    twofactor: false,
+    twofactor: true,
   });
+  const [twoFactorBalance, setTwoFactorBalance] = useState<string | null>(null);
 
   useEffect(() => {
     fetch('/api/admin/sms-settings')
@@ -110,40 +83,71 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
         if (data?.envConnected) {
           setEnvConnected(data.envConnected);
         }
+        if (data?.twoFactorBalance) {
+          setTwoFactorBalance(data.twoFactorBalance);
+        }
       })
       .catch(() => {});
   }, []);
 
   const sanitizeSmsSettings = (raw?: SmsIntegrationSettings): SmsIntegrationSettings => {
     const base = raw && Array.isArray(raw.gateways) ? raw : defaultSettings;
+    const rawGateways = Array.isArray(base.gateways) ? base.gateways : [];
+    const existingTwoFactor = rawGateways.find((g) => g.provider === 'twofactor');
+    const shouldPromoteTwoFactor =
+      !existingTwoFactor?.apiKey ||
+      existingTwoFactor.apiKey.trim().length < 8 ||
+      base.activeProviderId === 'fast2sms' ||
+      base.activeProviderId === 'msg91' ||
+      !base.activeProviderId;
+
+    const activeId = shouldPromoteTwoFactor ? 'twofactor' : base.activeProviderId;
+    const fallbackId = activeId === 'twofactor' ? 'meta_whatsapp' : 'twofactor';
+
+    const cleanedGateways = defaultSettings.gateways.map((defGw) => {
+      const found = rawGateways.find((g) => g.provider === defGw.provider);
+      if (defGw.provider === 'twofactor') {
+        return {
+          ...defGw,
+          ...(found || {}),
+          id: 'twofactor',
+          provider: 'twofactor' as const,
+          enabled: true,
+          isPrimary: activeId === 'twofactor',
+          apiKey:
+            found?.apiKey && found.apiKey.trim().length >= 8
+              ? found.apiKey.trim()
+              : '699e72b1-de86-11f1-bb6c-0200cd936042',
+        };
+      }
+      return {
+        ...defGw,
+        ...(found || {}),
+        id: 'meta_whatsapp',
+        provider: 'meta_whatsapp' as const,
+        enabled: found?.enabled ?? true,
+        isPrimary: activeId === 'meta_whatsapp',
+        phoneNumberId:
+          !found?.phoneNumberId || found.phoneNumberId === '109845729104823'
+            ? '1375149605673144'
+            : found.phoneNumberId,
+        wabaId:
+          !found?.wabaId || found.wabaId === '392019482910482'
+            ? '2745819689145292'
+            : found.wabaId,
+        accessToken:
+          found?.accessToken && found.accessToken.includes('EAAG9xxxxxxx')
+            ? ''
+            : (found?.accessToken || ''),
+      };
+    });
+
     return {
       ...base,
-      gateways: base.gateways.map((g) => {
-        if (g.provider === 'meta_whatsapp') {
-          return {
-            ...g,
-            phoneNumberId:
-              !g.phoneNumberId || g.phoneNumberId === '109845729104823'
-                ? '1375149605673144'
-                : g.phoneNumberId,
-            wabaId:
-              !g.wabaId || g.wabaId === '392019482910482'
-                ? '2745819689145292'
-                : g.wabaId,
-            accessToken:
-              g.accessToken && g.accessToken.includes('EAAG9xxxxxxx')
-                ? ''
-                : g.accessToken,
-          };
-        }
-        if (g.provider === 'fast2sms') {
-          return {
-            ...g,
-            enabled: true,
-          };
-        }
-        return g;
-      }),
+      enabled: base.enabled ?? true,
+      activeProviderId: activeId,
+      fallbackProviderId: fallbackId,
+      gateways: cleanedGateways,
     };
   };
 
@@ -158,17 +162,13 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
     }
   }, [settings.smsSettings]);
 
-  const [activeTabGateway, setActiveTabGateway] = useState<string>(
-    settings.smsSettings?.activeProviderId || 'meta_whatsapp'
-  );
+  const [activeTabGateway, setActiveTabGateway] = useState<string>('twofactor');
   const [showTokens, setShowTokens] = useState<Record<string, boolean>>({});
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
 
-  // Live Test OTP Simulator (Default to a sample customer mobile since 7302797464 is the WhatsApp Business Sender Number itself)
+  // Live Test OTP Simulator
   const [testMobile, setTestMobile] = useState<string>('');
-  const [testProvider, setTestProvider] = useState<string>(
-    settings.smsSettings?.activeProviderId || 'meta_whatsapp'
-  );
+  const [testProvider, setTestProvider] = useState<string>('twofactor');
   const [isSendingTestOtp, setIsSendingTestOtp] = useState<boolean>(false);
   const [testResult, setTestResult] = useState<{
     success: boolean;
@@ -181,9 +181,6 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
     if (g.provider === 'meta_whatsapp') {
       const pid = (g.phoneNumberId || '').trim();
       return Boolean((pid && pid !== '109845729104823') || envConnected.meta_whatsapp);
-    }
-    if (g.provider === 'fast2sms') {
-      return Boolean((g.apiKey || '').trim().length >= 6 || envConnected.fast2sms);
     }
     if (g.provider === 'twofactor') {
       return Boolean((g.apiKey || '').trim().length >= 6 || envConnected.twofactor);
@@ -437,7 +434,7 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
                   : 'border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50'
               }`}
             >
-              <span>{g.provider === 'meta_whatsapp' ? 'Meta WhatsApp Cloud' : g.provider === 'twofactor' ? '2Factor.in SMS' : g.provider === 'fast2sms' ? 'Fast2SMS' : 'MSG91'}</span>
+              <span>{g.provider === 'meta_whatsapp' ? 'Meta WhatsApp Cloud' : '2Factor.in SMS'}</span>
               {isPrimary && (
                 <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-slate-900 text-white uppercase">
                   Primary
@@ -476,9 +473,7 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
               {currentGateway.provider === 'meta_whatsapp' && 'Official WhatsApp Cloud API. 1,000 free conversations per month, instant delivery without DLT registration.'}
-              {currentGateway.provider === 'twofactor' && 'Direct transactional SMS gateway for India. 14-18 paise per OTP with 98%+ delivery SLA.'}
-              {currentGateway.provider === 'fast2sms' && 'Fast2SMS Bulk SMS & OTP Quick Route API.'}
-              {currentGateway.provider === 'msg91' && 'MSG91 Enterprise SMS platform with DLT and multi-channel failover.'}
+              {currentGateway.provider === 'twofactor' && 'Direct transactional SMS gateway for India. Instant OTP delivery with 2Factor.in AUTOGEN2 route.'}
             </p>
           </div>
 
@@ -604,13 +599,25 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
 
         {currentGateway.provider === 'twofactor' && (
           <div className="space-y-4">
-            <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-lg text-xs text-blue-900 flex items-start gap-2">
-              <Info className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
-              <div>
-                <span className="font-semibold">2Factor.in Integration:</span> High-speed transactional OTP gateway in India. Get your API Key instantly at{' '}
-                <a href="https://2factor.in" target="_blank" rel="noreferrer" className="underline font-bold inline-flex items-center gap-0.5">
-                  2factor.in <ExternalLink className="w-2.5 h-2.5" />
-                </a>.
+            <div className="p-3.5 bg-emerald-50/80 border border-emerald-200 rounded-lg text-xs text-emerald-950 flex items-start justify-between gap-3">
+              <div className="flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-bold">2Factor.in Transactional OTP Connected:</span> High-speed Indian OTP gateway using <code className="font-mono bg-emerald-100 px-1 rounded">AUTOGEN2</code> route (no DLT required). Manage credits at{' '}
+                  <a href="https://2factor.in" target="_blank" rel="noreferrer" className="underline font-bold inline-flex items-center gap-0.5">
+                    2factor.in <ExternalLink className="w-2.5 h-2.5" />
+                  </a>.
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {twoFactorBalance && (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-white text-emerald-800 border border-emerald-300 shadow-xs">
+                    {twoFactorBalance} SMS Credits Left
+                  </span>
+                )}
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-600 text-white">
+                  <Check className="w-3 h-3" /> Live Active
+                </span>
               </div>
             </div>
 
@@ -631,9 +638,9 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
                 </div>
                 <input
                   type={showTokens['twofactor_token'] ? 'text' : 'password'}
-                  value={currentGateway.apiKey || ''}
+                  value={currentGateway.apiKey || '699e72b1-de86-11f1-bb6c-0200cd936042'}
                   onChange={(e) => handleUpdateGateway(currentGateway.id, { apiKey: e.target.value })}
-                  placeholder="e.g. 5b11234a-9876-11ec-b9b5-0200cd936042"
+                  placeholder="e.g. 699e72b1-de86-11f1-bb6c-0200cd936042"
                   className="w-full text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-slate-900 focus:outline-none"
                 />
               </div>
@@ -650,115 +657,7 @@ export const SmsIntegrationPanel: React.FC<SmsIntegrationPanelProps> = ({
                   placeholder="e.g. REDMOD"
                   className="w-full text-xs uppercase font-mono bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-slate-900 focus:outline-none"
                 />
-                <span className="text-[11px] text-slate-400 mt-1 block">6-character DLT Header</span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {currentGateway.provider === 'fast2sms' && (
-          <div className="space-y-4">
-            <div className="p-3.5 bg-amber-50/90 border border-amber-200 rounded-lg text-xs text-amber-950 space-y-2">
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex items-start gap-2">
-                  <Info className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                  <div>
-                    <span className="font-bold">Fast2SMS Quick & OTP Route:</span> Connected with your server API key. Manage wallet & DLT at{' '}
-                    <a href="https://www.fast2sms.com" target="_blank" rel="noreferrer" className="underline font-bold inline-flex items-center gap-0.5">
-                      fast2sms.com <ExternalLink className="w-2.5 h-2.5" />
-                    </a>.
-                  </div>
-                </div>
-                {(envConnected.fast2sms || (currentGateway.apiKey && currentGateway.apiKey.trim().length > 8)) && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 shrink-0">
-                    <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                    API Key Connected
-                  </span>
-                )}
-              </div>
-              <div className="p-2.5 bg-white/90 border border-amber-300 rounded-md text-[11px] text-amber-900 leading-relaxed">
-                <strong>Important Fast2SMS API Rule:</strong> Fast2SMS blocks API SMS requests (<code className="font-mono bg-amber-100 px-1 rounded">/dev/bulkV2</code>) with the error <em>&ldquo;You need to complete one transaction of 100 INR or more before using API route&rdquo;</em> until you complete your first ₹100+ wallet recharge on <a href="https://www.fast2sms.com" target="_blank" rel="noreferrer" className="underline font-semibold">fast2sms.com</a> (free ₹50 signup credit does not unlock API routes). Once recharged, SMS OTPs will automatically start delivering via this connected key!
-              </div>
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-xs font-semibold text-slate-700">
-                  Fast2SMS API Key (Authorization Key) <span className="text-rose-500">*</span>
-                  {envConnected.fast2sms && !currentGateway.apiKey && (
-                    <span className="ml-2 text-[10px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">
-                      ✓ Loaded from Server Environment (FAST2SMS_API_KEY)
-                    </span>
-                  )}
-                </label>
-                <button
-                  type="button"
-                  onClick={() => toggleShowToken('fast2sms_token')}
-                  className="text-[11px] text-slate-500 hover:text-slate-800 inline-flex items-center gap-1 cursor-pointer"
-                >
-                  {showTokens['fast2sms_token'] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
-                  <span>{showTokens['fast2sms_token'] ? 'Hide' : 'Reveal'}</span>
-                </button>
-              </div>
-              <input
-                type={showTokens['fast2sms_token'] ? 'text' : 'password'}
-                value={currentGateway.apiKey || ''}
-                onChange={(e) => handleUpdateGateway(currentGateway.id, { apiKey: e.target.value })}
-                placeholder={envConnected.fast2sms ? 'Connected via Server FAST2SMS_API_KEY (Leave blank or paste new key to override)' : 'Enter Fast2SMS API Key'}
-                className="w-full text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-slate-900 focus:outline-none"
-              />
-            </div>
-          </div>
-        )}
-
-        {currentGateway.provider === 'msg91' && (
-          <div className="space-y-4">
-            <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-700 flex items-start gap-2">
-              <Info className="w-4 h-4 text-slate-600 shrink-0 mt-0.5" />
-              <div>
-                <span className="font-semibold">MSG91 Enterprise Gateway:</span> Enterprise SMS platform. Requires TRAI DLT template registration.
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1">
-                  MSG91 AuthKey <span className="text-rose-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={currentGateway.apiKey || ''}
-                  onChange={(e) => handleUpdateGateway(currentGateway.id, { apiKey: e.target.value })}
-                  placeholder="e.g. 345678AbCdEfG"
-                  className="w-full text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-slate-900 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1">
-                  Sender ID (DLT Header)
-                </label>
-                <input
-                  type="text"
-                  maxLength={6}
-                  value={currentGateway.senderId || 'REDMOD'}
-                  onChange={(e) => handleUpdateGateway(currentGateway.id, { senderId: e.target.value.toUpperCase() })}
-                  placeholder="e.g. REDMOD"
-                  className="w-full text-xs uppercase font-mono bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-slate-900 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1">
-                  DLT Template ID
-                </label>
-                <input
-                  type="text"
-                  value={currentGateway.templateId || ''}
-                  onChange={(e) => handleUpdateGateway(currentGateway.id, { templateId: e.target.value })}
-                  placeholder="e.g. 1207161728192837461"
-                  className="w-full text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-slate-900 focus:outline-none"
-                />
+                <span className="text-[11px] text-slate-400 mt-1 block">6-character DLT Header (Optional with AUTOGEN2)</span>
               </div>
             </div>
           </div>

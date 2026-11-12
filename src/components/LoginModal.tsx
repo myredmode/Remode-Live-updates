@@ -1,7 +1,5 @@
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
-import { auth } from '../firebase';
-import { RecaptchaVerifier, signInWithPhoneNumber, ConfirmationResult } from 'firebase/auth';
 import { X, ShieldCheck, Phone, CheckCircle2, UserCheck, ArrowRight, RefreshCw, AlertCircle, Package, MapPin, Smartphone } from 'lucide-react';
 
 interface LoginModalProps {
@@ -20,8 +18,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [instantFallbackOtp, setInstantFallbackOtp] = useState<string | null>(null);
-  const [confirmationResult, setConfirmationResult] = useState<ConfirmationResult | null>(null);
-  const recaptchaVerifierRef = useRef<RecaptchaVerifier | null>(null);
 
   const show = isOpen !== undefined ? isOpen : isLoginOpen;
   const handleClose = () => {
@@ -49,25 +45,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
 
     setIsSending(true);
     try {
-      // Attempt Firebase Phone Auth SMS (10,000 free per month)
-      try {
-        if (!recaptchaVerifierRef.current) {
-          recaptchaVerifierRef.current = new RecaptchaVerifier(auth, 'customer-firebase-recaptcha', {
-            size: 'invisible',
-            callback: () => {},
-          });
-        }
-        signInWithPhoneNumber(auth, `+91${clean}`, recaptchaVerifierRef.current)
-          .then((confirmation) => {
-            setConfirmationResult(confirmation);
-          })
-          .catch((fbErr) => {
-            console.info('Firebase customer phone auth note:', fbErr?.message || fbErr);
-          });
-      } catch (fbInitErr) {
-        console.info('Firebase recaptcha init note:', fbInitErr);
-      }
-
       const res = await sendCustomerOtp(clean);
       if (res.success) {
         setOtpSent(true);
@@ -91,19 +68,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
     e.preventDefault();
     setErrorMessage(null);
 
-    if (!otpCode.trim() || otpCode.trim().length < 4) {
-      setErrorMessage('Please enter the verification code.');
+    if (!otpCode.trim() || otpCode.trim().length < 6) {
+      setErrorMessage('Please enter the 6-digit verification code.');
       return;
     }
 
     setIsVerifying(true);
     const clean = mobileNumber.replace(/\D/g, '');
-
-    // Verify with Firebase confirmation if active
-    if (confirmationResult) {
-      confirmationResult.confirm(otpCode.trim()).catch(() => {});
-    }
-
     const res = verifyCustomerOtp(clean, otpCode.trim(), saveForThisDevice);
 
     if (res.success) {

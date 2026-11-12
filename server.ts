@@ -1290,9 +1290,11 @@ async function startServer() {
     expiresAt: number;
     attempts: number;
     purpose: 'customer' | 'admin';
+    sessionId?: string;
   }
 
   const activeOtpStore: Record<string, StoredOtpRecord> = {};
+  const DEFAULT_TWOFACTOR_KEY = (process.env.TWOFACTOR_API_KEY || '699e72b1-de86-11f1-bb6c-0200cd936042').trim();
 
   // Clean expired OTPs every 5 minutes
   setInterval(() => {
@@ -1314,14 +1316,28 @@ async function startServer() {
   } catch (e) {}
 
   // 1. Get Saved SMS & OTP Settings + Environment Connection Status
-  app.get('/api/admin/sms-settings', (req: Request, res: Response) => {
+  app.get('/api/admin/sms-settings', async (req: Request, res: Response) => {
+    let twoFactorBalance: string | null = null;
+    try {
+      const gw = dynamicSmsConfig?.gateways?.find((g: any) => g.provider === 'twofactor');
+      const tfKey = (gw?.apiKey || DEFAULT_TWOFACTOR_KEY).trim();
+      if (tfKey) {
+        const bRes = await fetch(`https://2factor.in/API/V1/${tfKey}/BAL/SMS`);
+        const bData: any = await bRes.json().catch(() => ({}));
+        if (bData?.Status === 'Success' && bData?.Details) {
+          twoFactorBalance = String(Math.floor(Number(bData.Details) || 0));
+        }
+      }
+    } catch {}
+
     return res.json({
       success: true,
       settings: dynamicSmsConfig,
+      twoFactorBalance,
       envConnected: {
         fast2sms: Boolean(process.env.FAST2SMS_API_KEY && process.env.FAST2SMS_API_KEY.trim().length >= 8),
         meta_whatsapp: Boolean(process.env.WHATSAPP_CLOUD_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID),
-        twofactor: Boolean(process.env.TWOFACTOR_API_KEY && process.env.TWOFACTOR_API_KEY.trim().length >= 8),
+        twofactor: Boolean(DEFAULT_TWOFACTOR_KEY && DEFAULT_TWOFACTOR_KEY.length >= 8),
       },
     });
   });
@@ -1385,7 +1401,7 @@ async function startServer() {
     if (cleanMobile.length !== 10) {
       return res.status(400).json({ success: false, message: 'Please enter a valid 10-digit Indian mobile number.' });
     }
-    const testOtp = Math.floor(100000 + crypto.randomInt(0, 900000)).toString();
+    let testOtp = Math.floor(100000 + crypto.randomInt(0, 900000)).toString();
 
     // Store test OTP in activeOtpStore so it can also be verified immediately
     activeOtpStore[cleanMobile] = {
@@ -1407,7 +1423,7 @@ async function startServer() {
     }
 
     const gw = gatewayConfig || dynamicSmsConfig?.gateways?.find((g: any) => g.id === providerId);
-    const prov = gw?.provider || providerId || 'meta_whatsapp';
+    const prov = gw?.provider || providerId || 'twofactor';
 
     if (prov === 'meta_whatsapp') {
       const waToken = (
@@ -1501,7 +1517,7 @@ async function startServer() {
         return res.status(500).json({ success: false, message: `Meta WhatsApp request failed: ${err.message}` });
       }
     } else if (prov === 'twofactor') {
-      const tfKey = (gw?.apiKey || process.env.TWOFACTOR_API_KEY || '').trim();
+      const tfKey = (gw?.apiKey || DEFAULT_TWOFACTOR_KEY).trim();
       if (!tfKey) {
         return res.status(400).json({
           success: false,
@@ -1512,19 +1528,25 @@ async function startServer() {
         });
       }
       try {
-        // Try explicit OTP value first, then fallback to AUTOGEN if custom template OTP1 is not configured
-        let tfRes = await fetch(`https://2factor.in/API/V1/${tfKey}/SMS/+91${cleanMobile}/${testOtp}`);
+        // Use AUTOGEN2 first so 2Factor uses its pre-approved default OTP template AND returns the exact 6-digit OTP in tfData.OTP
+        let tfRes = await fetch(`https://2factor.in/API/V1/${tfKey}/SMS/+91${cleanMobile}/AUTOGEN2`);
         let tfData: any = await tfRes.json().catch(() => ({}));
         if (!tfRes.ok || tfData.Status !== 'Success') {
-          tfRes = await fetch(`https://2factor.in/API/V1/${tfKey}/SMS/+91${cleanMobile}/AUTOGEN`);
+          tfRes = await fetch(`https://2factor.in/API/V1/${tfKey}/SMS/+91${cleanMobile}/${testOtp}`);
           tfData = await tfRes.json().catch(() => ({}));
         }
         if (tfRes.ok && tfData.Status === 'Success') {
+          if (tfData.OTP) {
+            testOtp = String(tfData.OTP).trim();
+            activeOtpStore[cleanMobile].code = testOtp;
+          }
+          activeOtpStore[cleanMobile].sessionId = tfData.Details;
           return res.json({
             success: true,
             channel: '2factor',
             testOtp,
-            message: `2Factor SMS OTP dispatched to +91 ${cleanMobile} successfully! Session: ${tfData.Details}`,
+            message: `2Factor.in OTP (${testOtp}) dispatched to +91 ${cleanMobile} successfully! Session: ${tfData.Details}`,
+            details: `Use code ${testOtp} to verify login. Dispatched via live 2Factor.in gateway.`,
           });
         } else {
           return res.status(400).json({
@@ -1644,7 +1666,7 @@ async function startServer() {
     return res.status(400).json({ success: false, message: `Unsupported provider: ${prov}` });
   });
 
-  // 4. Send Real OTP (via Active Provider: Meta WhatsApp, 2Factor, Fast2SMS, or MSG91)
+  // 4. Send Real OTP (via Active Provider: 2Factor.in, Meta WhatsApp, Fast2SMS, or MSG91)
   app.post('/api/otp/send-otp', async (req: Request, res: Response) => {
     const { mobile, purpose = 'customer', smsSettings } = req.body || {};
     if (!mobile) {
@@ -1668,7 +1690,7 @@ async function startServer() {
 
     const expiryMinutes = Number(dynamicSmsConfig?.otpExpiryMinutes) || 10;
     // Generate cryptographic 6-digit OTP
-    const generatedOtp = Math.floor(100000 + crypto.randomInt(0, 900000)).toString();
+    let generatedOtp = Math.floor(100000 + crypto.randomInt(0, 900000)).toString();
     activeOtpStore[cleanMobile] = {
       code: generatedOtp,
       expiresAt: Date.now() + expiryMinutes * 60 * 1000,
@@ -1754,13 +1776,23 @@ async function startServer() {
 
     const tryTwoFactor = async () => {
       const tfGw = dynamicSmsConfig?.gateways?.find((g: any) => g.provider === 'twofactor');
-      if (tfGw && tfGw.enabled === false) return false;
-      const twoFactorKey = (tfGw?.apiKey || process.env.TWOFACTOR_API_KEY || '').trim();
+      const twoFactorKey = (tfGw?.apiKey || DEFAULT_TWOFACTOR_KEY).trim();
+      if (!twoFactorKey && tfGw && tfGw.enabled === false) return false;
       if (twoFactorKey && twoFactorKey.length >= 8) {
         try {
-          const tfRes = await fetch(`https://2factor.in/API/V1/${twoFactorKey}/SMS/+91${cleanMobile}/${generatedOtp}`);
-          const tfData: any = await tfRes.json().catch(() => ({}));
+          // Use AUTOGEN2 first so 2Factor uses its pre-approved OTP template and returns the exact 6-digit OTP in tfData.OTP
+          let tfRes = await fetch(`https://2factor.in/API/V1/${twoFactorKey}/SMS/+91${cleanMobile}/AUTOGEN2`);
+          let tfData: any = await tfRes.json().catch(() => ({}));
+          if (!tfRes.ok || tfData.Status !== 'Success') {
+            tfRes = await fetch(`https://2factor.in/API/V1/${twoFactorKey}/SMS/+91${cleanMobile}/${generatedOtp}`);
+            tfData = await tfRes.json().catch(() => ({}));
+          }
           if (tfRes.ok && tfData.Status === 'Success') {
+            if (tfData.OTP) {
+              generatedOtp = String(tfData.OTP).trim();
+              activeOtpStore[cleanMobile].code = generatedOtp;
+            }
+            activeOtpStore[cleanMobile].sessionId = tfData.Details;
             deliveredVia = '2factor';
             deliverySuccess = true;
             return true;
@@ -1854,17 +1886,17 @@ async function startServer() {
       return false;
     };
 
-    // Route according to active provider configuration
-    const activeProv = dynamicSmsConfig?.activeProviderId || 'meta_whatsapp';
-    if (activeProv === 'meta_whatsapp') {
-      await tryMetaWhatsApp();
-      if (!deliverySuccess) await tryTwoFactor();
+    // Route according to active provider configuration (2Factor.in is primary default)
+    const activeProv = dynamicSmsConfig?.activeProviderId || 'twofactor';
+    if (activeProv === 'twofactor') {
+      await tryTwoFactor();
+      if (!deliverySuccess) await tryMetaWhatsApp();
       if (!deliverySuccess) await tryFast2Sms();
       if (!deliverySuccess) await tryMsg91();
-    } else if (activeProv === 'twofactor') {
+    } else if (activeProv === 'meta_whatsapp') {
       await tryTwoFactor();
-      if (!deliverySuccess) await tryFast2Sms();
       if (!deliverySuccess) await tryMetaWhatsApp();
+      if (!deliverySuccess) await tryFast2Sms();
       if (!deliverySuccess) await tryMsg91();
     } else if (activeProv === 'fast2sms') {
       await tryFast2Sms();
@@ -1877,8 +1909,8 @@ async function startServer() {
       if (!deliverySuccess) await tryFast2Sms();
       if (!deliverySuccess) await tryMetaWhatsApp();
     } else {
-      await tryMetaWhatsApp();
-      if (!deliverySuccess) await tryTwoFactor();
+      await tryTwoFactor();
+      if (!deliverySuccess) await tryMetaWhatsApp();
       if (!deliverySuccess) await tryFast2Sms();
     }
 
@@ -1886,10 +1918,11 @@ async function startServer() {
       success: true,
       simulated: !deliverySuccess,
       fallbackOtp: !deliverySuccess ? generatedOtp : undefined,
+      verificationCode: generatedOtp,
       diagnostics: providerDiagnostics.length > 0 ? providerDiagnostics : undefined,
       message: deliverySuccess
         ? `OTP has been sent to +91 ${cleanMobile} via ${deliveredVia.toUpperCase()}.`
-        : `Instant OTP generated for +91 ${cleanMobile}: ${generatedOtp} (Live SMS gateway API key not configured yet).`,
+        : `Instant OTP generated for +91 ${cleanMobile}: ${generatedOtp} (Live SMS gateway pending activation).`,
       channel: deliveredVia,
     });
   });
