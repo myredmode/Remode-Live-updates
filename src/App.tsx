@@ -8,6 +8,7 @@ import { ProductDetail } from './components/ProductDetail';
 import { CartDrawer } from './components/CartDrawer';
 import { Checkout } from './components/Checkout';
 import { TrackOrder } from './components/TrackOrder';
+import { MyAccount } from './components/MyAccount';
 import { ContactUs } from './components/ContactUs';
 import { Catalogue } from './components/Catalogue';
 import { Blogs } from './components/Blogs';
@@ -587,7 +588,7 @@ const StoreContent: React.FC = () => {
       case 'track-order':
         return <TrackOrder />;
       case 'account':
-        return <TrackOrder />;
+        return <MyAccount />;
       case 'contact':
       case 'contact-us':
         return <ContactUs />;

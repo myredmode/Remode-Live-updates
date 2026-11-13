@@ -144,33 +144,57 @@ service cloud.firestore {
     }
 
     // ===============================================================
-    // 4. Customer Orders & Profiles
+    // 4. Customer Orders, Returns, Notifications & Profiles
     // ===============================================================
     match /orders/{orderId} {
       allow get, list: if true;
-      allow create: if isValidOrderPayload(request.resource.data) &&
-        request.resource.data.id == orderId;
+      allow create: if isValidOrderPayload(request.resource.data);
       allow update: if isValidOrderPayload(request.resource.data) &&
         request.resource.data.id == resource.data.id;
       allow delete: if isSuperAdminEmail();
     }
 
     match /customers/{customerId} {
-      allow get: if true;
-      allow list: if isAdmin();
+      allow get, list: if true;
       allow create, update: if request.resource.data is map &&
-        (request.resource.data.mobile is string || request.resource.data.phone is string) &&
+        (request.resource.data.mobile is string ||
+         request.resource.data.phone is string ||
+         request.resource.data.mobileOrEmail is string) &&
         !('password' in request.resource.data);
       allow delete: if isSuperAdminEmail();
+    }
+
+    match /stock_notifications/{notifId} {
+      allow get, list: if true;
+      allow create: if request.resource.data is map &&
+        request.resource.data.productId is string &&
+        request.resource.data.contact is string &&
+        request.resource.data.contact.size() >= 3;
+      allow update, delete: if isAdmin();
     }
 
     match /restock_notifications/{notifId} {
       allow get, list: if isAdmin();
       allow create: if request.resource.data is map &&
         request.resource.data.productId is string &&
-        request.resource.data.mobile is string &&
-        request.resource.data.mobile.size() >= 10;
+        (request.resource.data.mobile is string || request.resource.data.contact is string);
       allow update, delete: if isAdmin();
+    }
+
+    match /returns/{returnId} {
+      allow get, list: if true;
+      allow create, update: if request.resource.data is map &&
+        request.resource.data.orderId is string &&
+        request.resource.data.reason is string;
+      allow delete: if isSuperAdminEmail();
+    }
+
+    match /inquiries/{inquiryId} {
+      allow get, list: if true;
+      allow create, update: if request.resource.data is map &&
+        request.resource.data.name is string &&
+        request.resource.data.message is string;
+      allow delete: if isSuperAdminEmail();
     }
 
     // ===============================================================

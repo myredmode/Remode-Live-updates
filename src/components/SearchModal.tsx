@@ -161,9 +161,26 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, asPag
     const product = products.find((p) => p.id === productId);
     if (!product) return;
 
-    addToCart(product, 'M', 1);
-    setCartDrawerView('full-cart');
-    setIsCartOpen(true);
+    const isFree =
+      !product.sizes ||
+      product.sizes.length === 0 ||
+      (product.sizes.length === 1 &&
+        ['free size', 'freesize', 'free-size', 'free'].includes(product.sizes[0].trim().toLowerCase()));
+
+    const candidateSizes = isFree ? ['Free size'] : product.sizes;
+    const inStockSize = candidateSizes.find((sz) => (Number(product.stockBySize?.[sz] ?? 1) || 0) > 0);
+    if (!inStockSize || product.inStock === false) {
+      handleProductSelect(product.id);
+      return;
+    }
+
+    const res = addToCart(product, inStockSize, 1);
+    if (res.success) {
+      setCartDrawerView('full-cart');
+      setIsCartOpen(true);
+    } else {
+      handleProductSelect(product.id);
+    }
   };
 
   const handleQuickWishlist = (e: React.MouseEvent, productId: string) => {
@@ -266,25 +283,26 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, asPag
         }
       }
 
-      // Pad with curated luxury photoshoot images so EVERY category has exactly 10 photos
-      const curatedFallbacks = CURATED_CATEGORY_PHOTOS[slug] || CURATED_CATEGORY_PHOTOS['kurti'];
-      let fallbackIndex = 0;
-
-      while (photos.length < 10) {
-        const fallbackUrl = curatedFallbacks[fallbackIndex % curatedFallbacks.length];
-        photos.push({
-          id: `${cat.slug}-curated-${photos.length + 1}`,
-          image: fallbackUrl,
-          productId: primaryProduct.id,
-          productName: primaryProduct.name,
-          price: primaryProduct.price,
-          mrp: primaryProduct.mrp,
-          offerTag: 'Best Seller',
-          colorName: photos.length % 2 === 0 ? 'Black' : 'White',
-          categoryName: cat.name,
-          categorySlug: cat.slug,
-        });
-        fallbackIndex++;
+      // If this category has fewer than 10 items, include real published products from other categories rather than fake duplicates
+      if (photos.length < 10) {
+        for (const prod of products) {
+          if (photos.length >= 10) break;
+          if (prod.published === false) continue;
+          if (prod.mainImage && !seenImages.has(prod.mainImage)) {
+            seenImages.add(prod.mainImage);
+            photos.push({
+              id: `${prod.id}-fallback-main`,
+              image: prod.mainImage,
+              productId: prod.id,
+              productName: prod.name,
+              price: prod.price,
+              mrp: prod.mrp,
+              offerTag: prod.offerTag || 'Best Seller',
+              categoryName: prod.category || cat.name,
+              categorySlug: cat.slug,
+            });
+          }
+        }
       }
 
       map[slug] = photos.slice(0, 10);

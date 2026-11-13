@@ -120,6 +120,7 @@ export const ProductDetail: React.FC = () => {
     settings,
     goBack,
     formatPrice,
+    submitStockNotification,
   } = useStore();
 
   const product =
@@ -295,22 +296,14 @@ export const ProductDetail: React.FC = () => {
       setShowNotifyForm(true);
       return;
     }
-    try {
-      const saved = localStorage.getItem('redmode_notify_me_list');
-      const list = saved ? JSON.parse(saved) : [];
-      const next = [
-        {
-          productId: product.id,
-          productName: product.name,
-          color: selectedColor || '',
-          size: sizeKey,
-          contact: contactVal || userProfile.mobileOrEmail || 'Customer',
-          createdAt: new Date().toISOString(),
-        },
-        ...(Array.isArray(list) ? list : []),
-      ];
-      localStorage.setItem('redmode_notify_me_list', JSON.stringify(next));
-    } catch {}
+    const resolvedContact = contactVal || userProfile.mobileOrEmail || 'Customer';
+    submitStockNotification(
+      product.id,
+      product.name,
+      sizeKey,
+      selectedColor || '',
+      resolvedContact
+    ).catch(() => {});
     setNotifiedSizes((prev) => Array.from(new Set([...prev, sizeKey])));
     setShowNotifyForm(false);
   };

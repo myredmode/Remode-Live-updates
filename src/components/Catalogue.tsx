@@ -30,6 +30,8 @@ export const Catalogue: React.FC = () => {
   const [priceSort, setPriceSort] = useState<'featured' | 'low-high' | 'high-low' | 'bestsellers'>('featured');
   const [selectedSizeFilter, setSelectedSizeFilter] = useState<string | null>(null);
   const [selectedColorFilter, setSelectedColorFilter] = useState<string | null>(null);
+  const [selectedPriceFilter, setSelectedPriceFilter] = useState<'all' | 'under-999' | '1000-1499' | '1500-2499' | '2500-plus'>('all');
+  const [inStockOnlyFilter, setInStockOnlyFilter] = useState<boolean>(false);
   const [selectedSubSubcategorySlug, setSelectedSubSubcategorySlug] = useState<string | null>(null);
   const [isFilterDrawerOpen, setIsFilterDrawerOpen] = useState(false);
   const [isSortDropdownOpen, setIsSortDropdownOpen] = useState(false);
@@ -305,9 +307,37 @@ export const Catalogue: React.FC = () => {
           if (!matchSubSub) return false;
         }
 
-        // Size filter
+        // In-stock availability filter
+        if (inStockOnlyFilter) {
+          if (p.inStock === false) return false;
+          const stockVals = Object.values(p.stockBySize || {}).map((v) => Number(v) || 0);
+          if (stockVals.length > 0 && stockVals.reduce((s, c) => s + c, 0) <= 0) {
+            return false;
+          }
+        }
+
+        // Price range filter
+        if (selectedPriceFilter !== 'all') {
+          const pr = Number(p.price) || 0;
+          if (selectedPriceFilter === 'under-999' && pr >= 1000) return false;
+          if (selectedPriceFilter === '1000-1499' && (pr < 1000 || pr > 1499)) return false;
+          if (selectedPriceFilter === '1500-2499' && (pr < 1500 || pr > 2499)) return false;
+          if (selectedPriceFilter === '2500-plus' && pr < 2500) return false;
+        }
+
+        // Size filter (checks size inclusion AND available stock > 0)
         if (selectedSizeFilter) {
-          if (!p.sizes.includes(selectedSizeFilter)) return false;
+          const isFree =
+            selectedSizeFilter.toLowerCase() === 'free size' &&
+            (!p.sizes ||
+              p.sizes.length === 0 ||
+              p.sizes.some((s) => s.toLowerCase().includes('free')));
+          const hasSizeListed = isFree || p.sizes.includes(selectedSizeFilter);
+          if (!hasSizeListed) return false;
+          const sizeStock =
+            p.stockBySize?.[selectedSizeFilter] ??
+            (isFree ? p.stockBySize?.['Free size'] : undefined);
+          if (sizeStock !== undefined && Number(sizeStock) <= 0) return false;
         }
 
         // Color filter
@@ -343,8 +373,11 @@ export const Catalogue: React.FC = () => {
     products,
     selectedCategorySlug,
     selectedSubcategorySlug,
+    selectedSubSubcategorySlug,
     selectedSizeFilter,
     selectedColorFilter,
+    selectedPriceFilter,
+    inStockOnlyFilter,
     searchQuery,
     priceSort,
   ]);
@@ -362,7 +395,22 @@ export const Catalogue: React.FC = () => {
   }, [products]);
 
   // All available sizes for filter drawer
-  const allAvailableSizes = ['XS', 'S', 'M', 'L', 'XL', 'XXL'];
+  const allAvailableSizes = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'Free size'];
+
+  // Available colors from active products
+  const allAvailableColors = useMemo(() => {
+    const set = new Set<string>();
+    products.forEach((p) => {
+      if (p.published === false) return;
+      if (p.color && p.color.trim()) set.add(p.color.trim());
+      if (Array.isArray(p.colorOptions)) {
+        p.colorOptions.forEach((c) => {
+          if (c?.name && c.name.trim()) set.add(c.name.trim());
+        });
+      }
+    });
+    return Array.from(set).slice(0, 12);
+  }, [products]);
 
   const sortOptions = [
     { value: 'featured', label: 'Featured' },
@@ -942,7 +990,7 @@ export const Catalogue: React.FC = () => {
                       <button
                         key={sz}
                         onClick={() => setSelectedSizeFilter(isSelected ? null : sz)}
-                        className={`py-2 text-xs text-center border transition ${
+                        className={`py-2 text-xs text-center border transition cursor-pointer ${
                           isSelected
                             ? 'border-black bg-black text-white font-medium'
                             : 'border-zinc-200 text-zinc-800 hover:border-zinc-500'
@@ -953,6 +1001,82 @@ export const Catalogue: React.FC = () => {
                     );
                   })}
                 </div>
+              </div>
+
+              {/* Price Filter */}
+              <div className="pt-6 space-y-3">
+                <span className="text-xs font-semibold uppercase tracking-wider text-zinc-950 block">
+                  PRICE RANGE
+                </span>
+                <div className="space-y-1.5 text-xs">
+                  {[
+                    { id: 'all', label: 'All Prices' },
+                    { id: 'under-999', label: 'Under ₹999' },
+                    { id: '1000-1499', label: '₹1,000 – ₹1,499' },
+                    { id: '1500-2499', label: '₹1,500 – ₹2,499' },
+                    { id: '2500-plus', label: '₹2,500 & Above' },
+                  ].map((range) => {
+                    const active = selectedPriceFilter === range.id;
+                    return (
+                      <button
+                        key={range.id}
+                        type="button"
+                        onClick={() => setSelectedPriceFilter(range.id as any)}
+                        className={`w-full text-left py-1.5 px-2 flex items-center justify-between transition cursor-pointer ${
+                          active
+                            ? 'text-black font-bold bg-zinc-100'
+                            : 'text-zinc-600 hover:text-black'
+                        }`}
+                      >
+                        <span>{range.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Color Filter */}
+              {allAvailableColors.length > 0 && (
+                <div className="pt-6 space-y-3">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-zinc-950 block">
+                    COLOR
+                  </span>
+                  <div className="flex flex-wrap gap-2">
+                    {allAvailableColors.map((col) => {
+                      const isSelected = selectedColorFilter?.toLowerCase() === col.toLowerCase();
+                      return (
+                        <button
+                          key={col}
+                          type="button"
+                          onClick={() => setSelectedColorFilter(isSelected ? null : col)}
+                          className={`px-3 py-1.5 text-xs border transition cursor-pointer ${
+                            isSelected
+                              ? 'border-black bg-black text-white font-medium'
+                              : 'border-zinc-200 text-zinc-700 hover:border-zinc-500'
+                          }`}
+                        >
+                          {col}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Availability Filter */}
+              <div className="pt-6 space-y-3">
+                <span className="text-xs font-semibold uppercase tracking-wider text-zinc-950 block">
+                  AVAILABILITY
+                </span>
+                <label className="flex items-center gap-2.5 text-xs text-zinc-800 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={inStockOnlyFilter}
+                    onChange={(e) => setInStockOnlyFilter(e.target.checked)}
+                    className="w-4 h-4 accent-zinc-950 cursor-pointer"
+                  />
+                  <span>In Stock Only</span>
+                </label>
               </div>
             </div>
 
@@ -965,8 +1089,10 @@ export const Catalogue: React.FC = () => {
                   setSelectedSubcategorySlug(null);
                   setSelectedSizeFilter(null);
                   setSelectedColorFilter(null);
+                  setSelectedPriceFilter('all');
+                  setInStockOnlyFilter(false);
                 }}
-                className="py-3 text-center border border-zinc-300 text-xs font-normal uppercase tracking-wider text-zinc-800 hover:bg-zinc-50 transition"
+                className="py-3 text-center border border-zinc-300 text-xs font-normal uppercase tracking-wider text-zinc-800 hover:bg-zinc-50 transition cursor-pointer"
               >
                 Clear All
               </button>

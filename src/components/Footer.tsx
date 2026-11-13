@@ -26,6 +26,7 @@ export const Footer: React.FC = () => {
     setSelectedSubcategorySlug,
     setIsLoginOpen,
     settings,
+    userProfile,
   } = useStore();
 
   return (
@@ -136,7 +137,14 @@ export const Footer: React.FC = () => {
               <li>
                 <button
                   type="button"
-                  onClick={() => setIsLoginOpen(true)}
+                  onClick={() => {
+                    if (userProfile.isLoggedIn) {
+                      setActiveView('account');
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    } else {
+                      setIsLoginOpen(true);
+                    }
+                  }}
                   className="hover:text-zinc-950 transition-colors duration-150 text-left cursor-pointer inline-block py-0.5"
                 >
                   My Account

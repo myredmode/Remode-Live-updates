@@ -31,6 +31,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
     userProfile,
     setIsLoginOpen,
     formatPrice,
+    submitStockNotification,
   } = useStore();
 
   const [isHovered, setIsHovered] = useState(false);
@@ -168,21 +169,14 @@ export const ProductCard: React.FC<ProductCardProps> = ({
   const isOutOfStock = product.inStock === false || (totalStock <= 0 && stockEntries.length > 0);
 
   const saveNotifyRequest = (contactVal: string) => {
-    try {
-      const saved = localStorage.getItem('redmode_notify_me_list');
-      const list = saved ? JSON.parse(saved) : [];
-      const next = [
-        {
-          productId: product.id,
-          productName: product.name,
-          color: effectiveColor || '',
-          contact: contactVal || userProfile.mobileOrEmail || 'Customer',
-          createdAt: new Date().toISOString(),
-        },
-        ...(Array.isArray(list) ? list.filter((i: any) => i.productId !== product.id) : []),
-      ];
-      localStorage.setItem('redmode_notify_me_list', JSON.stringify(next));
-    } catch {}
+    const resolvedContact = contactVal || userProfile.mobileOrEmail || 'Customer';
+    submitStockNotification(
+      product.id,
+      product.name,
+      'ALL',
+      effectiveColor || '',
+      resolvedContact
+    ).catch(() => {});
     setIsNotified(true);
     setIsNotifyDrawerOpen(false);
   };

@@ -28,6 +28,10 @@ export const Checkout: React.FC = () => {
     cartGstAmount,
     deliveryFee,
     cartTotalAmount,
+    appliedCoupon,
+    couponDiscountAmount,
+    applyCoupon,
+    removeCoupon,
     placeOrder,
     setActiveView,
     settings,
@@ -512,10 +516,10 @@ export const Checkout: React.FC = () => {
 
   const handleApplyCoupon = (e: React.FormEvent) => {
     e.preventDefault();
-    if (isAutoDiscountApplied) {
-      setCouponMessage(`Automatic 10% offer is already applied on your order!`);
-    } else {
-      setCouponMessage(`Cart values above ₹${settings.autoDiscountThreshold || 999} get 10% automatically.`);
+    const res = applyCoupon(couponCode);
+    setCouponMessage(res.message);
+    if (res.success) {
+      setCouponCode('');
     }
   };
 
@@ -749,8 +753,42 @@ export const Checkout: React.FC = () => {
                   </select>
                 </div>
 
+                {/* Saved Addresses Quick-Select */}
+                {userProfile.savedAddresses && userProfile.savedAddresses.length > 0 && (
+                  <div className="sm:col-span-2 bg-zinc-50 border border-zinc-200 p-3 space-y-2">
+                    <span className="block text-[10px] font-bold uppercase tracking-wider text-zinc-700">
+                      Quick Fill from Saved Addresses
+                    </span>
+                    <div className="flex flex-wrap gap-2">
+                      {userProfile.savedAddresses.map((saved, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() =>
+                            setAddress({
+                              name: saved.name || userProfile.name || '',
+                              mobile: saved.mobile || userProfile.mobileOrEmail || '',
+                              email: saved.email || address.email || '',
+                              country: saved.country || 'India',
+                              house: saved.house || '',
+                              street: saved.street || '',
+                              city: saved.city || '',
+                              state: saved.state || '',
+                              pincode: saved.pincode || '',
+                              landmark: saved.landmark || '',
+                            })
+                          }
+                          className="text-left px-3 py-1.5 bg-white border border-zinc-300 hover:border-zinc-900 text-[11px] transition cursor-pointer"
+                        >
+                          <span className="font-bold text-zinc-900">{saved.name}</span> — {saved.city}, {saved.pincode}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Full Name */}
-                <div className="sm:col-span-2">
+                <div className="sm:col-span-1">
                   <label className="block font-bold uppercase tracking-wider text-zinc-700 mb-1">
                     Customer Full Name <span className="text-rose-600">*</span>
                   </label>
@@ -760,6 +798,20 @@ export const Checkout: React.FC = () => {
                     value={address.name}
                     onChange={(e) => setAddress({ ...address, name: e.target.value })}
                     placeholder="e.g. Priya Sharma"
+                    className="w-full px-3.5 py-2.5 border border-zinc-300 rounded-none text-zinc-900 focus:outline-none focus:border-zinc-900"
+                  />
+                </div>
+
+                {/* Email Address (Optional for domestic, helpful for export & receipts) */}
+                <div className="sm:col-span-1">
+                  <label className="block font-bold uppercase tracking-wider text-zinc-700 mb-1">
+                    Email Address <span className="text-zinc-400 font-normal">(For Order Invoice)</span>
+                  </label>
+                  <input
+                    type="email"
+                    value={address.email || ''}
+                    onChange={(e) => setAddress({ ...address, email: e.target.value })}
+                    placeholder="e.g. priya@example.com"
                     className="w-full px-3.5 py-2.5 border border-zinc-300 rounded-none text-zinc-900 focus:outline-none focus:border-zinc-900"
                   />
                 </div>
@@ -1230,24 +1282,45 @@ export const Checkout: React.FC = () => {
               </div>
 
               {/* Coupon Form */}
-              <form onSubmit={handleApplyCoupon} className="pt-2 border-t border-zinc-200 flex gap-2">
-                <input
-                  type="text"
-                  value={couponCode}
-                  onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
-                  placeholder="Coupon Code"
-                  className="flex-1 px-3 py-2 text-xs border border-zinc-300 uppercase rounded-none"
-                />
-                <button
-                  type="submit"
-                  className="px-4 py-2 bg-zinc-900 text-white text-xs font-bold uppercase cursor-pointer"
-                >
-                  Apply
-                </button>
-              </form>
+              {appliedCoupon ? (
+                <div className="pt-2 border-t border-zinc-200 flex items-center justify-between bg-emerald-50 border border-emerald-200 px-3 py-2 text-xs">
+                  <div>
+                    <span className="font-bold text-emerald-900 uppercase">{appliedCoupon.code}</span>
+                    <span className="text-emerald-700 ml-1.5">(-₹{couponDiscountAmount} applied)</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      removeCoupon();
+                      setCouponMessage(null);
+                    }}
+                    className="text-[11px] font-bold text-rose-600 hover:underline uppercase cursor-pointer"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ) : (
+                <form onSubmit={handleApplyCoupon} className="pt-2 border-t border-zinc-200 flex gap-2">
+                  <input
+                    type="text"
+                    value={couponCode}
+                    onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
+                    placeholder="Enter Promo / Coupon Code"
+                    className="flex-1 px-3 py-2 text-xs border border-zinc-300 uppercase rounded-none"
+                  />
+                  <button
+                    type="submit"
+                    className="px-4 py-2 bg-zinc-900 text-white text-xs font-bold uppercase cursor-pointer"
+                  >
+                    Apply
+                  </button>
+                </form>
+              )}
 
               {couponMessage && (
-                <p className="text-[11px] font-medium text-rose-700">{couponMessage}</p>
+                <p className={`text-[11px] font-medium ${appliedCoupon ? 'text-emerald-700' : 'text-rose-700'}`}>
+                  {couponMessage}
+                </p>
               )}
 
               {/* Pricing Calculation Details */}
@@ -1261,6 +1334,13 @@ export const Checkout: React.FC = () => {
                   <div className="flex justify-between text-rose-700 font-semibold bg-rose-50 p-2 rounded">
                     <span>Auto 10% Offer on ₹{settings.autoDiscountThreshold || 999}+</span>
                     <span>- ₹{autoDiscountAmount}</span>
+                  </div>
+                )}
+
+                {couponDiscountAmount > 0 && appliedCoupon && (
+                  <div className="flex justify-between text-emerald-700 font-semibold bg-emerald-50 p-2 rounded">
+                    <span>Coupon ({appliedCoupon.code})</span>
+                    <span>- ₹{couponDiscountAmount}</span>
                   </div>
                 )}
 

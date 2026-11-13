@@ -229,6 +229,14 @@ export const Header: React.FC<HeaderProps> = ({ onOpenLogin, onOpenSearch }) => 
   };
 
   const handleOpenLogin = () => {
+    setIsMobileMenuOpen(false);
+    if (userProfile.isLoggedIn) {
+      setActiveView('account');
+      if (typeof window !== 'undefined') {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+      return;
+    }
     if (onOpenLogin) {
       onOpenLogin();
     } else {
@@ -514,6 +522,33 @@ export const Header: React.FC<HeaderProps> = ({ onOpenLogin, onOpenSearch }) => 
               >
                 Jewellery
               </button>
+
+              {/* Dynamic Additional Categories from Admin Panel */}
+              {categories
+                .filter(
+                  (c) =>
+                    !['kurti', 'kurti-sets', 'kurti-set', 'trouser', 'bottom', 'jewellery', 'jewelry'].includes(
+                      (c.slug || '').toLowerCase()
+                    )
+                )
+                .map((cat) => (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    onClick={() => {
+                      handleCategoryNav(cat.slug);
+                      setIsKurtiDropdownOpen(false);
+                      setIsMobileMenuOpen(false);
+                    }}
+                    className={`py-2 transition relative hover:text-black cursor-pointer ${
+                      activeView === 'catalogue' && selectedCategorySlug === cat.slug
+                        ? 'text-black font-bold after:absolute after:bottom-0 after:left-0 after:right-0 after:h-[2px] after:bg-black'
+                        : 'text-zinc-700 font-normal'
+                    }`}
+                  >
+                    {cat.name}
+                  </button>
+                ))}
 
               </nav>
           </div>
@@ -852,6 +887,46 @@ export const Header: React.FC<HeaderProps> = ({ onOpenLogin, onOpenSearch }) => 
                     </button>
                   </div>
                 </div>
+
+                {/* Dynamic Additional Categories from Admin Panel */}
+                {categories
+                  .filter(
+                    (c) =>
+                      !['kurti', 'kurti-sets', 'kurti-set', 'trouser', 'bottom', 'jewellery', 'jewelry'].includes(
+                        (c.slug || '').toLowerCase()
+                      )
+                  )
+                  .map((cat) => (
+                    <div key={cat.id} className="py-4 border-b border-zinc-200/80">
+                      <div className="w-full flex items-center justify-between py-1 text-left">
+                        <button
+                          type="button"
+                          onClick={() => handleShopNavigation(cat.slug)}
+                          className={`text-sm uppercase tracking-[0.14em] transition cursor-pointer hover:text-[#E52229] ${
+                            activeView === 'catalogue' && selectedCategorySlug === cat.slug
+                              ? 'text-[#E52229] font-extrabold'
+                              : 'text-zinc-950 font-bold'
+                          }`}
+                        >
+                          {cat.name}
+                        </button>
+                      </div>
+                      {Array.isArray(cat.subcategories) && cat.subcategories.length > 0 && (
+                        <div className="space-y-1.5 pt-2">
+                          {cat.subcategories.map((sub) => (
+                            <button
+                              key={sub.id}
+                              type="button"
+                              onClick={() => handleShopNavigation(cat.slug, sub.slug)}
+                              className="block w-full text-left py-1 text-xs text-zinc-600 hover:text-black hover:translate-x-1 font-medium tracking-[0.08em] transition cursor-pointer"
+                            >
+                              {sub.name}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
               </div>
             </div>
           </div>

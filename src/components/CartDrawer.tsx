@@ -28,6 +28,8 @@ export const CartDrawer: React.FC = () => {
     cartGstAmount,
     deliveryFee,
     cartTotalAmount,
+    appliedCoupon,
+    couponDiscountAmount,
     setActiveView,
     settings,
     lastAddedItem,
@@ -469,6 +471,13 @@ export const CartDrawer: React.FC = () => {
                       <div className="flex justify-between text-rose-700 font-semibold">
                         <span>Auto 10% Discount ({formatPrice(threshold)}+ Order)</span>
                         <span>- {formatPrice(autoDiscountAmount)}</span>
+                      </div>
+                    )}
+
+                    {couponDiscountAmount > 0 && appliedCoupon && (
+                      <div className="flex justify-between text-emerald-700 font-semibold">
+                        <span>Coupon ({appliedCoupon.code})</span>
+                        <span>- {formatPrice(couponDiscountAmount)}</span>
                       </div>
                     )}
 

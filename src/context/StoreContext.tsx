@@ -561,6 +561,10 @@ interface StoreContextType {
   cartSubtotal: number;
   autoDiscountAmount: number;
   isAutoDiscountApplied: boolean;
+  appliedCoupon: Coupon | null;
+  couponDiscountAmount: number;
+  applyCoupon: (code: string) => { success: boolean; message: string };
+  removeCoupon: () => void;
   cartGstAmount: number;
   deliveryFee: number;
   cartTotalAmount: number;
@@ -579,12 +583,33 @@ interface StoreContextType {
   ) => Order;
   trackOrder: (orderId: string) => Order | undefined;
 
-  // Customer Contact & Auth
+  // Customer Contact, Auth, Profile & Self-Service
   submitContactForm: (name: string, mobile: string, email: string, message: string) => void;
+  submitStockNotification: (
+    productId: string,
+    productName: string,
+    size: string,
+    color?: string,
+    contact?: string
+  ) => Promise<boolean>;
   inquiries: ContactMessage[];
   userProfile: UserProfile;
   loginUser: (mobileOrEmail: string, name?: string) => void;
   logoutUser: () => void;
+  updateUserProfile: (updates: { name?: string; email?: string; mobileOrEmail?: string }) => void;
+  saveCustomerAddress: (address: CustomerAddress, index?: number) => void;
+  deleteCustomerAddress: (index: number) => void;
+  cancelCustomerOrder: (orderId: string, reason?: string) => { success: boolean; message: string };
+  submitCustomerReturnRequest: (data: {
+    orderId: string;
+    productName: string;
+    productImage?: string;
+    size: string;
+    quantity: number;
+    reason: string;
+    refundAmount: number;
+  }) => { success: boolean; message: string; returnRequest?: ReturnRequest };
+  markReviewHelpful: (productId: string, reviewId: string) => void;
 
   // Admin Actions
   addProduct: (product: Omit<Product, 'id' | 'views' | 'salesCount' | 'createdAt'>) => void;
@@ -1460,9 +1485,30 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         stockBySize: p.stockBySize || initialMatch?.stockBySize || {},
         seo: p.seo || initialMatch?.seo || { metaTitle: p.name || '', metaDescription: '', imageAlt: p.name || '' },
         highlights: p.highlights || initialMatch?.highlights,
-        reviews: p.reviews || initialMatch?.reviews,
-        rating: p.rating || initialMatch?.rating || 4.8,
-        reviewCount: p.reviewCount || initialMatch?.reviewCount || 100,
+        reviews: p.reviews || initialMatch?.reviews || [],
+        rating: (() => {
+          const revList = Array.isArray(p.reviews)
+            ? p.reviews
+            : Array.isArray(initialMatch?.reviews)
+            ? initialMatch.reviews
+            : [];
+          if (revList.length > 0) {
+            const avg = revList.reduce((sum, r) => sum + (Number(r.rating) || 5), 0) / revList.length;
+            return Number(avg.toFixed(1));
+          }
+          return typeof p.rating === 'number' && (p.reviewCount || 0) > 0 && p.reviewCount !== 100
+            ? p.rating
+            : 0;
+        })(),
+        reviewCount: (() => {
+          const revList = Array.isArray(p.reviews)
+            ? p.reviews
+            : Array.isArray(initialMatch?.reviews)
+            ? initialMatch.reviews
+            : [];
+          if (revList.length > 0) return revList.length;
+          return typeof p.reviewCount === 'number' && p.reviewCount !== 100 ? p.reviewCount : 0;
+        })(),
         brand: p.brand || initialMatch?.brand || 'REDMODE',
         material: p.material || initialMatch?.material,
         fit: p.fit || initialMatch?.fit,
@@ -2523,6 +2569,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   }, [userProfile]);
 
+  const [appliedCouponCode, setAppliedCouponCode] = useState<string | null>(null);
+
   // Cart Calculations
   const cartSubtotal = cart.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
 
@@ -2534,7 +2582,104 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     ? Math.round((cartSubtotal * (settings.autoDiscountPercent || 10)) / 100)
     : 0;
 
-  const taxableAmount = cartSubtotal - autoDiscountAmount;
+  // Validate applied coupon against live cartSubtotal, active status, date range, and usage limit
+  const appliedCoupon: Coupon | null = useMemo(() => {
+    if (!appliedCouponCode || cartSubtotal <= 0) return null;
+    const found = coupons.find(
+      (c) => c.code.toUpperCase().trim() === appliedCouponCode.toUpperCase().trim() && c.active
+    );
+    if (!found) return null;
+    if (cartSubtotal < (found.minOrderValue || 0)) return null;
+    const nowMs = Date.now();
+    if (found.startDate) {
+      const startMs = new Date(found.startDate).getTime();
+      if (!isNaN(startMs) && nowMs < startMs) return null;
+    }
+    if (found.expiryDate) {
+      const endDate = new Date(found.expiryDate);
+      endDate.setHours(23, 59, 59, 999);
+      if (!isNaN(endDate.getTime()) && nowMs > endDate.getTime()) return null;
+    }
+    if (typeof found.usageLimit === 'number' && found.usageLimit > 0 && found.usedCount >= found.usageLimit) {
+      return null;
+    }
+    return found;
+  }, [appliedCouponCode, coupons, cartSubtotal]);
+
+  const couponDiscountAmount = useMemo(() => {
+    if (!appliedCoupon || cartSubtotal <= 0) return 0;
+    const announcementCode = (settings.announcementBar?.couponCode || 'REDMODE10').toUpperCase().trim();
+    // If the applied coupon is the same as the automatic 10% offer code and auto discount is already applied,
+    // don't double-apply the same 10% offer
+    if (appliedCoupon.code.toUpperCase().trim() === announcementCode && isAutoDiscountApplied) {
+      return 0;
+    }
+    let rawDisc = 0;
+    if (appliedCoupon.discountType === 'PERCENTAGE') {
+      rawDisc = Math.round((cartSubtotal * appliedCoupon.discountValue) / 100);
+      if (typeof appliedCoupon.maxDiscount === 'number' && appliedCoupon.maxDiscount > 0) {
+        rawDisc = Math.min(rawDisc, appliedCoupon.maxDiscount);
+      }
+    } else {
+      rawDisc = Math.round(appliedCoupon.discountValue);
+    }
+    const maxAllowed = Math.max(0, cartSubtotal - autoDiscountAmount);
+    return Math.min(rawDisc, maxAllowed);
+  }, [appliedCoupon, cartSubtotal, autoDiscountAmount, isAutoDiscountApplied, settings.announcementBar?.couponCode]);
+
+  const applyCoupon = (rawCode: string): { success: boolean; message: string } => {
+    const cleanCode = (rawCode || '').toUpperCase().trim();
+    if (!cleanCode) {
+      return { success: false, message: 'Please enter a valid coupon code.' };
+    }
+    const found = coupons.find((c) => c.code.toUpperCase().trim() === cleanCode);
+    if (!found || !found.active) {
+      return { success: false, message: `Coupon code "${cleanCode}" is invalid or inactive.` };
+    }
+    const nowMs = Date.now();
+    if (found.startDate) {
+      const startMs = new Date(found.startDate).getTime();
+      if (!isNaN(startMs) && nowMs < startMs) {
+        return { success: false, message: `Coupon "${cleanCode}" is not active yet.` };
+      }
+    }
+    if (found.expiryDate) {
+      const endDate = new Date(found.expiryDate);
+      endDate.setHours(23, 59, 59, 999);
+      if (!isNaN(endDate.getTime()) && nowMs > endDate.getTime()) {
+        return { success: false, message: `Coupon "${cleanCode}" has expired.` };
+      }
+    }
+    if (typeof found.usageLimit === 'number' && found.usageLimit > 0 && found.usedCount >= found.usageLimit) {
+      return { success: false, message: `Coupon "${cleanCode}" has reached its maximum usage limit.` };
+    }
+    if (cartSubtotal < (found.minOrderValue || 0)) {
+      return {
+        success: false,
+        message: `Minimum order of ₹${found.minOrderValue} is required to use "${cleanCode}". Add ₹${found.minOrderValue - cartSubtotal} more.`,
+      };
+    }
+
+    setAppliedCouponCode(found.code.toUpperCase().trim());
+    const announcementCode = (settings.announcementBar?.couponCode || 'REDMODE10').toUpperCase().trim();
+    if (found.code.toUpperCase().trim() === announcementCode && isAutoDiscountApplied) {
+      return {
+        success: true,
+        message: `Coupon ${found.code} verified! Automatic ${settings.autoDiscountPercent || 10}% discount (₹${autoDiscountAmount}) is active on your bag.`,
+      };
+    }
+    return {
+      success: true,
+      message: `Coupon "${found.code}" applied successfully!`,
+    };
+  };
+
+  const removeCoupon = () => {
+    setAppliedCouponCode(null);
+  };
+
+  const totalOrderDiscount = autoDiscountAmount + couponDiscountAmount;
+  const taxableAmount = Math.max(0, cartSubtotal - totalOrderDiscount);
   const cartGstAmount = Math.round(taxableAmount * 0.05); // Standard 5% GST for apparel
   const deliveryFee = cartSubtotal > 0 ? settings.shippingCharges : 0;
   const cartTotalAmount = Math.max(0, taxableAmount + cartGstAmount + deliveryFee);
@@ -2899,7 +3044,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       customer,
       items: orderItems,
       subtotal: cartSubtotal,
-      discount: autoDiscountAmount,
+      discount: totalOrderDiscount,
       gst: cartGstAmount,
       deliveryCharge: deliveryFee,
       total: cartTotalAmount,
@@ -3046,6 +3191,52 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setDoc(doc(db, 'orders', orderDocId), cleanForFirestore(newOrder), { merge: true }).catch(() => {});
     });
 
+    // Increment coupon usedCount if a coupon was applied
+    if (appliedCoupon) {
+      setCoupons((prev) =>
+        prev.map((c) => {
+          if (c.id !== appliedCoupon.id) return c;
+          const updatedCoupon = { ...c, usedCount: (c.usedCount || 0) + 1 };
+          setDoc(doc(db, 'coupons', updatedCoupon.id), cleanForFirestore(updatedCoupon), { merge: true }).catch(() => {});
+          return updatedCoupon;
+        })
+      );
+      setAppliedCouponCode(null);
+    }
+
+    // Save customer address to userProfile & Firestore customers collection
+    if (userProfile.isLoggedIn && customer.pincode && customer.house) {
+      const cleanPhone = normalizeMobile(customer.mobile || userProfile.mobileOrEmail) || userProfile.mobileOrEmail;
+      const existingAddrs = userProfile.savedAddresses || [];
+      const alreadySaved = existingAddrs.some(
+        (a) => a.pincode === customer.pincode && (a.house || '').toLowerCase() === (customer.house || '').toLowerCase()
+      );
+      const nextAddresses = alreadySaved ? existingAddrs : [customer, ...existingAddrs];
+      const nextProfile: UserProfile = {
+        ...userProfile,
+        name: customer.name || userProfile.name,
+        savedAddresses: nextAddresses,
+      };
+      setUserProfile(nextProfile);
+      const custDocId = nextProfile.customerId || `CUST-${cleanPhone.slice(-6)}`;
+      setDoc(
+        doc(db, 'customers', custDocId),
+        cleanForFirestore({
+          id: custDocId,
+          name: nextProfile.name || customer.name || 'Valued Customer',
+          phone: cleanPhone,
+          mobile: cleanPhone,
+          email: customer.email || '',
+          city: customer.city || '',
+          state: customer.state || '',
+          pincode: customer.pincode || '',
+          savedAddresses: nextAddresses,
+          updatedAt: new Date().toISOString(),
+        }),
+        { merge: true }
+      ).catch(() => {});
+    }
+
     // Save sanitized order for customer confirmation display
     setLastConfirmedOrder(sanitizeOrderForCustomer(newOrder));
     clearCart();
@@ -3064,7 +3255,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return found ? sanitizeOrderForCustomer(found) : undefined;
   };
 
-  // Contact form submission
+  // Contact form submission (persisted to local state & Cloud Firestore inquiries collection)
   const submitContactForm = (name: string, mobile: string, email: string, message: string) => {
     const newMessage: ContactMessage = {
       id: `msg-${Date.now()}`,
@@ -3076,11 +3267,53 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       status: 'New',
     };
     setContactMessages((prev) => [newMessage, ...prev]);
+    setDoc(doc(db, 'inquiries', newMessage.id), cleanForFirestore(newMessage), { merge: true }).catch(() => {});
+  };
+
+  // Stock Notification ("Notify Me") submission persisted to localStorage & Cloud Firestore
+  const submitStockNotification = async (
+    productId: string,
+    productName: string,
+    size: string,
+    color?: string,
+    contact?: string
+  ): Promise<boolean> => {
+    const cleanContact = (contact || userProfile.mobileOrEmail || '').trim();
+    if (!productId || !cleanContact) return false;
+    const nowIso = new Date().toISOString();
+    const record = {
+      id: `notif-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      productId,
+      productName: productName || 'Product',
+      size: size || 'ALL',
+      color: color || '',
+      contact: cleanContact,
+      mobile: cleanContact,
+      createdAt: nowIso,
+      status: 'pending',
+    };
+    try {
+      const saved = localStorage.getItem('redmode_notify_me_list');
+      const list = saved ? JSON.parse(saved) : [];
+      const next = [record, ...(Array.isArray(list) ? list : [])];
+      localStorage.setItem('redmode_notify_me_list', JSON.stringify(next));
+    } catch {}
+    try {
+      await setDoc(doc(db, 'stock_notifications', record.id), cleanForFirestore(record), { merge: true });
+    } catch (err) {
+      console.debug('Firestore stock_notifications write notice:', err);
+    }
+    return true;
   };
 
   const resolveMessage = (id: string) => {
     setContactMessages((prev) =>
-      prev.map((m) => (m.id === id ? { ...m, status: 'Resolved' } : m))
+      prev.map((m) => {
+        if (m.id !== id) return m;
+        const updated = { ...m, status: 'Resolved' as const };
+        setDoc(doc(db, 'inquiries', id), cleanForFirestore(updated), { merge: true }).catch(() => {});
+        return updated;
+      })
     );
   };
 
@@ -3213,6 +3446,40 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       sessionStorage.setItem('redmode_user_session', JSON.stringify(updatedProfile));
       localStorage.removeItem('redmode_user');
     }
+
+    // Sync customer profile with Cloud Firestore `customers` collection
+    const custDocId = updatedProfile.customerId || `CUST-${mobile.slice(-6)}`;
+    getDoc(doc(db, 'customers', custDocId))
+      .then((snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          const mergedAddresses = Array.isArray(data?.savedAddresses) && data.savedAddresses.length > 0
+            ? data.savedAddresses
+            : updatedProfile.savedAddresses;
+          const hydrated: UserProfile = {
+            ...updatedProfile,
+            name: data?.name && data.name !== 'Valued Customer' ? data.name : updatedProfile.name,
+            savedAddresses: mergedAddresses,
+          };
+          setUserProfile(hydrated);
+        } else {
+          setDoc(
+            doc(db, 'customers', custDocId),
+            cleanForFirestore({
+              id: custDocId,
+              name: updatedProfile.name || 'Valued Customer',
+              phone: mobile,
+              mobile,
+              savedAddresses: updatedProfile.savedAddresses,
+              createdAt: updatedProfile.createdAt,
+              updatedAt: new Date().toISOString(),
+            }),
+            { merge: true }
+          ).catch(() => {});
+        }
+      })
+      .catch(() => {});
+
     return { success: true, message: 'Mobile verified successfully! Customer Account active.' };
   };
 
@@ -3241,6 +3508,184 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setUserProfile(clearedProfile);
     localStorage.removeItem('redmode_user');
     sessionStorage.removeItem('redmode_user_session');
+  };
+
+  const persistCustomerProfileToFirestore = (profile: UserProfile) => {
+    if (!profile.isLoggedIn || !profile.mobileOrEmail) return;
+    const cleanPhone = normalizeMobile(profile.mobileOrEmail) || profile.mobileOrEmail;
+    const custDocId = profile.customerId || `CUST-${cleanPhone.slice(-6)}`;
+    setDoc(
+      doc(db, 'customers', custDocId),
+      cleanForFirestore({
+        id: custDocId,
+        name: profile.name || 'Valued Customer',
+        phone: cleanPhone,
+        mobile: cleanPhone,
+        mobileOrEmail: profile.mobileOrEmail,
+        savedAddresses: profile.savedAddresses || [],
+        updatedAt: new Date().toISOString(),
+      }),
+      { merge: true }
+    ).catch(() => {});
+  };
+
+  const updateUserProfile = (updates: { name?: string; email?: string; mobileOrEmail?: string }) => {
+    setUserProfile((prev) => {
+      const next: UserProfile = {
+        ...prev,
+        ...(updates.name !== undefined ? { name: updates.name } : {}),
+        ...(updates.mobileOrEmail !== undefined ? { mobileOrEmail: updates.mobileOrEmail } : {}),
+      };
+      if ( updates.email !== undefined && next.savedAddresses.length > 0 ) {
+        next.savedAddresses = next.savedAddresses.map((a, idx) =>
+          idx === 0 ? { ...a, email: updates.email } : a
+        );
+      }
+      persistCustomerProfileToFirestore(next);
+      return next;
+    });
+  };
+
+  const saveCustomerAddress = (address: CustomerAddress, index?: number) => {
+    setUserProfile((prev) => {
+      const list = [...(prev.savedAddresses || [])];
+      if (typeof index === 'number' && index >= 0 && index < list.length) {
+        list[index] = address;
+      } else {
+        list.unshift(address);
+      }
+      const next: UserProfile = {
+        ...prev,
+        name: prev.name === 'Valued Customer' && address.name ? address.name : prev.name,
+        savedAddresses: list,
+      };
+      persistCustomerProfileToFirestore(next);
+      return next;
+    });
+  };
+
+  const deleteCustomerAddress = (index: number) => {
+    setUserProfile((prev) => {
+      const list = (prev.savedAddresses || []).filter((_, i) => i !== index);
+      const next: UserProfile = {
+        ...prev,
+        savedAddresses: list,
+      };
+      persistCustomerProfileToFirestore(next);
+      return next;
+    });
+  };
+
+  const cancelCustomerOrder = (
+    orderId: string,
+    reason: string = 'Cancelled by customer'
+  ): { success: boolean; message: string } => {
+    const target = orders.find((o) => o.id === orderId);
+    if (!target) {
+      return { success: false, message: 'Order not found.' };
+    }
+    const nonCancellableStatuses = ['Shipped', 'SHIPPED', 'Out for Delivery', 'Delivered', 'DELIVERED', 'Cancelled', 'CANCELLED'];
+    if (nonCancellableStatuses.includes(target.orderStatus)) {
+      return {
+        success: false,
+        message: `Order ${orderId} cannot be cancelled because its status is "${target.orderStatus}".`,
+      };
+    }
+    restoreOrderInventory(target);
+    const nowIso = new Date().toISOString();
+    const updatedOrder: Order = {
+      ...target,
+      orderStatus: 'Cancelled',
+      activityLog: [
+        {
+          id: `act-${Date.now()}`,
+          timestamp: nowIso,
+          title: 'Order Cancelled by Customer',
+          description: reason,
+          source: 'customer',
+        },
+        ...(target.activityLog || []),
+      ],
+      ...( { inventoryRestored: true } as any ),
+    };
+    setOrders((prev) => prev.map((o) => (o.id === orderId ? updatedOrder : o)));
+    persistOrderUpdate(updatedOrder);
+    return { success: true, message: `Order ${orderId} has been cancelled and stock has been restored.` };
+  };
+
+  const submitCustomerReturnRequest = (data: {
+    orderId: string;
+    productName: string;
+    productImage?: string;
+    size: string;
+    quantity: number;
+    reason: string;
+    refundAmount: number;
+  }): { success: boolean; message: string; returnRequest?: ReturnRequest } => {
+    const targetOrder = orders.find((o) => o.id === data.orderId);
+    if (!targetOrder) {
+      return { success: false, message: 'Order not found.' };
+    }
+    const nowIso = new Date().toISOString();
+    const newReturn: ReturnRequest = {
+      id: `ret-${Date.now()}`,
+      orderId: data.orderId,
+      customerName: targetOrder.customer?.name || userProfile.name || 'Customer',
+      customerPhone: targetOrder.customer?.mobile || targetOrder.customer?.phone || userProfile.mobileOrEmail,
+      customerEmail: targetOrder.customer?.email || '',
+      productName: data.productName,
+      productImage: data.productImage,
+      size: data.size,
+      quantity: data.quantity,
+      reason: data.reason,
+      requestDate: nowIso,
+      status: 'Requested',
+      refundAmount: data.refundAmount,
+      history: [
+        {
+          status: 'Requested',
+          timestamp: nowIso,
+          note: `Customer requested return/exchange: ${data.reason}`,
+        },
+      ],
+    };
+
+    setReturnsList((prev) => {
+      const updated = [newReturn, ...prev];
+      try {
+        localStorage.setItem('redmode_returns_list', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+    setDoc(doc(db, 'returns', newReturn.id), cleanForFirestore(newReturn), { merge: true }).catch(() => {});
+
+    // Also mark order status as Return Requested
+    const updatedOrder: Order = {
+      ...targetOrder,
+      orderStatus: 'Return Requested',
+    };
+    setOrders((prev) => prev.map((o) => (o.id === data.orderId ? updatedOrder : o)));
+    persistOrderUpdate(updatedOrder);
+
+    return {
+      success: true,
+      message: `Return/Exchange request (${newReturn.id}) submitted successfully.`,
+      returnRequest: newReturn,
+    };
+  };
+
+  const markReviewHelpful = (productId: string, reviewId: string) => {
+    setProducts((prev) =>
+      prev.map((p) => {
+        if (p.id !== productId) return p;
+        const updatedReviews = (p.reviews || []).map((r) =>
+          r.id === reviewId ? { ...r, helpfulCount: (r.helpfulCount || 0) + 1 } : r
+        );
+        const updatedProd = { ...p, reviews: updatedReviews };
+        setDoc(doc(db, 'products', productId), cleanForFirestore({ reviews: updatedReviews }), { merge: true }).catch(() => {});
+        return updatedProd;
+      })
+    );
   };
 
   // Admin Actions
@@ -5896,6 +6341,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         cartSubtotal,
         autoDiscountAmount,
         isAutoDiscountApplied,
+        appliedCoupon,
+        couponDiscountAmount,
+        applyCoupon,
+        removeCoupon,
         cartGstAmount,
         deliveryFee,
         cartTotalAmount,
@@ -5903,10 +6352,17 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         placeOrder,
         trackOrder,
         submitContactForm,
+        submitStockNotification,
         inquiries: contactMessages || [],
         userProfile,
         loginUser,
         logoutUser,
+        updateUserProfile,
+        saveCustomerAddress,
+        deleteCustomerAddress,
+        cancelCustomerOrder,
+        submitCustomerReturnRequest,
+        markReviewHelpful,
         addProduct,
         updateProduct,
         deleteProduct,
