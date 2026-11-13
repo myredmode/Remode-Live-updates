@@ -594,7 +594,10 @@ interface StoreContextType {
   ) => Promise<boolean>;
   inquiries: ContactMessage[];
   userProfile: UserProfile;
-  loginUser: (mobileOrEmail: string, name?: string) => void;
+  loginUser: (
+    mobileOrEmail: string | { name?: string; mobile?: string; email?: string; savedForThisDevice?: boolean },
+    name?: string
+  ) => void;
   logoutUser: () => void;
   updateUserProfile: (updates: { name?: string; email?: string; mobileOrEmail?: string }) => void;
   saveCustomerAddress: (address: CustomerAddress, index?: number) => void;
@@ -910,64 +913,7 @@ const INITIAL_INVENTORY_LOGS: InventoryLogEntry[] = [
   },
 ];
 
-const INITIAL_RETURNS: ReturnRequest[] = [
-  {
-    id: 'ret-1',
-    orderId: '#RM-1005',
-    customerName: 'Ananya Deshmukh',
-    customerPhone: '+91 98201 44521',
-    customerEmail: 'ananya.d@gmail.com',
-    productName: "RedMode Women's Cotton Kurti | Floral Printed A-Line",
-    productImage: 'https://images.unsplash.com/photo-1509631179647-0177331693ae?auto=format&fit=crop&w=600&q=80',
-    size: 'M',
-    quantity: 1,
-    reason: 'Size exchange needed - Customer requested Size L for a looser bust fit',
-    requestDate: new Date(Date.now() - 86400000 * 2).toISOString(),
-    status: 'Under Review',
-    refundAmount: 899,
-    resolutionNotes: 'Customer contacted via WhatsApp. Exchange parcel pickup arranged with Delhivery.',
-    history: [
-      {
-        status: 'Requested',
-        timestamp: new Date(Date.now() - 86400000 * 2).toISOString(),
-        note: 'Customer initiated return via self-service support portal.',
-      },
-      {
-        status: 'Under Review',
-        timestamp: new Date(Date.now() - 86400000 * 1).toISOString(),
-        note: 'Quality desk confirmed tag and fabric criteria passed.',
-      },
-    ],
-  },
-  {
-    id: 'ret-2',
-    orderId: '#RM-1004',
-    customerName: 'Meera Iyer',
-    customerPhone: '+91 98112 34567',
-    customerEmail: 'meera.iyer@outlook.com',
-    productName: 'Chikankari Hand Embroidered Pure Cotton Kurti',
-    productImage: 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=600&q=80',
-    size: 'XL',
-    quantity: 1,
-    reason: 'Wrong color delivered by warehouse packing team',
-    requestDate: new Date(Date.now() - 86400000 * 4).toISOString(),
-    status: 'Approved',
-    refundAmount: 1499,
-    resolutionNotes: 'Approved for free reverse pickup and instant replacement dispatch.',
-    history: [
-      {
-        status: 'Requested',
-        timestamp: new Date(Date.now() - 86400000 * 4).toISOString(),
-        note: 'Customer submitted photo of received White kurti instead of Ivory.',
-      },
-      {
-        status: 'Approved',
-        timestamp: new Date(Date.now() - 86400000 * 3).toISOString(),
-        note: 'Reverse pickup AWB generated via Shipmozo.',
-      },
-    ],
-  },
-];
+const INITIAL_RETURNS: ReturnRequest[] = [];
 
 export function parseCurrentLocation(allProducts?: Product[]): {
   view: ActiveView;
@@ -1273,7 +1219,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [returnsList, setReturnsList] = useState<ReturnRequest[]>(() => {
     try {
       const saved = localStorage.getItem('redmode_returns_list');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((r: ReturnRequest) => r && r.id && r.id !== 'ret-1' && r.id !== 'ret-2');
+        }
+      }
     } catch (e) {}
     return INITIAL_RETURNS;
   });
@@ -1283,9 +1234,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const saved = localStorage.getItem('redmode_customer_notes');
       if (saved) return JSON.parse(saved);
     } catch (e) {}
-    return {
-      '9820144521': 'VIP Customer - Prefers evening courier delivery. Always verify COD on WhatsApp.',
-    };
+    return {};
   });
 
   const [selectedProductId, setSelectedProductId] = useState<string | null>(initialNav.productId);
@@ -1793,20 +1742,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const saved = localStorage.getItem('redmode_messages');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed)) {
+          return parsed.filter((m: ContactMessage) => m && m.id && m.id !== 'msg-1');
+        }
       }
     } catch (e) {}
-    return [
-      {
-        id: 'msg-1',
-        name: 'Ananya Verma',
-        mobile: '9811223344',
-        email: 'ananya.v@gmail.com',
-        message: 'Need help regarding size exchange for order #12345.',
-        createdAt: '2026-03-11T16:00:00Z',
-        status: 'New',
-      },
-    ];
+    return [];
   });
 
   const [userProfile, setUserProfile] = useState<UserProfile>(() => {
@@ -1844,6 +1785,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     deletedProductIds: string[];
     deletedCategoryIds: string[];
     deletedBannerIds: string[];
+    deletedBlogIds: string[];
+    deletedCouponIds: string[];
   }>(() => {
     let localDeleted: string[] = [];
     try {
@@ -1854,6 +1797,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       deletedProductIds: Array.isArray(localDeleted) ? localDeleted : [],
       deletedCategoryIds: [],
       deletedBannerIds: [],
+      deletedBlogIds: [],
+      deletedCouponIds: [],
     };
   });
 
@@ -1869,11 +1814,15 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             const delProducts: string[] = Array.isArray(data?.deletedProductIds) ? data.deletedProductIds : [];
             const delCategories: string[] = Array.isArray(data?.deletedCategoryIds) ? data.deletedCategoryIds : [];
             const delBanners: string[] = Array.isArray(data?.deletedBannerIds) ? data.deletedBannerIds : [];
+            const delBlogs: string[] = Array.isArray(data?.deletedBlogIds) ? data.deletedBlogIds : [];
+            const delCoupons: string[] = Array.isArray(data?.deletedCouponIds) ? data.deletedCouponIds : [];
 
             setDeletedIds({
               deletedProductIds: delProducts,
               deletedCategoryIds: delCategories,
               deletedBannerIds: delBanners,
+              deletedBlogIds: delBlogs,
+              deletedCouponIds: delCoupons,
             });
 
             try {
@@ -1883,6 +1832,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             // Immediately purge any deleted items from local active state
             if (delProducts.length > 0) {
               setProducts((prev) => prev.filter((p) => !delProducts.includes(p.id)));
+            }
+            if (delBlogs.length > 0) {
+              setBlogs((prev) => prev.filter((b) => !delBlogs.includes(b.id)));
+            }
+            if (delCoupons.length > 0) {
+              setCoupons((prev) => prev.filter((c) => !delCoupons.includes(c.id)));
             }
           }
         },
@@ -2243,6 +2198,194 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (unsubscribe) unsubscribe();
     };
   }, [deletedIds.deletedBannerIds]);
+
+  // 3b. Real-time Cloud Firestore Synchronization for Blogs, Coupons, Returns, Inquiries & Audit Logs
+  useEffect(() => {
+    let isCancelled = false;
+    const unsubs: Array<() => void> = [];
+
+    try {
+      unsubs.push(
+        onSnapshot(
+          collection(db, 'blogs'),
+          (snap) => {
+            if (!isCancelled && !snap.empty) {
+              const fsBlogs: Blog[] = [];
+              snap.forEach((d) => {
+                const data = d.data() as Blog;
+                if (data && data.id && !deletedIds.deletedBlogIds.includes(data.id)) {
+                  fsBlogs.push(data);
+                }
+              });
+              if (fsBlogs.length > 0) {
+                fsBlogs.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+                setBlogs(fsBlogs);
+                try {
+                  localStorage.setItem('redmode_blogs', JSON.stringify(fsBlogs));
+                } catch {}
+              }
+            }
+          },
+          () => {}
+        )
+      );
+    } catch {}
+
+    try {
+      unsubs.push(
+        onSnapshot(
+          collection(db, 'coupons'),
+          (snap) => {
+            if (!isCancelled && !snap.empty) {
+              const fsCoupons: Coupon[] = [];
+              snap.forEach((d) => {
+                const data = d.data() as Coupon;
+                if (data && data.id && !deletedIds.deletedCouponIds.includes(data.id)) {
+                  fsCoupons.push(data);
+                }
+              });
+              if (fsCoupons.length > 0) {
+                setCoupons((prev) => {
+                  const map = new Map<string, Coupon>();
+                  prev.forEach((c) => {
+                    if (!deletedIds.deletedCouponIds.includes(c.id)) map.set(c.id, c);
+                  });
+                  fsCoupons.forEach((c) => map.set(c.id, c));
+                  const merged = Array.from(map.values());
+                  try {
+                    localStorage.setItem('redmode_coupons', JSON.stringify(merged));
+                  } catch {}
+                  return merged;
+                });
+              }
+            }
+          },
+          () => {}
+        )
+      );
+    } catch {}
+
+    try {
+      unsubs.push(
+        onSnapshot(
+          collection(db, 'returns'),
+          (snap) => {
+            if (!isCancelled && !snap.empty) {
+              const fsReturns: ReturnRequest[] = [];
+              snap.forEach((d) => {
+                const data = d.data() as ReturnRequest;
+                if (data && data.id && data.id !== 'ret-1' && data.id !== 'ret-2') {
+                  fsReturns.push(data);
+                }
+              });
+              if (fsReturns.length > 0) {
+                setReturnsList((prev) => {
+                  const map = new Map<string, ReturnRequest>();
+                  prev.forEach((r) => {
+                    if (r.id !== 'ret-1' && r.id !== 'ret-2') map.set(r.id, r);
+                  });
+                  fsReturns.forEach((r) => map.set(r.id, r));
+                  const merged = Array.from(map.values()).sort(
+                    (a, b) => new Date(b.requestDate || 0).getTime() - new Date(a.requestDate || 0).getTime()
+                  );
+                  try {
+                    localStorage.setItem('redmode_returns_list', JSON.stringify(merged));
+                  } catch {}
+                  return merged;
+                });
+              }
+            }
+          },
+          () => {}
+        )
+      );
+    } catch {}
+
+    try {
+      unsubs.push(
+        onSnapshot(
+          collection(db, 'inquiries'),
+          (snap) => {
+            if (!isCancelled && !snap.empty) {
+              const fsMsgs: ContactMessage[] = [];
+              snap.forEach((d) => {
+                const data = d.data() as ContactMessage;
+                if (data && data.id && data.id !== 'msg-1') {
+                  fsMsgs.push(data);
+                }
+              });
+              if (fsMsgs.length > 0) {
+                setContactMessages((prev) => {
+                  const map = new Map<string, ContactMessage>();
+                  prev.forEach((m) => {
+                    if (m.id !== 'msg-1') map.set(m.id, m);
+                  });
+                  fsMsgs.forEach((m) => map.set(m.id, m));
+                  const merged = Array.from(map.values()).sort(
+                    (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+                  );
+                  try {
+                    localStorage.setItem('redmode_messages', JSON.stringify(merged));
+                  } catch {}
+                  return merged;
+                });
+              }
+            }
+          },
+          () => {}
+        )
+      );
+    } catch {}
+
+    try {
+      unsubs.push(
+        onSnapshot(
+          collection(db, 'audit_logs'),
+          (snap) => {
+            if (!isCancelled && !snap.empty) {
+              const fsLogs: AuditLogEntry[] = [];
+              snap.forEach((d) => {
+                const data = d.data() as any;
+                if (data && data.action && data.timestamp) {
+                  fsLogs.push({
+                    id: data.id || d.id,
+                    who: data.who || data.adminName || 'Admin',
+                    role: data.role || 'Super Admin',
+                    action: data.action,
+                    entity: data.entity || 'Settings',
+                    entityId: data.entityId || '',
+                    oldValue: data.oldValue,
+                    newValue: data.newValue,
+                    timestamp: data.timestamp,
+                  });
+                }
+              });
+              if (fsLogs.length > 0) {
+                setAuditLogs((prev) => {
+                  const map = new Map<string, AuditLogEntry>();
+                  prev.forEach((l) => map.set(l.id, l));
+                  fsLogs.forEach((l) => map.set(l.id, l));
+                  const merged = Array.from(map.values())
+                    .sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime())
+                    .slice(0, 200);
+                  try {
+                    localStorage.setItem('redmode_audit_logs', JSON.stringify(merged));
+                  } catch {}
+                  return merged;
+                });
+              }
+            }
+          },
+          () => {}
+        )
+      );
+    } catch {}
+
+    return () => {
+      isCancelled = true;
+      unsubs.forEach((u) => u());
+    };
+  }, [deletedIds.deletedBlogIds, deletedIds.deletedCouponIds]);
 
   // 4. Real-time Cloud Firestore Synchronization for Store Settings (Payment gateways, announcements, store details)
   useEffect(() => {
@@ -3430,6 +3573,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     const updatedProfile: UserProfile = {
       mobileOrEmail: mobile,
+      mobile,
       name: customerName,
       isLoggedIn: true,
       savedAddresses,
@@ -3483,19 +3627,43 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return { success: true, message: 'Mobile verified successfully! Customer Account active.' };
   };
 
-  const loginUser = (mobileOrEmail: string, name?: string) => {
-    const cleanMobile = normalizeMobile(mobileOrEmail) || mobileOrEmail;
+  const loginUser = (
+    mobileOrEmail: string | { name?: string; mobile?: string; email?: string; savedForThisDevice?: boolean },
+    name?: string
+  ) => {
+    const rawMobile =
+      typeof mobileOrEmail === 'string'
+        ? mobileOrEmail
+        : mobileOrEmail.mobile || mobileOrEmail.email || userProfile.mobileOrEmail || '';
+    const resolvedName =
+      typeof mobileOrEmail === 'string'
+        ? name || userProfile.name || 'Valued Customer'
+        : mobileOrEmail.name || name || userProfile.name || 'Valued Customer';
+    const resolvedSaved =
+      typeof mobileOrEmail === 'object' && mobileOrEmail.savedForThisDevice !== undefined
+        ? mobileOrEmail.savedForThisDevice
+        : true;
+    const cleanMobile = normalizeMobile(rawMobile) || rawMobile;
     const updatedProfile: UserProfile = {
       mobileOrEmail: cleanMobile,
-      name: name || 'Valued Customer',
+      mobile: cleanMobile,
+      email: typeof mobileOrEmail === 'object' ? mobileOrEmail.email || userProfile.email : userProfile.email,
+      name: resolvedName,
       isLoggedIn: true,
       savedAddresses: userProfile.savedAddresses || [],
-      savedForThisDevice: true,
+      savedForThisDevice: resolvedSaved,
       customerId: `CUST-${cleanMobile.slice(-6)}`,
       createdAt: userProfile.createdAt || new Date().toISOString(),
     };
     setUserProfile(updatedProfile);
-    localStorage.setItem('redmode_user', JSON.stringify(updatedProfile));
+    if (resolvedSaved) {
+      localStorage.setItem('redmode_user', JSON.stringify(updatedProfile));
+      sessionStorage.removeItem('redmode_user_session');
+    } else {
+      sessionStorage.setItem('redmode_user_session', JSON.stringify(updatedProfile));
+      localStorage.removeItem('redmode_user');
+    }
+    persistCustomerProfileToFirestore(updatedProfile);
   };
 
   const logoutUser = () => {
@@ -4233,18 +4401,55 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       id: `blog-${Date.now()}`,
       createdAt: new Date().toISOString(),
     };
-    setBlogs((prev) => [newBlog, ...prev]);
+    setBlogs((prev) => {
+      const next = [newBlog, ...prev];
+      try {
+        localStorage.setItem('redmode_blogs', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    try {
+      setDoc(doc(db, 'blogs', newBlog.id), cleanForFirestore(newBlog), { merge: true }).catch(() => {});
+      setDoc(
+        doc(db, 'settings', 'system_deletions'),
+        { deletedBlogIds: arrayRemove(newBlog.id), updatedAt: new Date().toISOString() },
+        { merge: true }
+      ).catch(() => {});
+    } catch {}
   };
 
   const updateBlog = (blog: Blog) => {
-    setBlogs((prev) => prev.map((b) => (b.id === blog.id ? blog : b)));
+    setBlogs((prev) => {
+      const next = prev.map((b) => (b.id === blog.id ? blog : b));
+      try {
+        localStorage.setItem('redmode_blogs', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    try {
+      setDoc(doc(db, 'blogs', blog.id), cleanForFirestore(blog), { merge: true }).catch(() => {});
+    } catch {}
   };
 
   const deleteBlog = (id: string) => {
-    setBlogs((prev) => prev.filter((b) => b.id !== id));
+    setBlogs((prev) => {
+      const next = prev.filter((b) => b.id !== id);
+      try {
+        localStorage.setItem('redmode_blogs', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    try {
+      deleteDoc(doc(db, 'blogs', id)).catch(() => {});
+      setDoc(
+        doc(db, 'settings', 'system_deletions'),
+        { deletedBlogIds: arrayUnion(id), updatedAt: new Date().toISOString() },
+        { merge: true }
+      ).catch(() => {});
+    } catch {}
   };
 
-  // Coupon Actions
+  // Coupon Actions (Synced with Cloud Firestore)
   const addCoupon = (couponData: Omit<Coupon, 'id' | 'usedCount'>) => {
     const newCoupon: Coupon = {
       ...couponData,
@@ -4253,25 +4458,55 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       usedCount: 0,
     };
     setCoupons((prev) => [newCoupon, ...prev]);
+    try {
+      setDoc(doc(db, 'coupons', newCoupon.id), cleanForFirestore(newCoupon), { merge: true }).catch(() => {});
+      setDoc(
+        doc(db, 'settings', 'system_deletions'),
+        { deletedCouponIds: arrayRemove(newCoupon.id), updatedAt: new Date().toISOString() },
+        { merge: true }
+      ).catch(() => {});
+    } catch {}
   };
 
   const updateCoupon = (id: string, updated: Partial<Coupon>) => {
     setCoupons((prev) =>
-      prev.map((c) =>
-        c.id === id
-          ? { ...c, ...updated, code: updated.code ? updated.code.toUpperCase().trim() : c.code }
-          : c
-      )
+      prev.map((c) => {
+        if (c.id !== id) return c;
+        const mergedCoupon: Coupon = {
+          ...c,
+          ...updated,
+          code: updated.code ? updated.code.toUpperCase().trim() : c.code,
+        };
+        try {
+          setDoc(doc(db, 'coupons', id), cleanForFirestore(mergedCoupon), { merge: true }).catch(() => {});
+        } catch {}
+        return mergedCoupon;
+      })
     );
   };
 
   const deleteCoupon = (id: string) => {
     setCoupons((prev) => prev.filter((c) => c.id !== id));
+    try {
+      deleteDoc(doc(db, 'coupons', id)).catch(() => {});
+      setDoc(
+        doc(db, 'settings', 'system_deletions'),
+        { deletedCouponIds: arrayUnion(id), updatedAt: new Date().toISOString() },
+        { merge: true }
+      ).catch(() => {});
+    } catch {}
   };
 
   const toggleCouponActive = (id: string) => {
     setCoupons((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, active: !c.active } : c))
+      prev.map((c) => {
+        if (c.id !== id) return c;
+        const toggled = { ...c, active: !c.active };
+        try {
+          setDoc(doc(db, 'coupons', id), cleanForFirestore(toggled), { merge: true }).catch(() => {});
+        } catch {}
+        return toggled;
+      })
     );
   };
 
@@ -4437,6 +4672,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         reactivatedAt: wasExpired ? nowIso : target.reactivatedAt,
       };
 
+      // Persist confirmed/reactivated order to Backend & Cloud Firestore
+      persistOrderUpdate(updatedOrder);
+
       // Move confirmed/reactivated order to the top with today's active queue
       const remaining = prev.filter((o) => o.id !== orderId);
       return [updatedOrder, ...remaining];
@@ -4501,7 +4739,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           ? `${activeChannel?.warehouseName || settings.delhiverySettings?.warehouseName}, Meerut (${activeChannel?.pickupPincode || settings.delhiverySettings?.pickupPincode || '250002'})`
           : 'REDMODE B2C, Meerut (250002)';
 
-        return {
+        const updatedOrder: Order = {
           ...order,
           orderStatus: 'RTD',
           acceptedAt: nowIso,
@@ -4526,6 +4764,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             ],
           },
         };
+        persistOrderUpdate(updatedOrder);
+        return updatedOrder;
       })
     );
 
@@ -4575,11 +4815,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setOrders((prev) =>
       prev.map((o) => {
         if (o.id !== orderId) return o;
-        return {
+        const updated: Order = {
           ...o,
           reminder23hSent: true,
           reminder23hSentAt: new Date().toISOString(),
         };
+        persistOrderUpdate(updated);
+        return updated;
       })
     );
     addAuditLog(`23-Hour Gentle Reminder sent to customer via WhatsApp`, 'Order', orderId);
@@ -4589,11 +4831,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setOrders((prev) =>
       prev.map((o) => {
         if (o.id !== orderId) return o;
-        return {
+        const updated: Order = {
           ...o,
           confirmationSentAt: new Date().toISOString(),
           scheduledConfirmationTime: undefined,
         };
+        persistOrderUpdate(updated);
+        return updated;
       })
     );
     addAuditLog(`Scheduled 10:00 AM Confirmation WhatsApp triggered for order`, 'Order', orderId);
@@ -4603,7 +4847,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setOrders((prev) =>
       prev.map((o) => {
         if (o.id !== orderId) return o;
-        return {
+        const updated: Order = {
           ...o,
           labelDownloaded: true,
           labelDownloadedAt: new Date().toISOString(),
@@ -4611,6 +4855,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           trackingSentAt: new Date().toISOString(),
           orderStatus: 'Ready to Ship',
         };
+        persistOrderUpdate(updated);
+        return updated;
       })
     );
     addAuditLog(`Shipping label downloaded & order moved to RTD (Ready to Dispatch)`, 'Order', orderId);
@@ -4620,11 +4866,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setOrders((prev) =>
       prev.map((o) => {
         if (o.id !== orderId) return o;
-        return {
+        const updated: Order = {
           ...o,
           trackingSentToCustomer: true,
           trackingSentAt: new Date().toISOString(),
         };
+        persistOrderUpdate(updated);
+        return updated;
       })
     );
     addAuditLog(`Tracking details sent to customer`, 'Order', orderId);
@@ -4634,11 +4882,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setOrders((prev) =>
       prev.map((o) => {
         if (o.id !== orderId) return o;
-        return {
+        const updated: Order = {
           ...o,
           reviewRequestSent: true,
           reviewRequestSentAt: new Date().toISOString(),
         };
+        persistOrderUpdate(updated);
+        return updated;
       })
     );
     addAuditLog(`Delivered & review request message sent to customer`, 'Order', orderId);
@@ -4649,12 +4899,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setOrders((prev) =>
       prev.map((o) => {
         if (o.id !== orderId) return o;
-        return {
+        const updated: Order = {
           ...o,
           internalNotes: notes,
           internalNotesUpdatedAt: nowIso,
           internalNotesUpdatedBy: currentAdminUser.name,
         };
+        persistOrderUpdate(updated);
+        return updated;
       })
     );
     addAuditLog(`Updated internal note for order ${orderId}`, 'Order', orderId);
@@ -4773,9 +5025,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     status: ReturnStatus,
     resolutionNotes?: string
   ) => {
+    let targetOrderId = '';
     setReturnsList((prev) => {
       const updated = prev.map((r) => {
         if (r.id !== returnId) return r;
+        targetOrderId = r.orderId;
         const history = [
           ...(r.history || []),
           {
@@ -4784,18 +5038,42 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             note: resolutionNotes || `Status updated to ${status} by ${currentAdminUser.name}`,
           },
         ];
-        return {
+        const nextReturn: ReturnRequest = {
           ...r,
           status,
           resolutionNotes: resolutionNotes || r.resolutionNotes,
           history,
         };
+        try {
+          setDoc(doc(db, 'returns', returnId), cleanForFirestore(nextReturn), { merge: true }).catch(() => {});
+        } catch {}
+        return nextReturn;
       });
       try {
         localStorage.setItem('redmode_returns_list', JSON.stringify(updated));
       } catch (e) {}
       return updated;
     });
+
+    if (targetOrderId) {
+      setOrders((prev) =>
+        prev.map((o) => {
+          if (o.id !== targetOrderId) return o;
+          const nextOrderStatus: OrderStatus =
+            status === 'Refunded'
+              ? 'Returned'
+              : status === 'Approved' || status === 'Pickup'
+              ? 'Return Approved'
+              : o.orderStatus;
+          const updatedOrder: Order = {
+            ...o,
+            orderStatus: nextOrderStatus,
+          };
+          persistOrderUpdate(updatedOrder);
+          return updatedOrder;
+        })
+      );
+    }
 
     addAuditLog(
       `Return ${returnId} status updated to ${status}`,
@@ -5127,7 +5405,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setOrders((prev) =>
       prev.map((o) => {
         if (o.id !== orderId) return o;
-        return {
+        if (o.orderStatus !== 'Cancelled' && (o.orderStatus as any) !== 'CANCELLED') {
+          restoreOrderInventory(o);
+        }
+        const updated: Order = {
           ...o,
           orderStatus: 'Cancelled',
           rtoInfo: {
@@ -5136,7 +5417,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             markedAt: new Date().toISOString(),
             courierRemarks: courierRemarks || 'Courier Delivery Failed - Returned to Origin',
           },
+          ...({ inventoryRestored: true } as any),
         };
+        persistOrderUpdate(updated);
+        return updated;
       })
     );
     addAuditLog(`Order marked as Genuine RTO. Reason: ${reason}`, 'Order', orderId, undefined, reason);
@@ -5394,7 +5678,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       prev.map((order) => {
         if (order.id !== orderId) return order;
 
-        return {
+        const updated: Order = {
           ...order,
           orderStatus: 'BOOKED',
           awb_number: awbNumber,
@@ -5410,13 +5694,15 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             history: [
               {
                 status: 'Dispatched via Courier Partner',
-                location: 'REDMODE Central Warehouse, Jaipur',
+                location: 'REDMODE B2C Hub, Meerut (250002)',
                 timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                 note: `Air Waybill ${awbNumber} allocated with ${courierName}`,
               },
             ],
           },
         };
+        persistOrderUpdate(updated);
+        return updated;
       })
     );
   };
@@ -5443,11 +5729,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       ? `${activeChannel?.warehouseName || settings.delhiverySettings?.warehouseName}, Meerut (${activeChannel?.pickupPincode || settings.delhiverySettings?.pickupPincode || '250002'})`
       : 'REDMODE B2C, Meerut (250002)';
 
+    let targetOrderRef: Order | undefined;
     setOrders((prev) =>
       prev.map((order) => {
         if (order.id !== orderId) return order;
 
-        return {
+        const updated: Order = {
           ...order,
           orderStatus: 'Shipped',
           awb_number: awbNumber,
@@ -5471,8 +5758,58 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             ],
           },
         };
+        targetOrderRef = updated;
+        persistOrderUpdate(updated);
+        return updated;
       })
     );
+
+    // Also invoke server-side Delhivery CMU shipment creation endpoint if Delhivery is active
+    if (targetOrderRef && (!activeChannel || activeChannel.provider === 'delhivery')) {
+      const adminToken =
+        sessionStorage.getItem('redmode_admin_token') ||
+        localStorage.getItem('redmode_admin_token') ||
+        '';
+      fetch('/api/delhivery/create-shipment', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          order: targetOrderRef,
+          mode,
+          apiToken: activeChannel?.apiKey || settings.delhiverySettings?.apiToken || '',
+          warehouseName: activeChannel?.warehouseName || settings.delhiverySettings?.warehouseName || 'REDMODE B2C',
+          pickupPincode: activeChannel?.pickupPincode || settings.delhiverySettings?.pickupPincode || '250002',
+        }),
+      })
+        .then((r) => r.json())
+        .then((res) => {
+          if (res?.success && res.waybill && res.waybill !== awbNumber) {
+            setOrders((prev) =>
+              prev.map((o) => {
+                if (o.id !== orderId) return o;
+                const synced: Order = {
+                  ...o,
+                  awb_number: res.waybill,
+                  shipmozo: o.shipmozo
+                    ? {
+                        ...o.shipmozo,
+                        awb: res.waybill,
+                        trackingUrl: `https://www.delhivery.com/track/package/${res.waybill}`,
+                      }
+                    : undefined,
+                };
+                persistOrderUpdate(synced);
+                return synced;
+              })
+            );
+          }
+        })
+        .catch(() => {});
+    }
 
     return {
       success: true,
@@ -5837,7 +6174,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       prev.map((order) => {
         if (order.id !== orderId) return order;
 
-        return {
+        const updated: Order = {
           ...order,
           orderStatus: 'BOOKED',
           final_package_weight: packageDetails?.final_package_weight ?? order.final_package_weight ?? 0.35,
@@ -5862,13 +6199,15 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             history: [
               {
                 status: 'Air Waybill Assigned',
-                location: 'REDMODE Central Warehouse, Jaipur',
+                location: 'REDMODE B2C Hub, Meerut (250002)',
                 timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                 note: `Assigned courier partner ${courierName} with AWB ${awbNumber}`,
               },
             ],
           },
         };
+        persistOrderUpdate(updated);
+        return updated;
       })
     );
 
@@ -5891,7 +6230,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   ) => {
     setOrders((prev) =>
-      prev.map((o) => (o.id === orderId ? { ...o, ...specs } : o))
+      prev.map((o) => {
+        if (o.id !== orderId) return o;
+        const updated = { ...o, ...specs };
+        persistOrderUpdate(updated);
+        return updated;
+      })
     );
   };
 
@@ -5918,7 +6262,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             <tr>
               <td style="padding: 8px; border: 1px solid #cbd5e1;">${idx + 1}</td>
               <td style="padding: 8px; border: 1px solid #cbd5e1; font-family: monospace; font-weight: bold;">${awb}</td>
-              <td style="padding: 8px; border: 1px solid #cbd5e1;">REDMODE Central Hub, Jaipur</td>
+              <td style="padding: 8px; border: 1px solid #cbd5e1;">REDMODE B2C Hub, Meerut (250002)</td>
               <td style="padding: 8px; border: 1px solid #cbd5e1;">Booked for Pickup</td>
             </tr>`
           )
@@ -5965,8 +6309,24 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
-  // Live Track Order
+  // Live Track Order (Queries real /api/delhivery/track/:awb endpoint first, falls back to recorded order history)
   const fetchLiveTracking = async (awb: string) => {
+    try {
+      const res = await fetch(`/api/delhivery/track/${encodeURIComponent(awb)}`);
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success) {
+        return {
+          success: true,
+          data: {
+            awb_number: awb,
+            courier: data.courier || 'Delhivery Logistics',
+            current_status: data.status || 'Manifested',
+            scans: data.scans || [],
+          },
+        };
+      }
+    } catch {}
+
     const orderWithAwb = orders.find((o) => o.shipmozo?.awb === awb || o.awb_number === awb);
     if (orderWithAwb?.shipmozo?.history) {
       return {
@@ -5980,19 +6340,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       };
     }
     return {
-      success: true,
+      success: false,
       data: {
         awb_number: awb,
-        courier: 'Assigned Courier Partner',
-        current_status: 'In Transit',
-        scans: [
-          {
-            status: 'In Transit',
-            location: 'Central Distribution Hub, Jaipur',
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            note: 'Package processed through sorting facility',
-          },
-        ],
+        courier: 'Delhivery Logistics',
+        current_status: 'Manifested',
+        scans: [],
       },
     };
   };

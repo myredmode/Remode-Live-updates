@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Users,
   Download,
@@ -17,6 +17,8 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { Order } from '../../types';
+import { db } from '../../firebase';
+import { collection, onSnapshot } from 'firebase/firestore';
 
 interface WhatsAppCustomerHubProps {
   orders: Order[];
@@ -43,109 +45,56 @@ export const WhatsAppCustomerHub: React.FC<WhatsAppCustomerHubProps> = ({ orders
   const [campaignDiscountCode, setCampaignDiscountCode] = useState('FESTIVE25');
   const [copiedText, setCopiedText] = useState(false);
   const [sentQueue, setSentQueue] = useState<Record<string, boolean>>({});
+  const [firestoreCustomers, setFirestoreCustomers] = useState<CustomerRecord[]>([]);
 
-  // Base curated repeat customers for Redmode store
-  const baseCustomers: CustomerRecord[] = useMemo(
-    () => [
-      {
-        id: 'cust-1',
-        name: 'Priya Sharma',
-        phone: '9820144521',
-        email: 'priya.sharma@gmail.com',
-        city: 'Mumbai',
-        state: 'Maharashtra',
-        totalOrders: 4,
-        totalSpent: 8450,
-        lastOrderDate: '18 Sep 2024',
-        isVIP: true,
-        status: 'Repeat Buyer',
-      },
-      {
-        id: 'cust-2',
-        name: 'Ananya Verma',
-        phone: '9811234980',
-        email: 'ananya.verma@yahoo.com',
-        city: 'New Delhi',
-        state: 'Delhi NCR',
-        totalOrders: 3,
-        totalSpent: 6200,
-        lastOrderDate: '15 Sep 2024',
-        isVIP: true,
-        status: 'Repeat Buyer',
-      },
-      {
-        id: 'cust-3',
-        name: 'Pooja Patel',
-        phone: '9723456711',
-        email: 'pooja.patel@outlook.com',
-        city: 'Ahmedabad',
-        state: 'Gujarat',
-        totalOrders: 2,
-        totalSpent: 4150,
-        lastOrderDate: '12 Sep 2024',
-        isVIP: false,
-        status: 'Recent Buyer',
-      },
-      {
-        id: 'cust-4',
-        name: 'Sneha Reddy',
-        phone: '9848012399',
-        email: 'sneha.reddy@gmail.com',
-        city: 'Hyderabad',
-        state: 'Telangana',
-        totalOrders: 3,
-        totalSpent: 7300,
-        lastOrderDate: '10 Sep 2024',
-        isVIP: true,
-        status: 'Repeat Buyer',
-      },
-      {
-        id: 'cust-5',
-        name: 'Kavita Joshi',
-        phone: '9414055234',
-        email: 'kavita.joshi@gmail.com',
-        city: 'Jaipur',
-        state: 'Rajasthan',
-        totalOrders: 2,
-        totalSpent: 3890,
-        lastOrderDate: '08 Sep 2024',
-        isVIP: false,
-        status: 'Recent Buyer',
-      },
-      {
-        id: 'cust-6',
-        name: 'Neha Gupta',
-        phone: '9822019844',
-        email: 'neha.gupta@rediffmail.com',
-        city: 'Pune',
-        state: 'Maharashtra',
-        totalOrders: 5,
-        totalSpent: 11400,
-        lastOrderDate: '05 Sep 2024',
-        isVIP: true,
-        status: 'Repeat Buyer',
-      },
-      {
-        id: 'cust-7',
-        name: 'Ritu Singh',
-        phone: '9450012890',
-        email: 'ritu.singh@gmail.com',
-        city: 'Lucknow',
-        state: 'Uttar Pradesh',
-        totalOrders: 1,
-        totalSpent: 2150,
-        lastOrderDate: '01 Sep 2024',
-        isVIP: false,
-        status: 'Recent Buyer',
-      },
-    ],
-    []
-  );
+  // Subscribe to real Firestore `customers` collection
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined;
+    try {
+      unsubscribe = onSnapshot(
+        collection(db, 'customers'),
+        (snap) => {
+          const list: CustomerRecord[] = [];
+          snap.forEach((d) => {
+            const data = d.data() as any;
+            const rawPhone = String(data?.phone || data?.mobile || data?.mobileOrEmail || '');
+            const digits = rawPhone.replace(/\D/g, '').slice(-10);
+            if (digits.length === 10) {
+              const firstAddr = Array.isArray(data?.savedAddresses) && data.savedAddresses[0] ? data.savedAddresses[0] : {};
+              list.push({
+                id: data.id || d.id,
+                name: data.name || firstAddr.name || 'Valued Customer',
+                phone: digits,
+                email: data.email || firstAddr.email || '',
+                city: data.city || firstAddr.city || 'India',
+                state: data.state || firstAddr.state || '',
+                totalOrders: 0,
+                totalSpent: 0,
+                lastOrderDate: data.updatedAt
+                  ? new Date(data.updatedAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+                  : 'Registered',
+                isVIP: false,
+                status: 'Registered',
+              });
+            }
+          });
+          setFirestoreCustomers(list);
+        },
+        () => {}
+      );
+    } catch {}
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, []);
 
-  // Combine with dynamic placed store orders
+  // Aggregate real customer records from placed orders & Firestore customers
   const allCustomers: CustomerRecord[] = useMemo(() => {
-    const list = [...baseCustomers];
-    const phoneMap = new Set(list.map((c) => c.phone));
+    const map = new Map<string, CustomerRecord>();
+
+    firestoreCustomers.forEach((c) => {
+      map.set(c.phone, { ...c });
+    });
 
     orders.forEach((o, index) => {
       const name = o.customer?.name || (o as any)?.shippingAddress?.name || 'Customer';
@@ -157,26 +106,47 @@ export const WhatsAppCustomerHub: React.FC<WhatsAppCustomerHubProps> = ({ orders
         '';
       const digits = rawPhone.replace(/[^0-9]/g, '').slice(-10);
 
-      if (digits && digits.length === 10 && !phoneMap.has(digits)) {
-        phoneMap.add(digits);
-        list.unshift({
-          id: `order-cust-${o.id || index}`,
-          name,
-          phone: digits,
-          email: (o.customer as any)?.email,
-          city: (o.customer as any)?.city || (o as any)?.shippingAddress?.city || 'India',
-          state: (o.customer as any)?.state || (o as any)?.shippingAddress?.state || '',
-          totalOrders: 1,
-          totalSpent: Number(o.total) || 1850,
-          lastOrderDate: 'Just Now',
-          isVIP: Number(o.total) > 3000,
-          status: 'Recent Buyer',
-        });
+      if (digits && digits.length === 10) {
+        const orderTotal = Number(o.total) || 0;
+        const formattedDate = o.createdAt
+          ? new Date(o.createdAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+          : 'Recent';
+        const existing = map.get(digits);
+        if (existing) {
+          const nextOrdersCount = existing.totalOrders + 1;
+          const nextSpent = existing.totalSpent + orderTotal;
+          map.set(digits, {
+            ...existing,
+            name: existing.name === 'Valued Customer' && name ? name : existing.name,
+            email: existing.email || (o.customer as any)?.email,
+            city: existing.city === 'India' && (o.customer as any)?.city ? (o.customer as any).city : existing.city,
+            state: existing.state || (o.customer as any)?.state || '',
+            totalOrders: nextOrdersCount,
+            totalSpent: nextSpent,
+            lastOrderDate: formattedDate,
+            isVIP: nextSpent >= 3000 || nextOrdersCount >= 2,
+            status: nextOrdersCount > 1 ? 'Repeat Buyer' : 'Recent Buyer',
+          });
+        } else {
+          map.set(digits, {
+            id: `order-cust-${o.id || index}`,
+            name,
+            phone: digits,
+            email: (o.customer as any)?.email,
+            city: (o.customer as any)?.city || (o as any)?.shippingAddress?.city || 'India',
+            state: (o.customer as any)?.state || (o as any)?.shippingAddress?.state || '',
+            totalOrders: 1,
+            totalSpent: orderTotal,
+            lastOrderDate: formattedDate,
+            isVIP: orderTotal >= 3000,
+            status: 'Recent Buyer',
+          });
+        }
       }
     });
 
-    return list;
-  }, [baseCustomers, orders]);
+    return Array.from(map.values());
+  }, [firestoreCustomers, orders]);
 
   // Filtered customer records
   const filteredCustomers = useMemo(() => {

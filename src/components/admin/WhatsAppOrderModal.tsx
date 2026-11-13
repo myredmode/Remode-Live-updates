@@ -12,11 +12,12 @@ interface WhatsAppOrderModalProps {
 type TemplateType = 'confirmation' | 'confirmed_ack' | 'reminder23h' | 'shipped' | 'cod_verify' | 'delivered_feedback' | 'custom';
 
 export const WhatsAppOrderModal: React.FC<WhatsAppOrderModalProps> = ({ order, isOpen, onClose }) => {
-  const { updateCodVerificationStatus, updateOrderStatus, confirmCustomerOrder, send23hReminder } = useStore();
+  const { settings, updateCodVerificationStatus, updateOrderStatus, confirmCustomerOrder, send23hReminder } = useStore();
   const [selectedTemplate, setSelectedTemplate] = useState<TemplateType>('confirmation');
   const [customText, setCustomText] = useState<string>('');
   const [copied, setCopied] = useState<boolean>(false);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [isSendingCloud, setIsSendingCloud] = useState<boolean>(false);
 
   // Extract safe customer details
   const customerName = order?.customer?.name || (order as any)?.shippingAddress?.name || 'Customer';
@@ -135,7 +136,8 @@ Aapke Redmode order *#${orderId}* ke reference me hum aapko update karna chahte 
   // Handle direct 1-click WhatsApp web / app dispatch
   const handleOpenWhatsApp = () => {
     if (!cleanPhone) {
-      alert('Is order me valid phone number available nahi hai.');
+      setActionFeedback('Valid customer mobile number is not available for this order.');
+      setTimeout(() => setActionFeedback(null), 3500);
       return;
     }
     if (selectedTemplate === 'reminder23h' && order) {
@@ -144,6 +146,43 @@ Aapke Redmode order *#${orderId}* ke reference me hum aapko update karna chahte 
     const encodedText = encodeURIComponent(customText);
     const whatsappUrl = `https://wa.me/${cleanPhone}?text=${encodedText}`;
     window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  // Handle Official Meta WhatsApp Cloud API Dispatch
+  const handleSendViaCloudApi = async () => {
+    if (!cleanPhone) {
+      setActionFeedback('Valid customer mobile number is not available for this order.');
+      setTimeout(() => setActionFeedback(null), 3500);
+      return;
+    }
+    setIsSendingCloud(true);
+    setActionFeedback(null);
+    try {
+      const waConfig = settings?.whatsappSettings;
+      const res = await fetch('/api/whatsapp/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: cleanPhone,
+          textMessage: customText,
+          accessToken: waConfig?.accessToken || '',
+          phoneNumberId: waConfig?.phoneNumberId || '',
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success) {
+        if (selectedTemplate === 'reminder23h' && order) {
+          send23hReminder(order.id);
+        }
+        setActionFeedback(`Message sent via Meta WhatsApp Cloud API (ID: ${data.messageId || 'Dispatched'}) ✅`);
+      } else {
+        setActionFeedback(data?.error || 'Could not send via Cloud API. Check Access Token or use "Open & Send on WhatsApp".');
+      }
+    } catch (err: any) {
+      setActionFeedback(`Network error: ${err?.message || 'Could not reach WhatsApp Cloud endpoint.'}`);
+    } finally {
+      setIsSendingCloud(false);
+    }
   };
 
   const handleCopyText = async () => {
@@ -389,7 +428,7 @@ Aapke Redmode order *#${orderId}* ke reference me hum aapko update karna chahte 
         </div>
 
         {/* Footer */}
-        <div className="p-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between gap-3">
+        <div className="p-4 border-t border-slate-100 bg-slate-50 flex flex-wrap items-center justify-between gap-3">
           <button
             type="button"
             onClick={onClose}
@@ -398,19 +437,35 @@ Aapke Redmode order *#${orderId}* ke reference me hum aapko update karna chahte 
             Cancel
           </button>
 
-          <button
-            type="button"
-            onClick={handleOpenWhatsApp}
-            disabled={!cleanPhone}
-            className={`px-5 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 shadow-sm transition cursor-pointer ${
-              cleanPhone
-                ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                : 'bg-slate-200 text-slate-400 cursor-not-allowed'
-            }`}
-          >
-            <Send className="w-4 h-4" />
-            <span>Open &amp; Send on WhatsApp</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleSendViaCloudApi}
+              disabled={!cleanPhone || isSendingCloud}
+              className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-1.5 border transition cursor-pointer ${
+                cleanPhone && !isSendingCloud
+                  ? 'border-emerald-600 text-emerald-700 bg-white hover:bg-emerald-50'
+                  : 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed'
+              }`}
+            >
+              <Send className="w-3.5 h-3.5" />
+              <span>{isSendingCloud ? 'Sending via API...' : 'Send via Cloud API'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleOpenWhatsApp}
+              disabled={!cleanPhone}
+              className={`px-5 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 shadow-sm transition cursor-pointer ${
+                cleanPhone
+                  ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                  : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+              }`}
+            >
+              <Send className="w-4 h-4" />
+              <span>Open &amp; Send on WhatsApp</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

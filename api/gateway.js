@@ -1400,6 +1400,120 @@ export default async function handler(req, res) {
     }
   }
 
+  if (pathStr === 'delhivery/create-shipment' && req.method === 'POST') {
+    if (!requireAdminRole(['Super Admin', 'Listing + Label Admin', 'Label Admin'])) return;
+    const {
+      order,
+      mode = 'Surface',
+      apiToken: bodyToken,
+      warehouseName = 'REDMODE B2C',
+      pickupPincode = '250002',
+    } = body;
+    if (!order || !order.id) {
+      return res.status(400).json({ success: false, message: 'Order payload is required.' });
+    }
+    const token = (bodyToken || process.env.DELHIVERY_API_TOKEN || '').trim();
+    if (!token) {
+      return res.status(200).json({
+        success: true,
+        configured: false,
+        waybill: order.awb_number || null,
+        message: 'Delhivery API Token not set on server; local AWB manifest retained.',
+      });
+    }
+    try {
+      const cust = order.customer || {};
+      const isCod = (order.paymentMode || '').toUpperCase() === 'COD';
+      const shipmentPayload = {
+        shipments: [
+          {
+            name: cust.name || 'Customer',
+            add: [cust.house, cust.street, cust.landmark].filter(Boolean).join(', ') || 'Delivery Address',
+            pin: String(cust.pincode || '250002').replace(/\D/g, ''),
+            city: cust.city || 'Meerut',
+            state: cust.state || 'Uttar Pradesh',
+            country: cust.country || 'India',
+            phone: String(cust.mobile || cust.phone || '').replace(/\D/g, '').slice(-10),
+            order: String(order.id).replace('#', ''),
+            payment_mode: isCod ? 'COD' : 'Prepaid',
+            return_pin: String(pickupPincode).replace(/\D/g, '') || '250002',
+            return_city: 'Meerut',
+            return_phone: '7302797464',
+            return_add: '1807 Zakir Hussain Colony, Meerut, Uttar Pradesh',
+            return_state: 'Uttar Pradesh',
+            return_country: 'India',
+            products_desc: (order.items || []).map((i) => `${i.name} (${i.size || 'Free'})`).join(', ') || 'Apparel',
+            hsn_code: '6204',
+            cod_amount: isCod ? Number(order.total) || 0 : 0,
+            order_date: order.createdAt || new Date().toISOString(),
+            total_amount: Number(order.total) || 0,
+            seller_add: '1807 Zakir Hussain Colony, Meerut, Uttar Pradesh',
+            seller_name: 'REDMODE',
+            seller_inv: `RM-INV-${String(order.id).replace(/\D/g, '')}`,
+            quantity: String((order.items || []).reduce((acc, it) => acc + (Number(it.quantity) || 1), 0)),
+            waybill: order.awb_number || '',
+            shipment_width: String(order.final_package_width || 24),
+            shipment_height: String(order.final_package_height || 4),
+            weight: String(Math.round((Number(order.final_package_weight) || 0.35) * 1000)),
+            shipping_mode: mode === 'Express' ? 'Express' : 'Surface',
+            address_type: 'home',
+          },
+        ],
+        pickup_location: {
+          name: warehouseName,
+          add: '1807 Zakir Hussain Colony',
+          city: 'Meerut',
+          pin_code: Number(pickupPincode) || 250002,
+          country: 'India',
+          phone: '7302797464',
+        },
+      };
+      const formBody = `format=json&data=${encodeURIComponent(JSON.stringify(shipmentPayload))}`;
+      const cmuRes = await fetch('https://track.delhivery.com/api/cmu/create.json', {
+        method: 'POST',
+        headers: {
+          Authorization: `Token ${token}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+        },
+        body: formBody,
+      });
+      const cmuData = await cmuRes.json().catch(() => ({}));
+      const pkg = cmuData?.packages?.[0];
+      if (cmuRes.ok && pkg?.waybill) {
+        return res.status(200).json({
+          success: true,
+          configured: true,
+          waybill: pkg.waybill,
+          status: pkg.status || 'Manifested',
+          refnum: pkg.refnum,
+        });
+      }
+      return res.status(200).json({
+        success: true,
+        configured: true,
+        waybill: order.awb_number || null,
+        delhiveryResponse: cmuData,
+      });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  if (pathStr === 'whatsapp/webhook') {
+    if (req.method === 'GET') {
+      const mode = req.query['hub.mode'];
+      const token = req.query['hub.verify_token'];
+      const challenge = req.query['hub.challenge'];
+      const expectedToken = (process.env.WHATSAPP_VERIFY_TOKEN || 'redmode_wa_verify_2026').trim();
+      if (mode === 'subscribe' && token === expectedToken) {
+        return res.status(200).send(String(challenge || ''));
+      }
+      return res.status(403).json({ success: false, message: 'Invalid webhook verify token.' });
+    }
+    return res.status(200).json({ status: 'EVENT_RECEIVED' });
+  }
+
   if (pathStr === 'admin/sms-settings') {
     if (!requireAdminRole(['Super Admin'])) return;
     if (req.method === 'POST') {

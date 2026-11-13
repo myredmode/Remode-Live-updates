@@ -1842,6 +1842,77 @@ async function startServer() {
     }
   });
 
+  // Official Meta WhatsApp Cloud API Webhook (GET Challenge Verification & POST Incoming Reply Handler)
+  app.get('/api/whatsapp/webhook', (req: Request, res: Response) => {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+    const expectedToken = (process.env.WHATSAPP_VERIFY_TOKEN || 'redmode_wa_verify_2026').trim();
+
+    if (mode === 'subscribe' && token === expectedToken) {
+      return res.status(200).send(String(challenge || ''));
+    }
+    return res.status(403).json({ success: false, message: 'Invalid webhook verify token.' });
+  });
+
+  app.post('/api/whatsapp/webhook', (req: Request, res: Response) => {
+    try {
+      const entry = req.body?.entry?.[0];
+      const change = entry?.changes?.[0]?.value;
+      const msg = change?.messages?.[0];
+      if (msg) {
+        const senderRaw = String(msg.from || '').replace(/\D/g, '');
+        const cleanSender = senderRaw.slice(-10);
+        const textBody = (
+          msg.text?.body ||
+          msg.button?.text ||
+          msg.interactive?.button_reply?.title ||
+          ''
+        )
+          .trim()
+          .toUpperCase();
+
+        if (cleanSender.length === 10 && textBody) {
+          const isConfirm = textBody === 'YES' || textBody === 'CONFIRM' || textBody.startsWith('YES');
+          const isCancel = textBody === 'CANCEL' || textBody === 'NO' || textBody.startsWith('CANCEL');
+
+          if (isConfirm || isCancel) {
+            const rawOrders = readServerOrders();
+            if (Array.isArray(rawOrders)) {
+              const nowIso = new Date().toISOString();
+              let updatedAny = false;
+              const nextOrders = rawOrders.map((o: any) => {
+                const phone = String(o?.customer?.mobile || o?.customer?.phone || '')
+                  .replace(/\D/g, '')
+                  .slice(-10);
+                if (phone === cleanSender && !updatedAny && (o.orderStatus === 'NEW' || o.orderStatus === 'Pending')) {
+                  updatedAny = true;
+                  return {
+                    ...o,
+                    customerConfirmed: isConfirm,
+                    customerConfirmedAt: isConfirm ? nowIso : o.customerConfirmedAt,
+                    codVerificationStatus: isConfirm ? 'CONFIRMED' : 'REJECTED',
+                    orderStatus: isConfirm ? 'Confirmed' : 'Cancelled',
+                    whatsappStatus: isConfirm ? 'Confirmed' : 'Cancelled',
+                    whatsappReply: textBody,
+                    whatsappReplyAt: nowIso,
+                  };
+                }
+                return o;
+              });
+              if (updatedAny) {
+                writeServerOrders(nextOrders);
+              }
+            }
+          }
+        }
+      }
+      return res.status(200).json({ status: 'EVENT_RECEIVED' });
+    } catch {
+      return res.status(200).json({ status: 'EVENT_RECEIVED' });
+    }
+  });
+
   // ==========================================
   // LIVE OTP AUTHENTICATION & SMS DISPATCH
   // ==========================================
@@ -2831,7 +2902,118 @@ async function startServer() {
     });
   });
 
-  // Delhivery Official Tracking & NDR API
+  // Official Delhivery B2C CMU Shipment Creation Endpoint
+  app.post('/api/delhivery/create-shipment', requireSuperAdmin, async (req: Request, res: Response) => {
+    const {
+      order,
+      mode = 'Surface',
+      apiToken: bodyToken,
+      warehouseName = 'REDMODE B2C',
+      pickupPincode = '250002',
+    } = req.body || {};
+
+    if (!order || !order.id) {
+      return res.status(400).json({ success: false, message: 'Order payload is required.' });
+    }
+
+    const token = (bodyToken || process.env.DELHIVERY_API_TOKEN || '').trim();
+    if (!token) {
+      return res.status(200).json({
+        success: true,
+        configured: false,
+        waybill: order.awb_number || null,
+        message: 'Delhivery API Token not set on server; local AWB manifest retained.',
+      });
+    }
+
+    try {
+      const cust = order.customer || {};
+      const isCod = (order.paymentMode || '').toUpperCase() === 'COD';
+      const shipmentPayload = {
+        shipments: [
+          {
+            name: cust.name || 'Customer',
+            add: [cust.house, cust.street, cust.landmark].filter(Boolean).join(', ') || 'Delivery Address',
+            pin: String(cust.pincode || '250002').replace(/\D/g, ''),
+            city: cust.city || 'Meerut',
+            state: cust.state || 'Uttar Pradesh',
+            country: cust.country || 'India',
+            phone: String(cust.mobile || cust.phone || '').replace(/\D/g, '').slice(-10),
+            order: String(order.id).replace('#', ''),
+            payment_mode: isCod ? 'COD' : 'Prepaid',
+            return_pin: String(pickupPincode).replace(/\D/g, '') || '250002',
+            return_city: 'Meerut',
+            return_phone: '7302797464',
+            return_add: '1807 Zakir Hussain Colony, Meerut, Uttar Pradesh',
+            return_state: 'Uttar Pradesh',
+            return_country: 'India',
+            products_desc: (order.items || []).map((i: any) => `${i.name} (${i.size || 'Free'})`).join(', ') || 'Apparel',
+            hsn_code: '6204',
+            cod_amount: isCod ? Number(order.total) || 0 : 0,
+            order_date: order.createdAt || new Date().toISOString(),
+            total_amount: Number(order.total) || 0,
+            seller_add: '1807 Zakir Hussain Colony, Meerut, Uttar Pradesh',
+            seller_name: 'REDMODE',
+            seller_inv: `RM-INV-${String(order.id).replace(/\D/g, '')}`,
+            quantity: String((order.items || []).reduce((acc: number, it: any) => acc + (Number(it.quantity) || 1), 0)),
+            waybill: order.awb_number || '',
+            shipment_width: String(order.final_package_width || 24),
+            shipment_height: String(order.final_package_height || 4),
+            weight: String(Math.round((Number(order.final_package_weight) || 0.35) * 1000)),
+            shipping_mode: mode === 'Express' ? 'Express' : 'Surface',
+            address_type: 'home',
+          },
+        ],
+        pickup_location: {
+          name: warehouseName,
+          add: '1807 Zakir Hussain Colony',
+          city: 'Meerut',
+          pin_code: Number(pickupPincode) || 250002,
+          country: 'India',
+          phone: '7302797464',
+        },
+      };
+
+      const formBody = `format=json&data=${encodeURIComponent(JSON.stringify(shipmentPayload))}`;
+      const cmuRes = await fetch('https://track.delhivery.com/api/cmu/create.json', {
+        method: 'POST',
+        headers: {
+          Authorization: `Token ${token}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+        },
+        body: formBody,
+      });
+
+      const cmuData: any = await cmuRes.json().catch(() => ({}));
+      const pkg = cmuData?.packages?.[0];
+      if (cmuRes.ok && pkg?.waybill) {
+        return res.json({
+          success: true,
+          configured: true,
+          waybill: pkg.waybill,
+          status: pkg.status || 'Manifested',
+          refnum: pkg.refnum,
+          message: `Delhivery CMU Shipment created with official Waybill #${pkg.waybill}`,
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        configured: true,
+        waybill: order.awb_number || null,
+        delhiveryResponse: cmuData,
+        message: pkg?.remarks?.[0] || cmuData?.rmk || 'Order manifested for Delhivery dispatch.',
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        message: `Delhivery CMU shipment creation error: ${err.message}`,
+      });
+    }
+  });
+
+  // Delhivery Official Tracking & NDR API (No Fabricated Multi-City Scans)
   app.get('/api/delhivery/track/:awb', async (req: Request, res: Response) => {
     const awb = req.params.awb || '';
     const token = ((req.query.token as string) || process.env.DELHIVERY_API_TOKEN || '').trim();
@@ -2844,18 +3026,13 @@ async function startServer() {
     const localScan = delhiveryScannedWaybills[awb];
 
     try {
-      const response = await fetch(`https://track.delhivery.com/api/v1/packages/json/?waybill=${encodeURIComponent(awb)}&token=${token}`, {
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (!response.ok && !localScan) {
-        return res.status(response.status).json({
-          success: false,
-          message: `Delhivery tracking API responded with status ${response.status}`,
-        });
-      }
+      const response = token
+        ? await fetch(`https://track.delhivery.com/api/v1/packages/json/?waybill=${encodeURIComponent(awb)}&token=${token}`, {
+            headers: {
+              'Content-Type': 'application/json',
+            },
+          })
+        : ({ ok: false, status: 503 } as any);
 
       let data: any = null;
       if (response.ok) {
@@ -2869,139 +3046,48 @@ async function startServer() {
       const shipment = data?.ShipmentData?.[0]?.Shipment;
 
       if (!shipment) {
-        const queryStatus = (req.query.status as string) || '';
-        const isPickedUp = !!localScan || queryStatus === 'In Transit' || queryStatus === 'Shipped' || awb === 'DLH-99281741' || queryStatus === 'Out for Delivery' || queryStatus === 'Delivered';
-        let currentStatus = isPickedUp ? 'In Transit' : 'Manifested';
-        if (queryStatus === 'Out for Delivery') currentStatus = 'Out for Delivery';
-        if (queryStatus === 'Delivered') currentStatus = 'Delivered';
-        if (queryStatus === 'Cancelled') currentStatus = 'Cancelled';
-
-        let scans: any[] = [];
         const now = new Date();
-        const fmt = (d: Date) => d.toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+        const fmt = (d: Date) =>
+          d.toLocaleString('en-IN', {
+            day: 'numeric',
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          });
 
-        if (currentStatus === 'Delivered') {
-          scans = [
-            {
-              status: 'Delivered - Consignee Received',
-              location: (req.query.city as string) || 'Destination Address',
-              timestamp: fmt(now),
-              note: 'Package handed over to recipient. Delivered successfully via OTP/Signature verification.',
-            },
-            {
-              status: 'Out for Delivery - Dispatched with Courier Executive',
-              location: `${(req.query.city as string) || 'Destination'} Local Delivery Center`,
-              timestamp: fmt(new Date(now.getTime() - 4 * 3600000)),
-              note: 'Courier executive assigned for final doorstep delivery.',
-            },
-            {
-              status: 'Arrived at Destination Delivery Hub',
-              location: `${(req.query.city as string) || 'Destination'} Sorting Facility`,
-              timestamp: fmt(new Date(now.getTime() - 14 * 3600000)),
-              note: 'Shipment bag opened and verified for local route distribution.',
-            },
-            {
-              status: 'In Transit - Transshipment Hub Departure',
-              location: 'Delhi Gateway Processing Center',
-              timestamp: fmt(new Date(now.getTime() - 28 * 3600000)),
-              note: 'Connected to line-haul vehicle destined for delivery station.',
-            },
-            {
-              status: 'In Transit - Courier Pickup Scan',
-              location: 'REDMODE B2C, Meerut Hub',
-              timestamp: fmt(new Date(now.getTime() - 42 * 3600000)),
-              note: 'Physical parcel handover verified by Delhivery dispatch executive.',
-            },
-            {
-              status: 'Shipment Created (Manifested)',
-              location: 'REDMODE B2C, Meerut Hub',
-              timestamp: fmt(new Date(now.getTime() - 48 * 3600000)),
-              note: 'Order packaged and Delhivery thermal 4x6 shipping label generated.',
-            },
-          ];
-        } else if (currentStatus === 'Out for Delivery') {
-          scans = [
-            {
-              status: 'Out for Delivery - Dispatched with Courier Executive',
-              location: `${(req.query.city as string) || 'Destination'} Local Hub`,
-              timestamp: fmt(new Date(now.getTime() - 2 * 3600000)),
-              note: 'Your package is out for delivery today. Please keep cash ready if COD.',
-            },
-            {
-              status: 'Arrived at Destination Delivery Facility',
-              location: `${(req.query.city as string) || 'Destination'} Sort Station`,
-              timestamp: fmt(new Date(now.getTime() - 8 * 3600000)),
-              note: 'Package received at local hub and scheduled for delivery slot.',
-            },
-            {
-              status: 'In Transit - Inter-City Linehaul',
-              location: 'Delhi Gateway Hub, Mohan Cooperative',
-              timestamp: fmt(new Date(now.getTime() - 20 * 3600000)),
-              note: 'In transit across Delhivery national surface network.',
-            },
-            {
-              status: 'In Transit - Courier Pickup Scan',
-              location: 'REDMODE B2C, Meerut Hub',
-              timestamp: fmt(new Date(now.getTime() - 32 * 3600000)),
-              note: 'Physical parcel pickup completed from origin warehouse.',
-            },
-            {
-              status: 'Shipment Created (Manifested)',
-              location: 'REDMODE B2C, Meerut Hub',
-              timestamp: fmt(new Date(now.getTime() - 36 * 3600000)),
-              note: 'Order packaged and Delhivery thermal shipping label generated.',
-            },
-          ];
-        } else if (currentStatus === 'In Transit') {
-          scans = [
-            {
-              status: 'In Transit - National Hub Departure',
-              location: 'Delhi Gateway Sort Center, Mohan Cooperative',
-              timestamp: fmt(new Date(now.getTime() - 3 * 3600000)),
-              note: 'En route to destination delivery city facility via express line-haul.',
-            },
-            {
-              status: 'In Transit - Transshipment Facility Arrival Scan',
-              location: 'Gurugram Central Processing Facility',
-              timestamp: fmt(new Date(now.getTime() - 10 * 3600000)),
-              note: 'Sorted and assigned to express container.',
-            },
-            {
-              status: 'In Transit - Courier Pickup Scan',
-              location: localScan?.location || 'REDMODE B2C, Meerut Hub (250002)',
-              timestamp: localScan?.timestamp || fmt(new Date(now.getTime() - 18 * 3600000)),
-              note: localScan?.note || 'Delhivery logistics team completed origin scan and loaded into linehaul.',
-            },
-            {
-              status: 'Shipment Created (Manifested)',
-              location: 'REDMODE B2C, Meerut Hub (250002)',
-              timestamp: fmt(new Date(now.getTime() - 22 * 3600000)),
-              note: 'Order packaged and thermal shipping label generated. Awaiting courier pickup.',
-            },
-          ];
-        } else {
-          scans = [
-            {
-              status: 'Shipment Created (Manifested)',
-              location: 'REDMODE B2C, Meerut Hub (250002)',
-              timestamp: fmt(now),
-              note: 'Order packaged and thermal shipping label generated. Awaiting Delhivery courier pickup scan.',
-            },
-          ];
-        }
+        const isPickedUp = Boolean(localScan);
+        const currentStatus = localScan ? localScan.status : 'Manifested';
+        const scans = localScan
+          ? [
+              {
+                status: localScan.status,
+                location: localScan.location,
+                timestamp: localScan.timestamp,
+                note: localScan.note,
+              },
+            ]
+          : [
+              {
+                status: 'Shipment Created (Manifested)',
+                location: 'REDMODE B2C, Meerut Hub (250002)',
+                timestamp: fmt(now),
+                note: 'Order packaged and thermal shipping label generated. Awaiting Delhivery courier pickup scan.',
+              },
+            ];
 
         return res.json({
           success: true,
           awb,
           status: currentStatus,
           isPickedUp,
-          statusCode: currentStatus === 'Delivered' ? 'DL' : currentStatus === 'Out for Delivery' ? 'OFD' : isPickedUp ? 'IT' : 'MAN',
+          statusCode: isPickedUp ? 'IT' : 'MAN',
           courier: 'Delhivery Surface Logistics',
           origin: 'REDMODE B2C, Meerut (250002)',
           destination: (req.query.city as string) ? `${req.query.city}, India` : 'Destination Hub',
           scans,
-          estimatedDelivery: currentStatus === 'Delivered' ? 'Delivered' : new Date(now.getTime() + 48 * 3600000).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }),
-          isLiveSynced: true,
+          estimatedDelivery: 'Pending Courier Scan',
+          isLiveSynced: Boolean(token),
           syncTimestamp: new Date().toISOString(),
         });
       }

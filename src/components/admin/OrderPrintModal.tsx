@@ -110,17 +110,17 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
     .filter(Boolean)
     .join(', ');
   const city = targetOrder.shippingAddress?.city || targetOrder.customer?.city || 'Meerut';
-  const state = targetOrder.shippingAddress?.state || 'Rajasthan';
-  const pincode = targetOrder.shippingAddress?.pincode || '302001';
+  const state = targetOrder.shippingAddress?.state || targetOrder.customer?.state || 'Uttar Pradesh';
+  const pincode = targetOrder.shippingAddress?.pincode || targetOrder.customer?.pincode || '250002';
 
   // Tax and line item calculations
   const items = targetOrder.items && targetOrder.items.length > 0 ? targetOrder.items : [
     {
       productId: 'p-1',
-      name: 'RedMode Premium Streetwear Apparel',
+      name: 'RedMode Premium Apparel',
       image: '',
       size: 'L',
-      color: 'Black',
+      color: 'Standard',
       quantity: 1,
       price: targetOrder.total || 999,
     },
@@ -131,7 +131,7 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
   const gstRate = 5;
   const taxableAmount = Math.round((targetOrder.total * 100) / (100 + gstRate));
   const totalGst = targetOrder.total - taxableAmount;
-  const isInterstate = state.toLowerCase() !== 'rajasthan';
+  const isInterstate = !['uttar pradesh', 'up'].includes(state.trim().toLowerCase());
   const cgst = isInterstate ? 0 : Math.round(totalGst / 2);
   const sgst = isInterstate ? 0 : Math.round(totalGst / 2);
   const igst = isInterstate ? totalGst : 0;

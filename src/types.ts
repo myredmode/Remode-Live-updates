@@ -646,6 +646,9 @@ export interface RazorpaySettings {
 
 export interface UserProfile {
   mobileOrEmail: string;
+  mobile?: string;
+  email?: string;
+  address?: CustomerAddress;
   name?: string;
   isLoggedIn: boolean;
   savedAddresses: CustomerAddress[];
