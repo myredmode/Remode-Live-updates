@@ -1,7 +1,7 @@
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-admin-role');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -19,17 +19,6 @@ export default async function handler(req, res) {
   }
 
   let testOtp = Math.floor(100000 + Math.random() * 900000).toString();
-  if (body.simulate) {
-    return res.status(200).json({
-      success: true,
-      simulated: true,
-      testOtp,
-      channel: 'sandbox',
-      message: `Sandbox Test OTP generated for +91 ${cleanMobile}: ${testOtp}`,
-      details: `Use code ${testOtp} in the Customer Sign-In modal to test verification immediately.`,
-    });
-  }
-
   const gw = body.gatewayConfig;
   if (gw?.provider === 'meta_whatsapp') {
     const token = (gw?.accessToken || process.env.WHATSAPP_CLOUD_TOKEN || '').trim();
@@ -82,33 +71,11 @@ export default async function handler(req, res) {
           waData = await waRes.json().catch(() => ({}));
         }
 
-        if (!waRes.ok) {
-          waRes = await fetch(`https://graph.facebook.com/v21.0/${phoneId}/messages`, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              messaging_product: 'whatsapp',
-              recipient_type: 'individual',
-              to: `91${cleanMobile}`,
-              type: 'text',
-              text: {
-                body: `*REDMODE Official Store*\n\nYour Customer Login OTP is: *${testOtp}*\n\nValid for 10 minutes. Do not share this code with anyone.`,
-              },
-            }),
-          });
-          waData = await waRes.json().catch(() => ({}));
-        }
-
         if (waRes.ok && waData.messages?.[0]?.id) {
           return res.status(200).json({
             success: true,
             channel: 'whatsapp',
-            testOtp,
-            message: `WhatsApp OTP (${testOtp}) sent to +91 ${cleanMobile} successfully! Message ID: ${waData.messages[0].id}`,
-            details: `Use code ${testOtp} to verify login. Dispatched via Meta WhatsApp Cloud API.`,
+            message: `WhatsApp OTP sent to +91 ${cleanMobile} successfully! Message ID: ${waData.messages[0].id}`,
           });
         }
       } catch {
@@ -117,7 +84,13 @@ export default async function handler(req, res) {
     }
   }
 
-  const tfKey = (gw?.apiKey || process.env.TWOFACTOR_API_KEY || '699e72b1-de86-11f1-bb6c-0200cd936042').trim();
+  const tfKey = (gw?.apiKey || process.env.TWOFACTOR_API_KEY || '').trim();
+  if (!tfKey) {
+    return res.status(503).json({
+      success: false,
+      message: 'SMS gateway is not configured. Please set TWOFACTOR_API_KEY or WHATSAPP_CLOUD_TOKEN in environment variables.',
+    });
+  }
 
   try {
     let tfRes = await fetch(`https://2factor.in/API/V1/${tfKey}/SMS/+91${cleanMobile}/AUTOGEN2`);
@@ -129,25 +102,18 @@ export default async function handler(req, res) {
     }
 
     if (tfRes.ok && tfData.Status === 'Success') {
-      if (tfData.OTP) {
-        testOtp = String(tfData.OTP).trim();
-      }
       return res.status(200).json({
         success: true,
         channel: '2factor',
-        testOtp,
-        message: `2Factor.in OTP (${testOtp}) dispatched to +91 ${cleanMobile} successfully! Session: ${tfData.Details}`,
-        details: `Use code ${testOtp} to verify login. Dispatched via live 2Factor.in gateway.`,
+        message: `2Factor.in OTP dispatched to +91 ${cleanMobile} successfully! Session: ${tfData.Details}`,
       });
     }
   } catch (err) {
-    // Fallback below
+    // Error handled below
   }
 
-  return res.status(200).json({
-    success: true,
-    channel: '2factor',
-    testOtp,
-    message: `OTP (${testOtp}) generated for +91 ${cleanMobile}.`,
+  return res.status(502).json({
+    success: false,
+    message: `Failed to deliver OTP to +91 ${cleanMobile} via configured gateway.`,
   });
 }

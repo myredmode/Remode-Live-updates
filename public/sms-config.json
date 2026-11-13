@@ -1,37 +1,3 @@
 {
-  "enabled": true,
-  "activeProviderId": "twofactor",
-  "fallbackProviderId": "meta_whatsapp",
-  "otpExpiryMinutes": 10,
-  "maxDailyOtpPerNumber": 5,
-  "gateways": [
-    {
-      "id": "twofactor",
-      "name": "2Factor.in SMS Gateway (India #1 Transactional Route)",
-      "provider": "twofactor",
-      "enabled": true,
-      "isPrimary": true,
-      "apiKey": "699e72b1-de86-11f1-bb6c-0200cd936042",
-      "senderId": "REDMOD",
-      "route": "otp",
-      "otpVerificationEnabled": true,
-      "orderUpdatesEnabled": false,
-      "codVerificationEnabled": true
-    },
-    {
-      "id": "meta_whatsapp",
-      "name": "Meta WhatsApp Cloud OTP (Official Meta API)",
-      "provider": "meta_whatsapp",
-      "enabled": true,
-      "isPrimary": false,
-      "phoneNumberId": "1375149605673144",
-      "wabaId": "2745819689145292",
-      "accessToken": "",
-      "templateName": "redmode_otp_verification",
-      "languageCode": "en_US",
-      "otpVerificationEnabled": true,
-      "orderUpdatesEnabled": true,
-      "codVerificationEnabled": true
-    }
-  ]
+  "enabled": true
 }

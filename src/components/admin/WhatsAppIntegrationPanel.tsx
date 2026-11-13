@@ -110,12 +110,17 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
     setTestConnectionResult(null);
 
     try {
+      const adminToken =
+        sessionStorage.getItem('redmode_admin_token') ||
+        localStorage.getItem('redmode_admin_token') ||
+        '';
       const res = await fetch('/api/whatsapp/test', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-role': currentAdminUser?.role || 'Super Admin',
+          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
         },
+        credentials: 'include',
         body: JSON.stringify({
           accessToken: (formData.accessToken || '').trim(),
           phoneNumberId: (formData.phoneNumberId || '').trim(),
@@ -164,12 +169,17 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
     };
 
     try {
+      const adminToken =
+        sessionStorage.getItem('redmode_admin_token') ||
+        localStorage.getItem('redmode_admin_token') ||
+        '';
       const res = await fetch('/api/whatsapp/send', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-role': currentAdminUser?.role || 'Super Admin',
+          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
         },
+        credentials: 'include',
         body: JSON.stringify({
           to: clean,
           textMessage: previewMap[testTemplate],

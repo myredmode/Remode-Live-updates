@@ -114,9 +114,7 @@ export const Checkout: React.FC = () => {
   // Payment State
   const [paymentMode, setPaymentMode] = useState<'COD' | 'Prepaid'>('Prepaid');
   const [selectedPaymentProvider, setSelectedPaymentProvider] = useState<'razorpay' | 'paypal'>('razorpay');
-  const [prepaidType, setPrepaidType] = useState<'upi' | 'card' | 'netbanking'>('upi');
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
-  const [paymentGatewayModal, setPaymentGatewayModal] = useState(false);
   const [confirmedOrder, setConfirmedOrder] = useState<Order | null>(lastConfirmedOrder);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -209,7 +207,7 @@ export const Checkout: React.FC = () => {
   };
 
   // COD Order Flow
-  const handlePlaceOrderCOD = (e: React.FormEvent) => {
+  const handlePlaceOrderCOD = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!validateAddress()) return;
 
@@ -223,8 +221,18 @@ export const Checkout: React.FC = () => {
       return;
     }
 
-    const newOrder = placeOrder(address, 'COD', 'Pending');
-    setConfirmedOrder(newOrder);
+    setIsProcessingPayment(true);
+    setFormError(null);
+    try {
+      const newOrder = await Promise.resolve(placeOrder(address, 'COD', 'Pending'));
+      if (newOrder) {
+        setConfirmedOrder(newOrder);
+      }
+    } catch (err: any) {
+      setFormError(err?.message || 'Unable to place order. Please check item availability.');
+    } finally {
+      setIsProcessingPayment(false);
+    }
   };
 
   const parseSafeJson = async (res: Response) => {
@@ -237,7 +245,72 @@ export const Checkout: React.FC = () => {
     }
   };
 
-  // PayPal International Export Payment Flow
+  // Handle return from PayPal buyer approval redirect (?token=<paypalOrderId>&PayerID=<payerId>)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const paypalOrderId = params.get('token');
+    const payerId = params.get('PayerID');
+    const isCancel = params.get('paypal_cancel') === '1';
+
+    if (isCancel) {
+      setFormError('PayPal payment was cancelled. Your order has not been placed.');
+      window.history.replaceState({}, '', '/checkout');
+      return;
+    }
+
+    if (paypalOrderId && payerId) {
+      let savedAddress = address;
+      try {
+        const rawSaved = sessionStorage.getItem('redmode_pending_paypal_address');
+        if (rawSaved) savedAddress = JSON.parse(rawSaved);
+      } catch {}
+
+      const activePaypal =
+        settings.paymentGateways?.find((g) => g.id === settings.activeInternationalGatewayId) ||
+        settings.paymentGateways?.find((g) => g.provider === 'paypal');
+
+      setIsProcessingPayment(true);
+      setFormError(null);
+
+      fetch('/api/payment/paypal/capture-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          orderId: paypalOrderId,
+          expectedAmountUsd: approxUsdAmount,
+          clientIdOverride: activePaypal?.apiKey || '',
+          clientSecretOverride: activePaypal?.apiSecret || '',
+          mode: activePaypal?.mode || 'live',
+        }),
+      })
+        .then((res) => parseSafeJson(res).then((data) => ({ ok: res.ok, data })))
+        .then(async ({ ok, data }) => {
+          window.history.replaceState({}, '', '/checkout');
+          sessionStorage.removeItem('redmode_pending_paypal_address');
+          if (ok && data?.success && data?.verified === true) {
+            const newOrder = await Promise.resolve(
+              placeOrder(savedAddress, 'Prepaid', 'Paid', {
+                razorpayPaymentId: data.captureId || data.orderId,
+                razorpayOrderId: data.orderId,
+                razorpaySignature: 'VERIFIED_PAYPAL_CAPTURE',
+              })
+            );
+            setConfirmedOrder(newOrder);
+          } else {
+            setFormError(data?.message || 'PayPal payment capture could not be verified.');
+          }
+        })
+        .catch((err) => {
+          setFormError(`PayPal capture error: ${err?.message || 'Unable to verify payment.'}`);
+        })
+        .finally(() => {
+          setIsProcessingPayment(false);
+        });
+    }
+  }, []);
+
+  // PayPal International Export Payment Flow (Strict — Real Approval & Capture Only)
   const handleInitiatePayPal = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!validateAddress()) return;
@@ -247,54 +320,43 @@ export const Checkout: React.FC = () => {
 
     const activePaypal =
       settings.paymentGateways?.find((g) => g.id === settings.activeInternationalGatewayId) ||
-      settings.paymentGateways?.find((g) => g.provider === 'paypal') || {
-        apiKey: 'paypal_sandbox_export_client_id',
-        apiSecret: 'paypal_sandbox_export_secret_key',
-        mode: 'test',
-      };
+      settings.paymentGateways?.find((g) => g.provider === 'paypal');
 
     try {
-      // 1. Create order on backend
+      const origin = typeof window !== 'undefined' ? window.location.origin : 'https://www.redmode.in';
       const res = await fetch('/api/payment/paypal/create-order', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           amountInr: cartTotalAmount,
           currency: 'USD',
-          clientIdOverride: activePaypal.apiKey,
-          clientSecretOverride: activePaypal.apiSecret,
-          mode: activePaypal.mode,
+          clientIdOverride: activePaypal?.apiKey || '',
+          clientSecretOverride: activePaypal?.apiSecret || '',
+          mode: activePaypal?.mode || 'live',
+          returnUrl: `${origin}/checkout?paypal_return=1`,
+          cancelUrl: `${origin}/checkout?paypal_cancel=1`,
         }),
       });
 
       const orderData = await parseSafeJson(res);
-      if (!res.ok || !orderData?.success) {
-        throw new Error(orderData?.message || 'Failed to initialize PayPal export order.');
+      if (!res.ok || !orderData?.success || !orderData?.orderId) {
+        throw new Error(
+          orderData?.message ||
+            'PayPal International payment gateway is not configured. Please contact support or configure PayPal credentials.'
+        );
       }
 
-      // 2. Capture / Confirm international payment
-      const captureRes = await fetch('/api/payment/paypal/capture-order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          orderId: orderData.orderId,
-        }),
-      });
-
-      const captureData = await parseSafeJson(captureRes);
-      if (captureData?.success) {
-        const newOrder = placeOrder(address, 'Prepaid', 'Paid', {
-          razorpayPaymentId: captureData.orderId || `PP-${Date.now()}`,
-          razorpayOrderId: `PAYPAL-USD-${orderData.amountUsd}`,
-          razorpaySignature: 'VERIFIED_PAYPAL_EXPORT',
-        });
-        setConfirmedOrder(newOrder);
-      } else {
-        throw new Error('PayPal payment verification could not be confirmed.');
+      if (orderData.approveUrl) {
+        try {
+          sessionStorage.setItem('redmode_pending_paypal_address', JSON.stringify(address));
+        } catch {}
+        window.location.href = orderData.approveUrl;
+        return;
       }
+
+      throw new Error('PayPal approval link could not be generated. Please verify PayPal gateway configuration.');
     } catch (err: any) {
-      setFormError(`PayPal error: ${err.message || 'Failed to complete international transaction.'}`);
-    } finally {
+      setFormError(err.message || 'Failed to initiate PayPal international transaction.');
       setIsProcessingPayment(false);
     }
   };
@@ -314,7 +376,7 @@ export const Checkout: React.FC = () => {
     });
   };
 
-  // Prepaid Order Flow with Razorpay / Active Domestic Gateway
+  // Prepaid Order Flow with Razorpay (Strict — No Sandbox Simulation Bypass)
   const handleInitiatePrepaid = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!validateAddress()) return;
@@ -332,7 +394,6 @@ export const Checkout: React.FC = () => {
     const themeHex = activeDomesticGw?.themeColor || rzpSettings?.themeColor || '#111827';
 
     try {
-      // 1. Create order on backend
       const res = await fetch('/api/payment/razorpay/create-order', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -351,113 +412,102 @@ export const Checkout: React.FC = () => {
 
       const orderData = await parseSafeJson(res);
 
-      if (!res.ok || !orderData?.success) {
-        throw new Error(orderData?.message || 'Failed to initialize payment gateway.');
+      if (!res.ok || !orderData?.success || !orderData?.orderId) {
+        throw new Error(
+          orderData?.message ||
+            'Online payment gateway is not configured. Please select Cash on Delivery (COD) or configure Razorpay keys.'
+        );
       }
 
-      // Check if real key is configured and Razorpay script loads
       const isScriptLoaded = await loadRazorpayScript();
-      const hasRealKey = keyId && !keyId.startsWith('rzp_test_simulated');
+      const effectiveKeyId = (orderData.keyId || keyId || '').trim();
 
-      if (isScriptLoaded && hasRealKey && !orderData.simulated) {
-        // Resolve absolute brand logo URL for Razorpay iframe
-        const resolvedLogo = settings.logoUrl?.startsWith('http')
-          ? settings.logoUrl
-          : typeof window !== 'undefined'
-          ? `${window.location.origin}/assets/2.png`
-          : '/assets/2.png';
+      if (!isScriptLoaded || !effectiveKeyId) {
+        throw new Error('Unable to load Razorpay secure checkout SDK. Please check your internet connection or use COD.');
+      }
 
-        // Real Razorpay Checkout modal
-        const options = {
-          key: orderData.keyId || keyId,
-          amount: orderData.amount,
-          currency: 'INR',
-          name: merchantDisplayName,
-          description: `Order Payment for ${cart.length} item(s)`,
-          image: resolvedLogo,
-          order_id: orderData.orderId,
-          prefill: {
-            name: address.name,
-            contact: address.mobile,
-            email: userProfile.mobileOrEmail.includes('@') ? userProfile.mobileOrEmail : `${address.mobile}@redmode.in`,
-          },
-          theme: {
-            color: themeHex,
-            backdrop_color: 'rgba(0, 0, 0, 0.75)',
-            hide_topbar: false,
-          },
-          modal: {
-            backdropclose: false,
-            escape: true,
-            handleback: true,
-            confirm_close: true,
-            ondismiss: () => {
-              setIsProcessingPayment(false);
-            },
-          },
-          handler: async (response: any) => {
-            try {
-              // Verify signature
-              const verifyRes = await fetch('/api/payment/razorpay/verify', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  razorpay_order_id: response.razorpay_order_id,
-                  razorpay_payment_id: response.razorpay_payment_id,
-                  razorpay_signature: response.razorpay_signature,
-                  keySecretOverride: keySecret,
-                }),
-              });
+      const resolvedLogo = settings.logoUrl?.startsWith('http')
+        ? settings.logoUrl
+        : typeof window !== 'undefined'
+        ? `${window.location.origin}/assets/2.png`
+        : '/assets/2.png';
 
-              const verifyData = await parseSafeJson(verifyRes);
-              if (verifyData?.success) {
-                const newOrder = placeOrder(address, 'Prepaid', 'Paid', {
+      const options = {
+        key: effectiveKeyId,
+        amount: orderData.amount,
+        currency: 'INR',
+        name: merchantDisplayName,
+        description: `Order Payment for ${cart.length} item(s)`,
+        image: resolvedLogo,
+        order_id: orderData.orderId,
+        prefill: {
+          name: address.name,
+          contact: address.mobile,
+          email: userProfile.mobileOrEmail?.includes('@') ? userProfile.mobileOrEmail : `${address.mobile}@redmode.in`,
+        },
+        theme: {
+          color: themeHex,
+          backdrop_color: 'rgba(0, 0, 0, 0.75)',
+          hide_topbar: false,
+        },
+        modal: {
+          backdropclose: false,
+          escape: true,
+          handleback: true,
+          confirm_close: true,
+          ondismiss: () => {
+            setIsProcessingPayment(false);
+          },
+        },
+        handler: async (response: any) => {
+          try {
+            const verifyRes = await fetch('/api/payment/razorpay/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+                expectedAmountInr: cartTotalAmount,
+                keyIdOverride: effectiveKeyId,
+                keySecretOverride: keySecret,
+              }),
+            });
+
+            const verifyData = await parseSafeJson(verifyRes);
+            if (verifyRes.ok && verifyData?.success && verifyData?.verified === true) {
+              const newOrder = await Promise.resolve(
+                placeOrder(address, 'Prepaid', 'Paid', {
                   razorpayPaymentId: response.razorpay_payment_id,
                   razorpayOrderId: response.razorpay_order_id,
                   razorpaySignature: response.razorpay_signature,
-                });
-                setConfirmedOrder(newOrder);
-              } else {
-                setFormError('Payment verification failed. If money was debited, it will be auto-refunded.');
-              }
-            } catch (err: any) {
-              setFormError('Failed to verify payment with server.');
-            } finally {
-              setIsProcessingPayment(false);
+                })
+              );
+              setConfirmedOrder(newOrder);
+            } else {
+              setFormError(
+                verifyData?.message ||
+                  'Payment signature verification failed. If money was debited, it will be auto-refunded.'
+              );
             }
-          },
-        };
+          } catch (err: any) {
+            setFormError(err?.message || 'Failed to verify payment with server.');
+          } finally {
+            setIsProcessingPayment(false);
+          }
+        },
+      };
 
-        const rzp = new (window as any).Razorpay(options);
-        rzp.on('payment.failed', function (resp: any) {
-          setIsProcessingPayment(false);
-          setFormError(`Payment failed: ${resp.error?.description || 'Transaction cancelled or declined by bank.'}`);
-        });
-        rzp.open();
-      } else {
-        // Fallback / Sandbox Simulation Modal
+      const rzp = new (window as any).Razorpay(options);
+      rzp.on('payment.failed', function (resp: any) {
         setIsProcessingPayment(false);
-        setPaymentGatewayModal(true);
-      }
+        setFormError(`Payment failed: ${resp.error?.description || 'Transaction cancelled or declined by bank.'}`);
+      });
+      rzp.open();
     } catch (err: any) {
       setIsProcessingPayment(false);
-      // Fallback to simulation modal if offline/error
-      setPaymentGatewayModal(true);
+      setFormError(err?.message || 'Unable to initiate online payment.');
     }
-  };
-
-  const handleSimulatePaymentSuccess = () => {
-    setIsProcessingPayment(true);
-    setTimeout(() => {
-      setIsProcessingPayment(false);
-      setPaymentGatewayModal(false);
-      const mockPayId = `pay_sim_${Date.now().toString().slice(-8)}`;
-      const newOrder = placeOrder(address, 'Prepaid', 'Paid', {
-        razorpayPaymentId: mockPayId,
-        razorpayOrderId: `order_sim_${Date.now().toString().slice(-6)}`,
-      });
-      setConfirmedOrder(newOrder);
-    }, 1200);
   };
 
   const handleApplyCoupon = (e: React.FormEvent) => {
@@ -1272,109 +1322,6 @@ export const Checkout: React.FC = () => {
           </div>
         </div>
       </div>
-
-      {/* Payment Gateway Verification Modal */}
-      {paymentGatewayModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="w-full max-w-md bg-white rounded-xl shadow-2xl p-6 border border-zinc-200 space-y-5">
-            <div className="flex items-center justify-between border-b pb-3">
-              <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded bg-[#0c2340] text-[#3395ff] font-black text-xs flex items-center justify-center tracking-tighter">
-                  rzp
-                </div>
-                <div>
-                  <h3 className="font-display font-bold text-zinc-900 text-sm">Razorpay Secure Checkout</h3>
-                  <p className="text-[10px] text-zinc-500">256-bit SSL Encrypted • RBI Authorized</p>
-                </div>
-              </div>
-              <span className="font-extrabold text-zinc-900 text-base">₹{cartTotalAmount}</span>
-            </div>
-
-            <div className="space-y-3">
-              <div className="p-2.5 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-900 flex items-start gap-2">
-                <ShieldCheck className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-bold block">Sandbox Test Mode Active</span>
-                  <p className="text-[11px] text-blue-700">
-                    Live Razorpay keys are not yet configured in Admin Settings. You can click &quot;Confirm &amp; Pay&quot; to test prepaid order placement safely!
-                  </p>
-                </div>
-              </div>
-
-              <div className="p-4 bg-zinc-50 border rounded-lg space-y-3">
-                <div className="flex items-center justify-between text-xs font-semibold">
-                  <span>Select Payment Method</span>
-                  <span className="text-emerald-700 font-bold text-[11px]">100% Safe UPI &amp; Cards</span>
-                </div>
-
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setPrepaidType('upi')}
-                    className={`flex-1 py-2 text-xs font-bold rounded border cursor-pointer ${
-                      prepaidType === 'upi' ? 'bg-zinc-950 text-white border-zinc-950' : 'bg-white text-zinc-700'
-                    }`}
-                  >
-                    UPI / QR
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPrepaidType('card')}
-                    className={`flex-1 py-2 text-xs font-bold rounded border cursor-pointer ${
-                      prepaidType === 'card' ? 'bg-zinc-950 text-white border-zinc-950' : 'bg-white text-zinc-700'
-                    }`}
-                  >
-                    Card
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPrepaidType('netbanking')}
-                    className={`flex-1 py-2 text-xs font-bold rounded border cursor-pointer ${
-                      prepaidType === 'netbanking' ? 'bg-zinc-950 text-white border-zinc-950' : 'bg-white text-zinc-700'
-                    }`}
-                  >
-                    NetBanking
-                  </button>
-                </div>
-
-                {prepaidType === 'upi' && (
-                  <div className="text-center py-2 space-y-2">
-                    <div className="w-32 h-32 mx-auto bg-white border border-zinc-300 p-2 flex items-center justify-center font-mono text-xs font-bold text-zinc-800">
-                      [UPI QR CODE]
-                    </div>
-                    <span className="text-[11px] text-zinc-500">Scan via GPay / PhonePe / Paytm</span>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="flex gap-3">
-              <button
-                type="button"
-                onClick={() => setPaymentGatewayModal(false)}
-                className="flex-1 py-3 text-xs font-bold text-zinc-600 border border-zinc-300 rounded cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isProcessingPayment}
-                onClick={handleSimulatePaymentSuccess}
-                className="flex-1 py-3 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded flex items-center justify-center gap-1.5 shadow cursor-pointer disabled:opacity-60"
-              >
-                {isProcessingPayment ? (
-                  <span>Verifying Payment...</span>
-                ) : (
-                  <>
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>Confirm & Pay ₹{cartTotalAmount}</span>
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

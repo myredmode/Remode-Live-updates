@@ -41,7 +41,7 @@ const PROVIDER_METAS: Record<ShippingChannelConfig['provider'], ProviderMeta> = 
     apiBaseUrl: 'https://track.delhivery.com',
     trackingUrlTemplate: 'https://www.delhivery.com/track/package/{{awb}}',
     apiKeyLabel: 'API Token',
-    apiKeyPlaceholder: 'e.g. de52f7425345a44f9e6f89fc01e86d942554a302',
+    apiKeyPlaceholder: 'Configured via DELHIVERY_API_TOKEN env var or enter token',
     clientIdLabel: 'Client Name',
     clientIdPlaceholder: 'e.g. Redmode',
   },
@@ -149,7 +149,7 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
         provider: 'delhivery',
         enabled: true,
         isPrimary: true,
-        apiKey: settings.delhiverySettings?.apiToken || 'de52f7425345a44f9e6f89fc01e86d942554a302',
+        apiKey: settings.delhiverySettings?.apiToken || '',
         clientId: settings.delhiverySettings?.clientName || 'Redmode',
         warehouseName: settings.delhiverySettings?.warehouseName || 'REDMODE B2C',
         pickupPincode: settings.delhiverySettings?.pickupPincode || '250002',
@@ -347,12 +347,17 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
     setTestResult(null);
 
     try {
+      const adminToken =
+        sessionStorage.getItem('redmode_admin_token') ||
+        localStorage.getItem('redmode_admin_token') ||
+        '';
       const res = await fetch('/api/shipping/test-channel', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-role': currentAdminUser.role || 'Super Admin',
+          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
         },
+        credentials: 'include',
         body: JSON.stringify({
           provider: currentChannel.provider,
           name: currentChannel.name,

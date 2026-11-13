@@ -295,12 +295,21 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isLoggedOutOtherDevices, setIsLoggedOutOtherDevices] = useState(false);
 
-  const handleUpdatePassword = (e: React.FormEvent) => {
-    e.preventDefault();
-    const existingPassword = settings.adminPassword || 'RedMode@100';
+  const getAdminAuthHeaders = (): Record<string, string> => {
+    const token =
+      sessionStorage.getItem('redmode_admin_token') ||
+      localStorage.getItem('redmode_admin_token') ||
+      '';
+    return {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    };
+  };
 
-    if (currentPassword !== existingPassword) {
-      showStatus('Current password does not match existing credentials.', 'error');
+  const handleUpdatePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentPassword.trim()) {
+      showStatus('Please enter your current security password.', 'error');
       return;
     }
     if (newPassword.length < 6) {
@@ -312,20 +321,62 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
       return;
     }
 
-    const updated: StoreSettings = {
-      ...settings,
-      adminPassword: newPassword,
-    };
-    updateSettings(updated);
-    setCurrentPassword('');
-    setNewPassword('');
-    setConfirmPassword('');
-    showStatus('Security password updated successfully! Next login requires new password. 🔒');
+    try {
+      const res = await fetch('/api/admin/change-password', {
+        method: 'POST',
+        headers: getAdminAuthHeaders(),
+        credentials: 'include',
+        body: JSON.stringify({
+          currentPassword: currentPassword.trim(),
+          newPassword: newPassword.trim(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        showStatus(data.message || 'Current password does not match existing credentials.', 'error');
+        return;
+      }
+
+      if (data.token) {
+        sessionStorage.setItem('redmode_admin_token', data.token);
+        if (localStorage.getItem('redmode_admin_trusted') === 'true') {
+          localStorage.setItem('redmode_admin_token', data.token);
+        }
+      }
+
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      showStatus('Security password updated on server and all other sessions invalidated! 🔒');
+    } catch (err: any) {
+      showStatus(err?.message || 'Failed to update security password on server.', 'error');
+    }
   };
 
-  const handleLogoutOtherDevices = () => {
-    setIsLoggedOutOtherDevices(true);
-    showStatus('All other active device sessions have been invalidated and logged out. ✅');
+  const handleLogoutOtherDevices = async () => {
+    try {
+      const res = await fetch('/api/admin/logout-all-devices', {
+        method: 'POST',
+        headers: getAdminAuthHeaders(),
+        credentials: 'include',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        showStatus(data.message || 'Failed to invalidate other device sessions.', 'error');
+        return;
+      }
+
+      if (data.token) {
+        sessionStorage.setItem('redmode_admin_token', data.token);
+        if (localStorage.getItem('redmode_admin_trusted') === 'true') {
+          localStorage.setItem('redmode_admin_token', data.token);
+        }
+      }
+      setIsLoggedOutOtherDevices(true);
+      showStatus('All other active device sessions have been invalidated on the server. ✅');
+    } catch (err: any) {
+      showStatus(err?.message || 'Error invalidating other sessions.', 'error');
+    }
   };
 
   // -------------------------------------------------------------
@@ -511,10 +562,8 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
     try {
       const res = await fetch('/api/payment/razorpay/test-keys', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-role': currentAdminUser.role,
-        },
+        headers: getAdminAuthHeaders(),
+        credentials: 'include',
         body: JSON.stringify({
           keyId: razorpayData.keyId.trim(),
           keySecret: razorpayData.keySecret.trim(),

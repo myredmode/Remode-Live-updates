@@ -1,76 +1,214 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function isAuthenticated() {
+    // ===============================================================
+    // Helper Functions & RBAC Guards
+    // ===============================================================
+    function isSignedIn() {
       return request.auth != null;
     }
 
-    function isValidId(id) {
-      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    function isSuperAdminEmail() {
+      return isSignedIn() &&
+        request.auth.token.email != null &&
+        (request.auth.token.email == "myredmode@gmail.com" ||
+         request.auth.token.email == "MyRedMode@gmail.com" ||
+         request.auth.token.email == "admin@redmode.in");
     }
 
+    function isAdmin() {
+      return isSuperAdminEmail() ||
+        (isSignedIn() && request.auth.token.admin == true) ||
+        (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function hasValidAdminAuditStamp(data) {
+      return data is map &&
+        (!('updatedByRole' in data) ||
+          data.updatedByRole in ['Super Admin', 'Listing + Label Admin', 'Label Admin']);
+    }
+
+    function isValidProductPayload(data) {
+      return data is map &&
+        data.name is string &&
+        data.name.size() > 0 &&
+        data.name.size() <= 300 &&
+        data.price is number &&
+        data.price >= 0;
+    }
+
+    function isInventoryOnlyUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['stockBySize', 'colorOptions', 'salesCount', 'inStock', 'updatedAt', 'views']);
+    }
+
+    function isValidOrderPayload(data) {
+      return data is map &&
+        data.id is string &&
+        data.id.size() >= 4 &&
+        data.total is number &&
+        data.total >= 0 &&
+        data.items is list &&
+        data.items.size() > 0 &&
+        data.customer is map;
+    }
+
+    function hasNoExposedSecrets(data) {
+      return !('adminPassword' in data) &&
+        !('razorpayKeySecret' in data) &&
+        !('paypalClientSecret' in data) &&
+        !('delhiveryApiToken' in data) &&
+        !('twoFactorApiKey' in data) &&
+        !('whatsappAccessToken' in data);
+    }
+
+    // ===============================================================
+    // 1. Admin & Security Collections (Strict Admin Only)
+    // ===============================================================
     match /admins/{adminId} {
-      allow read, write: if true;
+      allow get: if isSignedIn() && (request.auth.uid == adminId || isAdmin());
+      allow list: if isAdmin();
+      allow create, update: if isAdmin() &&
+        request.resource.data.role in ['Super Admin', 'Listing + Label Admin', 'Label Admin'] &&
+        !('password' in request.resource.data);
+      allow delete: if isSuperAdminEmail();
     }
 
+    match /settings_private/{docId} {
+      allow read, write: if isSuperAdminEmail();
+    }
+
+    match /payments/{paymentId} {
+      // Payment verification records are strictly server-controlled
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // ===============================================================
+    // 2. Storefront Catalog Collections (Public Read, Validated Write)
+    // ===============================================================
     match /products/{productId} {
-      allow read, write: if true;
+      allow get, list: if true;
+      allow create: if isValidProductPayload(request.resource.data) &&
+        hasValidAdminAuditStamp(request.resource.data);
+      allow update: if isValidProductPayload(request.resource.data) &&
+        (isAdmin() || isInventoryOnlyUpdate() || hasValidAdminAuditStamp(request.resource.data));
+      allow delete: if isAdmin() || hasValidAdminAuditStamp(resource.data);
     }
 
     match /categories/{categoryId} {
-      allow read, write: if true;
+      allow get, list: if true;
+      allow create, update: if request.resource.data is map &&
+        request.resource.data.name is string &&
+        request.resource.data.name.size() > 0 &&
+        request.resource.data.slug is string;
+      allow delete: if isAdmin();
     }
 
     match /banners/{bannerId} {
-      allow read, write: if true;
-    }
-
-    match /settings/{settingId} {
-      allow read, write: if true;
+      allow get, list: if true;
+      allow create, update: if request.resource.data is map &&
+        request.resource.data.title is string &&
+        request.resource.data.imageUrl is string;
+      allow delete: if isAdmin();
     }
 
     match /blogs/{blogId} {
-      allow read, write: if true;
+      allow get, list: if true;
+      allow create, update: if request.resource.data is map &&
+        request.resource.data.title is string &&
+        request.resource.data.slug is string;
+      allow delete: if isAdmin();
     }
 
     match /coupons/{couponId} {
-      allow read, write: if true;
+      allow get, list: if true;
+      allow create, update: if request.resource.data is map &&
+        request.resource.data.code is string &&
+        request.resource.data.discountValue is number &&
+        request.resource.data.discountValue >= 0;
+      allow delete: if isAdmin();
     }
 
+    // ===============================================================
+    // 3. Public Storefront Settings (Secrets Stripped)
+    // ===============================================================
+    match /settings/{settingId} {
+      allow get: if settingId in ['store_settings', 'system_deletions'] || isAdmin();
+      allow list: if isAdmin();
+      allow create, update: if (settingId in ['store_settings', 'system_deletions']) &&
+        hasNoExposedSecrets(request.resource.data);
+      allow delete: if false;
+    }
+
+    // ===============================================================
+    // 4. Customer Orders & Profiles
+    // ===============================================================
     match /orders/{orderId} {
-      allow read, write: if true;
+      allow get, list: if true;
+      allow create: if isValidOrderPayload(request.resource.data) &&
+        request.resource.data.id == orderId;
+      allow update: if isValidOrderPayload(request.resource.data) &&
+        request.resource.data.id == resource.data.id;
+      allow delete: if isSuperAdminEmail();
     }
 
     match /customers/{customerId} {
-      allow read, write: if true;
+      allow get: if true;
+      allow list: if isAdmin();
+      allow create, update: if request.resource.data is map &&
+        (request.resource.data.mobile is string || request.resource.data.phone is string) &&
+        !('password' in request.resource.data);
+      allow delete: if isSuperAdminEmail();
     }
 
-    match /analytics_events/{eventId} {
-      allow read, write: if true;
+    match /restock_notifications/{notifId} {
+      allow get, list: if isAdmin();
+      allow create: if request.resource.data is map &&
+        request.resource.data.productId is string &&
+        request.resource.data.mobile is string &&
+        request.resource.data.mobile.size() >= 10;
+      allow update, delete: if isAdmin();
     }
 
-    match /analytics_categories/{categoryId} {
-      allow read, write: if true;
-    }
-
-    match /analytics_products/{productId} {
-      allow read, write: if true;
-    }
-
-    match /_connection_test/{testId} {
-      allow read, write: if true;
-    }
-
-    // Security Audit Log: Append-only immutable collection for critical admin action tracking
-    match /AuditLog/{logId} {
-      allow read: if isValidId(logId);
-      allow create: if isValidId(logId) && request.resource.data.keys().hasAll(['id', 'action', 'entity', 'entityId', 'timestamp']);
+    // ===============================================================
+    // 5. Audit Logs & Analytics (Append-Only / Validated)
+    // ===============================================================
+    match /audit_logs/{logId} {
+      allow get, list: if true;
+      allow create: if request.resource.data is map &&
+        request.resource.data.action is string &&
+        request.resource.data.who is string &&
+        request.resource.data.timestamp is string;
       allow update, delete: if false;
     }
 
-    match /{document=**} {
-      allow read, write: if isAuthenticated();
+    match /analytics_visitors/{visitorId} {
+      allow get, list: if true;
+      allow create, update: if request.resource.data is map &&
+        request.resource.data.visitorId is string;
+      allow delete: if false;
+    }
+
+    match /analytics_events/{eventId} {
+      allow get, list: if true;
+      allow create: if request.resource.data is map &&
+        request.resource.data.type is string;
+      allow update, delete: if false;
+    }
+
+    match /analytics_sessions/{sessionId} {
+      allow get, list: if true;
+      allow create, update: if request.resource.data is map &&
+        request.resource.data.sessionId is string;
+      allow delete: if false;
+    }
+
+    match /_connection_test/{docId} {
+      allow get: if true;
+      allow write: if false;
     }
   }
 }

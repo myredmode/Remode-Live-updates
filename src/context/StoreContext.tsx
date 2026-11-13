@@ -54,6 +54,7 @@ import {
   onSnapshot,
   arrayUnion,
   arrayRemove,
+  runTransaction,
 } from 'firebase/firestore';
 import { recordFirestoreAuditLog } from '../utils/auditLogger';
 
@@ -70,6 +71,56 @@ function cleanForFirestore(obj: any): any {
     return res;
   }
   return obj;
+}
+
+/**
+ * Strips private API secrets and admin passwords before persisting storefront settings
+ * to the public `settings/store_settings` document so client reads never leak secrets
+ * and `hasNoExposedSecrets` in `firestore.rules` is strictly satisfied.
+ */
+function sanitizeSettingsForPublicFirestore(raw: Partial<StoreSettings>): Record<string, any> {
+  const copy: any = cleanForFirestore(raw) || {};
+  delete copy.adminPassword;
+  delete copy.razorpayKeySecret;
+  delete copy.paypalClientSecret;
+  delete copy.delhiveryApiToken;
+  delete copy.twoFactorApiKey;
+  delete copy.whatsappAccessToken;
+
+  if (copy.razorpaySettings && typeof copy.razorpaySettings === 'object') {
+    copy.razorpaySettings = { ...copy.razorpaySettings, keySecret: '' };
+  }
+  if (copy.delhiverySettings && typeof copy.delhiverySettings === 'object') {
+    copy.delhiverySettings = { ...copy.delhiverySettings, apiToken: '' };
+  }
+  if (copy.whatsappSettings && typeof copy.whatsappSettings === 'object') {
+    copy.whatsappSettings = { ...copy.whatsappSettings, accessToken: '' };
+  }
+  if (Array.isArray(copy.paymentGateways)) {
+    copy.paymentGateways = copy.paymentGateways.map((g: any) => ({
+      ...g,
+      apiSecret: '',
+      webhookSecret: '',
+    }));
+  }
+  if (Array.isArray(copy.shippingChannels)) {
+    copy.shippingChannels = copy.shippingChannels.map((c: any) => ({
+      ...c,
+      apiKey: '',
+      apiSecret: '',
+    }));
+  }
+  if (copy.smsSettings && Array.isArray(copy.smsSettings.gateways)) {
+    copy.smsSettings = {
+      ...copy.smsSettings,
+      gateways: copy.smsSettings.gateways.map((g: any) => ({
+        ...g,
+        apiKey: '',
+        accessToken: '',
+      })),
+    };
+  }
+  return copy;
 }
 
 function toIsoTimestamp(val: any): string | undefined {
@@ -661,8 +712,8 @@ interface StoreContextType {
     password: string,
     saveDevice: boolean,
     trustDevice: boolean
-  ) => { success: boolean; message: string };
-  adminGoogleLogin: (email?: string) => void;
+  ) => Promise<{ success: boolean; message: string }> | { success: boolean; message: string };
+  adminGoogleLogin: (email?: string, idToken?: string) => Promise<void> | void;
   adminLogout: () => void;
   updateAdminPassword: (newPassword: string) => void;
   adminSavedCredentials: { username: string; password?: string; saved: boolean };
@@ -730,8 +781,8 @@ interface StoreContextType {
   codOverrides: Record<string, boolean>;
 
   // Customer Mobile OTP Authentication (No password, no username, no guest)
-  sendCustomerOtp: (mobile: string) => Promise<{ success: boolean; message: string; fallbackOtp?: string; simulated?: boolean }>;
-  verifyCustomerOtp: (mobile: string, otp: string, saveForThisDevice?: boolean) => { success: boolean; message: string };
+  sendCustomerOtp: (mobile: string) => Promise<{ success: boolean; message: string; simulated?: boolean }>;
+  verifyCustomerOtp: (mobile: string, otp: string, saveForThisDevice?: boolean) => Promise<{ success: boolean; message: string }> | { success: boolean; message: string };
 }
 
 const INITIAL_ADMIN_USERS: AdminUser[] = [
@@ -1122,9 +1173,18 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }>(() => {
     try {
       const saved = localStorage.getItem('redmode_admin_credentials');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && parsed.password) {
+          // Strip legacy plaintext password from localStorage immediately
+          const cleanCreds = { username: parsed.username || '', saved: Boolean(parsed.saved) };
+          localStorage.setItem('redmode_admin_credentials', JSON.stringify(cleanCreds));
+          return cleanCreds;
+        }
+        return { username: parsed?.username || '', saved: Boolean(parsed?.saved) };
+      }
     } catch (e) {}
-    return { username: '', password: '', saved: false };
+    return { username: '', saved: false };
   });
 
   // Multi-Employee Admin Users & Active Persona
@@ -1597,9 +1657,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           ...INITIAL_SETTINGS.delhiverySettings,
           ...(parsed.delhiverySettings || {}),
         };
-        // Auto-hydrate verified credentials if empty or default
-        if (!delhiverySettings.apiToken || delhiverySettings.apiToken === '') {
-          delhiverySettings.apiToken = 'de52f7425345a44f9e6f89fc01e86d942554a302';
+        if (delhiverySettings.apiToken === 'de52f7425345a44f9e6f89fc01e86d942554a302') {
+          delhiverySettings.apiToken = '';
         }
         if (!delhiverySettings.clientName || delhiverySettings.clientName === 'REDMODE_JAIPUR') {
           delhiverySettings.clientName = 'Redmode';
@@ -1618,12 +1677,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           ...INITIAL_SETTINGS.razorpaySettings,
           ...(parsed.razorpaySettings || {}),
         };
-        // Auto-hydrate verified credentials if empty or default
-        if (!razorpaySettings.keyId || razorpaySettings.keyId === '') {
-          razorpaySettings.keyId = 'rzp_test_TgYmLmX3cPZpNk';
-        }
-        if (!razorpaySettings.keySecret || razorpaySettings.keySecret === '') {
-          razorpaySettings.keySecret = 'Asrb0WLHUFBi3iEU3FK1DfiN';
+        if (razorpaySettings.keySecret === 'Asrb0WLHUFBi3iEU3FK1DfiN') {
+          razorpaySettings.keySecret = '';
         }
         razorpaySettings.enabled = true;
 
@@ -1735,8 +1790,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     localStorage.setItem('redmode_cod_overrides', JSON.stringify(codOverrides));
   }, [codOverrides]);
 
-  // Active OTP storage for customer verification
-  const [activeCustomerOtps, setActiveCustomerOtps] = useState<Record<string, string>>({});
+  // Signed server challenge tokens for customer OTP verification
+  const otpChallengeTokensRef = useRef<Record<string, string>>({});
 
   // Track system deletions across Firestore so deleted items never resurrect on any client
   const [deletedIds, setDeletedIds] = useState<{
@@ -2205,9 +2260,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                         enabled: true,
                         isPrimary: nextActiveId === 'twofactor',
                         apiKey:
-                          found?.apiKey && found.apiKey.trim().length >= 8
+                          found?.apiKey &&
+                          found.apiKey.trim().length >= 8 &&
+                          found.apiKey.trim() !== '699e72b1-de86-11f1-bb6c-0200cd936042'
                             ? found.apiKey.trim()
-                            : '699e72b1-de86-11f1-bb6c-0200cd936042',
+                            : '',
                       };
                     }
                     return {
@@ -2240,22 +2297,29 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     gateways: cleanedGateways,
                   };
 
-                  if (hadMoreThanTwo || tfMissingKey) {
+                  if (hadMoreThanTwo) {
                     setDoc(
                       doc(db, 'settings', 'store_settings'),
-                      cleanForFirestore({ smsSettings: merged.smsSettings }),
+                      sanitizeSettingsForPublicFirestore({ smsSettings: merged.smsSettings }),
                       { merge: true }
                     ).catch(() => {});
                   }
 
-                  fetch('/api/admin/sms-settings', {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type': 'application/json',
-                      'x-admin-role': 'Super Admin',
-                    },
-                    body: JSON.stringify(merged.smsSettings),
-                  }).catch(() => {});
+                  const adminToken =
+                    sessionStorage.getItem('redmode_admin_token') ||
+                    localStorage.getItem('redmode_admin_token') ||
+                    '';
+                  if (adminToken) {
+                    fetch('/api/admin/sms-settings', {
+                      method: 'POST',
+                      headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${adminToken}`,
+                      },
+                      credentials: 'include',
+                      body: JSON.stringify(merged.smsSettings),
+                    }).catch(() => {});
+                  }
                 }
                 try {
                   localStorage.setItem('redmode_settings', JSON.stringify(merged));
@@ -2674,7 +2738,96 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     );
   };
 
-  // Order Placement
+  // Helper to restore stock when an order is cancelled or rejected
+  const restoreOrderInventory = useCallback((cancelledOrder: Order) => {
+    if (!cancelledOrder || !Array.isArray(cancelledOrder.items) || cancelledOrder.items.length === 0) return;
+    if ((cancelledOrder as any).inventoryRestored) return;
+
+    setProducts((prev) =>
+      prev.map((prod) => {
+        const matchingItems = cancelledOrder.items.filter((it) => it.productId === prod.id);
+        if (matchingItems.length === 0) return prod;
+
+        const updatedStockBySize = { ...prod.stockBySize };
+        const updatedColorOptions = prod.colorOptions ? [...prod.colorOptions] : undefined;
+        let restoredTotal = 0;
+
+        matchingItems.forEach((it) => {
+          const sizeKey = it.size || 'Free size';
+          updatedStockBySize[sizeKey] = (updatedStockBySize[sizeKey] ?? 0) + it.quantity;
+          restoredTotal += it.quantity;
+
+          if (updatedColorOptions && it.color) {
+            const vIdx = updatedColorOptions.findIndex(
+              (v) => v.name.toLowerCase() === it.color!.toLowerCase()
+            );
+            if (vIdx !== -1) {
+              const variant = updatedColorOptions[vIdx];
+              const varStock = { ...(variant.stockBySize || {}) };
+              varStock[sizeKey] = (varStock[sizeKey] ?? 0) + it.quantity;
+              updatedColorOptions[vIdx] = { ...variant, stockBySize: varStock };
+            }
+          }
+        });
+
+        return {
+          ...prod,
+          stockBySize: updatedStockBySize,
+          colorOptions: updatedColorOptions,
+          salesCount: Math.max(0, (prod.salesCount || 0) - restoredTotal),
+        };
+      })
+    );
+
+    // Also restore stock atomically in Cloud Firestore
+    runTransaction(db, async (transaction) => {
+      const uniqueProdIds = Array.from(new Set(cancelledOrder.items.map((i) => i.productId)));
+      const snaps = await Promise.all(
+        uniqueProdIds.map((pid) => transaction.get(doc(db, 'products', pid)))
+      );
+      snaps.forEach((snap, idx) => {
+        if (!snap.exists()) return;
+        const pid = uniqueProdIds[idx];
+        const data = snap.data() as Product;
+        const matchingItems = cancelledOrder.items.filter((i) => i.productId === pid);
+        const updatedStockBySize = { ...(data.stockBySize || {}) };
+        const updatedColorOptions = Array.isArray(data.colorOptions) ? [...data.colorOptions] : undefined;
+        let restoredCount = 0;
+
+        matchingItems.forEach((it) => {
+          const sizeKey = it.size || 'Free size';
+          updatedStockBySize[sizeKey] = (updatedStockBySize[sizeKey] ?? 0) + it.quantity;
+          restoredCount += it.quantity;
+          if (updatedColorOptions && it.color) {
+            const vIdx = updatedColorOptions.findIndex(
+              (v) => v.name.toLowerCase() === it.color!.toLowerCase()
+            );
+            if (vIdx !== -1) {
+              const variant = updatedColorOptions[vIdx];
+              const varStock = { ...(variant.stockBySize || {}) };
+              varStock[sizeKey] = (varStock[sizeKey] ?? 0) + it.quantity;
+              updatedColorOptions[vIdx] = { ...variant, stockBySize: varStock };
+            }
+          }
+        });
+
+        transaction.set(
+          doc(db, 'products', pid),
+          cleanForFirestore({
+            stockBySize: updatedStockBySize,
+            ...(updatedColorOptions ? { colorOptions: updatedColorOptions } : {}),
+            salesCount: Math.max(0, (data.salesCount || 0) - restoredCount),
+            updatedAt: new Date().toISOString(),
+          }),
+          { merge: true }
+        );
+      });
+    }).catch((err) => {
+      console.debug('Firestore inventory restoration transaction notice:', err);
+    });
+  }, []);
+
+  // Order Placement with Pre-Order Stock Validation & Atomic Firestore Inventory Transaction
   const placeOrder = (
     customer: CustomerAddress,
     paymentMode: 'COD' | 'Prepaid',
@@ -2685,6 +2838,40 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       razorpaySignature?: string;
     }
   ): Order => {
+    if (!cart || cart.length === 0) {
+      throw new Error('Your shopping bag is empty. Please add items before placing an order.');
+    }
+
+    // 1. Validate stock and active status for every item in the cart to prevent overselling
+    for (const item of cart) {
+      const liveProd = products.find((p) => p.id === item.productId) || item.product;
+      if (!liveProd || liveProd.published === false || liveProd.inStock === false) {
+        throw new Error(`"${item.product.name}" is currently unavailable for purchase.`);
+      }
+      const targetColor = item.selectedColor || liveProd.color || liveProd.colorOptions?.[0]?.name;
+      const targetVariant = liveProd.colorOptions?.find(
+        (c) => c.name.toLowerCase() === (targetColor || '').toLowerCase()
+      );
+      if (targetVariant && Array.isArray(liveProd.inactiveRowKeys)) {
+        const rowKey = `${liveProd.id}__${targetVariant.name}`;
+        if (liveProd.inactiveRowKeys.includes(rowKey)) {
+          throw new Error(`"${liveProd.name}" (${targetVariant.name}) is currently inactive.`);
+        }
+      }
+      const sizeKey = item.selectedSize || 'Free size';
+      const availableStock =
+        targetVariant?.stockBySize?.[sizeKey] ??
+        liveProd.stockBySize?.[sizeKey] ??
+        0;
+      if (availableStock < item.quantity) {
+        throw new Error(
+          availableStock <= 0
+            ? `"${liveProd.name}" (Size: ${sizeKey}${targetColor ? `, Color: ${targetColor}` : ''}) just went out of stock.`
+            : `Only ${availableStock} unit(s) of "${liveProd.name}" (Size: ${sizeKey}) are available in stock.`
+        );
+      }
+    }
+
     const orderNumber = `#${Math.floor(10000 + Math.random() * 90000)}`;
 
     const orderItems: OrderItem[] = cart.map((item) => ({
@@ -2725,18 +2912,16 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       confirmationSentAt: (() => {
         const now = new Date();
         const mins = now.getHours() * 60 + now.getMinutes();
-        // If between 10:00 AM (600) and 9:00 PM (1260), send immediately
         if (mins >= 600 && mins <= 1260) {
           return now.toISOString();
         }
-        // If after 9 PM or before 10 AM, scheduled for 10:00 AM next morning
         return undefined;
       })(),
       scheduledConfirmationTime: (() => {
         const now = new Date();
         const mins = now.getHours() * 60 + now.getMinutes();
         if (mins >= 600 && mins <= 1260) {
-          return undefined; // Sent immediately
+          return undefined;
         }
         const sched = new Date(now);
         if (mins > 1260) {
@@ -2755,10 +2940,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       razorpaySignature: paymentDetails?.razorpaySignature,
     };
 
-    // Deduct stock by size for each ordered product and specific color variant
+    const cartSnapshot = [...cart];
+
+    // Deduct stock by size for each ordered product and specific color variant in local state
     setProducts((prev) =>
       prev.map((prod) => {
-        const matchingCartItems = cart.filter((c) => c.productId === prod.id);
+        const matchingCartItems = cartSnapshot.filter((c) => c.productId === prod.id);
         if (matchingCartItems.length === 0) return prod;
 
         const updatedStockBySize = { ...prod.stockBySize };
@@ -2792,17 +2979,73 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       })
     );
 
-    // Save order locally and sync to backend & Firestore
+    // Save order locally and sync to backend & Firestore via atomic transaction
     setOrders((prev) => [newOrder, ...prev]);
     fetch('/api/orders', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(newOrder),
     }).catch(() => {});
-    try {
-      const orderDocId = newOrder.id.replace(/[^a-zA-Z0-9_-]/g, '') || `ord_${Date.now()}`;
+
+    const orderDocId = newOrder.id.replace(/[^a-zA-Z0-9_-]/g, '') || `ord_${Date.now()}`;
+    runTransaction(db, async (transaction) => {
+      const uniqueProdIds = Array.from(new Set(cartSnapshot.map((c) => c.productId)));
+      const prodSnaps = await Promise.all(
+        uniqueProdIds.map((pid) => transaction.get(doc(db, 'products', pid)))
+      );
+
+      prodSnaps.forEach((snap, idx) => {
+        if (!snap.exists()) return;
+        const pid = uniqueProdIds[idx];
+        const data = snap.data() as Product;
+        const matchingItems = cartSnapshot.filter((c) => c.productId === pid);
+        const updatedStockBySize = { ...(data.stockBySize || {}) };
+        const updatedColorOptions = Array.isArray(data.colorOptions) ? [...data.colorOptions] : undefined;
+        let salesAdded = 0;
+
+        matchingItems.forEach((c) => {
+          const currentStock = updatedStockBySize[c.selectedSize] ?? 0;
+          if (currentStock < c.quantity) {
+            throw new Error(`Insufficient stock in Firestore for ${data.name} (${c.selectedSize}).`);
+          }
+          updatedStockBySize[c.selectedSize] = Math.max(0, currentStock - c.quantity);
+          salesAdded += c.quantity;
+
+          if (updatedColorOptions && c.selectedColor) {
+            const vIdx = updatedColorOptions.findIndex(
+              (v) => v.name.toLowerCase() === c.selectedColor!.toLowerCase()
+            );
+            if (vIdx !== -1) {
+              const variant = updatedColorOptions[vIdx];
+              const varStock = { ...(variant.stockBySize || {}) };
+              const curVarStock = varStock[c.selectedSize] ?? currentStock;
+              if (curVarStock < c.quantity) {
+                throw new Error(`Insufficient variant stock for ${data.name} (${c.selectedColor} / ${c.selectedSize}).`);
+              }
+              varStock[c.selectedSize] = Math.max(0, curVarStock - c.quantity);
+              updatedColorOptions[vIdx] = { ...variant, stockBySize: varStock };
+            }
+          }
+        });
+
+        transaction.set(
+          doc(db, 'products', pid),
+          cleanForFirestore({
+            stockBySize: updatedStockBySize,
+            ...(updatedColorOptions ? { colorOptions: updatedColorOptions } : {}),
+            salesCount: (data.salesCount || 0) + salesAdded,
+            updatedAt: new Date().toISOString(),
+          }),
+          { merge: true }
+        );
+      });
+
+      transaction.set(doc(db, 'orders', orderDocId), cleanForFirestore(newOrder), { merge: true });
+    }).catch(() => {
+      // Fallback order write if product docs were not yet seeded in Firestore
       setDoc(doc(db, 'orders', orderDocId), cleanForFirestore(newOrder), { merge: true }).catch(() => {});
-    } catch {}
+    });
+
     // Save sanitized order for customer confirmation display
     setLastConfirmedOrder(sanitizeOrderForCustomer(newOrder));
     clearCart();
@@ -2852,9 +3095,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const sendCustomerOtp = async (
     rawMobile: string
-  ): Promise<{ success: boolean; message: string; fallbackOtp?: string; simulated?: boolean }> => {
+  ): Promise<{ success: boolean; message: string; simulated?: boolean }> => {
     const mobile = normalizeMobile(rawMobile);
-    if (!mobile || mobile.length !== 10) {
+    if (!mobile || mobile.length !== 10 || !/^[6-9]\d{9}$/.test(mobile)) {
       return { success: false, message: 'Please enter a valid 10-digit Indian mobile number.' };
     }
 
@@ -2862,6 +3105,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const res = await fetch('/api/otp/send-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           mobile,
           purpose: 'customer',
@@ -2876,103 +3120,71 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         } catch {}
       }
 
-      if (data && data.success) {
-        const codeToTrack = data.verificationCode || data.fallbackOtp;
-        if (codeToTrack) {
-          setActiveCustomerOtps((prev) => ({ ...prev, [mobile]: String(codeToTrack) }));
+      if (res.ok && data && data.success) {
+        if (data.challengeToken) {
+          otpChallengeTokensRef.current[mobile] = String(data.challengeToken);
         }
         return {
           success: true,
-          simulated: Boolean(data.simulated),
-          fallbackOtp: data.fallbackOtp,
+          simulated: false,
           message: data.message || `OTP sent to +91 ${mobile}`,
         };
       }
 
-      if (data && data.success === false) {
-        return {
-          success: false,
-          message: data.message || 'Failed to send OTP. Please check mobile number.',
-        };
-      }
-
-      // Static hosting fallback (e.g., Vercel static rewrite returning 405/HTML): dispatch directly via 2Factor.in
-      const directOtp = Math.floor(100000 + Math.random() * 900000).toString();
-      const tfGw = settings.smsSettings?.gateways?.find((g) => g.provider === 'twofactor');
-      const tfKey = (tfGw?.apiKey || '699e72b1-de86-11f1-bb6c-0200cd936042').trim();
-      setActiveCustomerOtps((prev) => ({ ...prev, [mobile]: directOtp }));
-
-      try {
-        await fetch(`https://2factor.in/API/V1/${tfKey}/SMS/+91${mobile}/${directOtp}`, {
-          method: 'GET',
-          mode: 'no-cors',
-          cache: 'no-store',
-        });
-        return {
-          success: true,
-          simulated: false,
-          fallbackOtp: directOtp,
-          message: `OTP has been sent to +91 ${mobile} via 2FACTOR.`,
-        };
-      } catch {
-        return {
-          success: true,
-          simulated: true,
-          fallbackOtp: directOtp,
-          message: `Verification OTP generated for +91 ${mobile}.`,
-        };
-      }
-    } catch (err: any) {
-      // Network/CORS fallback: still dispatch via 2Factor no-cors GET
-      const directOtp = Math.floor(100000 + Math.random() * 900000).toString();
-      const tfGw = settings.smsSettings?.gateways?.find((g) => g.provider === 'twofactor');
-      const tfKey = (tfGw?.apiKey || '699e72b1-de86-11f1-bb6c-0200cd936042').trim();
-      setActiveCustomerOtps((prev) => ({ ...prev, [mobile]: directOtp }));
-      try {
-        await fetch(`https://2factor.in/API/V1/${tfKey}/SMS/+91${mobile}/${directOtp}`, {
-          method: 'GET',
-          mode: 'no-cors',
-          cache: 'no-store',
-        });
-      } catch {}
       return {
-        success: true,
-        simulated: false,
-        fallbackOtp: directOtp,
-        message: `OTP has been sent to +91 ${mobile} via 2FACTOR.`,
+        success: false,
+        message: data?.message || 'Unable to send OTP at the moment. Please try again shortly.',
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: 'Network error while requesting OTP. Please check your internet connection and try again.',
       };
     }
   };
 
-  const verifyCustomerOtp = (rawMobile: string, otpInput: string, saveForThisDevice: boolean = true): { success: boolean; message: string } => {
+  const verifyCustomerOtp = async (
+    rawMobile: string,
+    otpInput: string,
+    saveForThisDevice: boolean = true
+  ): Promise<{ success: boolean; message: string }> => {
     const mobile = normalizeMobile(rawMobile);
-    const cleanOtp = (otpInput || '').trim();
+    const cleanOtp = (otpInput || '').replace(/\D/g, '').trim();
 
     if (cleanOtp.length !== 6) {
       return { success: false, message: 'Invalid OTP code. Please enter the 6-digit code received on your phone.' };
     }
 
-    const expectedOtp = activeCustomerOtps[mobile];
-    const isOwnerMaster = mobile === '7302797464' && (cleanOtp === '730279' || cleanOtp === '100200');
-    if (!expectedOtp && !isOwnerMaster) {
-      return {
-        success: false,
-        message: 'OTP session expired or not requested yet. Please click "Resend OTP" to get a fresh 6-digit code.',
-      };
-    }
-    if (expectedOtp && cleanOtp !== expectedOtp && !isOwnerMaster) {
-      return {
-        success: false,
-        message: 'Incorrect OTP code. Please enter the exact 6-digit OTP received on your mobile.',
-      };
-    }
+    try {
+      const challengeToken = otpChallengeTokensRef.current[mobile] || '';
+      const res = await fetch('/api/otp/verify-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          mobile,
+          otp: cleanOtp,
+          purpose: 'customer',
+          challengeToken,
+        }),
+      });
+      const data = await res.json().catch(() => null);
 
-    // Verify via backend API asynchronously
-    fetch('/api/otp/verify-otp', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mobile, otp: cleanOtp, purpose: 'customer' }),
-    }).catch((e) => console.warn('OTP backend verify notice:', e));
+      if (!res.ok || !data?.success || data?.verified === false) {
+        return {
+          success: false,
+          message: data?.message || 'Incorrect or expired OTP code. Please verify and try again.',
+        };
+      }
+
+      // Single-use OTP: clear stored challenge token after successful verification
+      delete otpChallengeTokensRef.current[mobile];
+    } catch (err: any) {
+      return {
+        success: false,
+        message: 'Unable to verify OTP with server. Please check your connection and try again.',
+      };
+    }
 
     // Find existing customer name and addresses from previous orders
     const previousOrder = orders.find((o) => normalizeMobile(o.customer?.mobile || o.customer?.phone) === mobile);
@@ -3674,7 +3886,18 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       prev.map((o) => {
         if (o.id === orderId) {
           oldStatus = o.orderStatus;
-          const updated = { ...o, orderStatus: status };
+          const isCancelling =
+            (status === 'Cancelled' || (status as any) === 'CANCELLED') &&
+            o.orderStatus !== 'Cancelled' &&
+            (o.orderStatus as any) !== 'CANCELLED';
+          if (isCancelling) {
+            restoreOrderInventory(o);
+          }
+          const updated = {
+            ...o,
+            orderStatus: status,
+            ...(isCancelling ? { inventoryRestored: true } : {}),
+          };
           persistOrderUpdate(updated);
           return updated;
         }
@@ -3718,12 +3941,20 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       prev.map((o) => {
         if (o.id !== orderId) return o;
         oldStatus = o.codVerificationStatus || 'UNVERIFIED';
+        const isRejecting =
+          status === 'REJECTED' &&
+          o.orderStatus !== 'Cancelled' &&
+          (o.orderStatus as any) !== 'CANCELLED';
+        if (isRejecting) {
+          restoreOrderInventory(o);
+        }
         const updated: Order = {
           ...o,
           codVerificationStatus: status,
           codVerifiedAt: new Date().toISOString(),
           codVerifiedBy: verifiedBy,
           orderStatus: status === 'CONFIRMED' ? 'Confirmed' : status === 'REJECTED' ? 'CANCELLED' : o.orderStatus,
+          ...(isRejecting ? ({ inventoryRestored: true } as any) : {}),
         };
         persistOrderUpdate(updated);
         return updated;
@@ -3876,12 +4107,18 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       prev.map((order) => {
         if (!orderIds.includes(order.id)) return order;
         count++;
-        return {
+        if (order.orderStatus !== 'Cancelled' && (order.orderStatus as any) !== 'CANCELLED') {
+          restoreOrderInventory(order);
+        }
+        const updated = {
           ...order,
-          orderStatus: 'Cancelled',
+          orderStatus: 'Cancelled' as OrderStatus,
           isExpired: true,
           expiredAt: nowIso,
+          inventoryRestored: true,
         };
+        persistOrderUpdate(updated);
+        return updated;
       })
     );
 
@@ -4874,7 +5111,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         console.warn('Failed to save settings:', e);
       }
       try {
-        setDoc(doc(db, 'settings', 'store_settings'), cleanForFirestore(updated), { merge: true }).catch(() => {});
+        setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
       } catch {}
       return updated;
     });
@@ -4935,7 +5172,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         console.warn('Failed to save payment gateway settings:', e);
       }
       try {
-        setDoc(doc(db, 'settings', 'store_settings'), cleanForFirestore(updated), { merge: true }).catch(() => {});
+        setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
       } catch {}
       return updated;
     });
@@ -4976,7 +5213,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         console.warn('Failed to save settings:', e);
       }
       try {
-        setDoc(doc(db, 'settings', 'store_settings'), cleanForFirestore(updated), { merge: true }).catch(() => {});
+        setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
       } catch {}
       return updated;
     });
@@ -5012,16 +5249,21 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         console.warn('Failed to save settings:', e);
       }
       try {
-        setDoc(doc(db, 'settings', 'store_settings'), cleanForFirestore(updated), { merge: true }).catch(() => {});
+        setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
       } catch {}
 
-      // Sync active credentials to backend so /api/otp/send-otp has latest keys
+      // Sync active credentials to backend using verified Admin Session Token
+      const adminToken =
+        sessionStorage.getItem('redmode_admin_token') ||
+        localStorage.getItem('redmode_admin_token') ||
+        '';
       fetch('/api/admin/sms-settings', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-role': 'Super Admin',
+          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
         },
+        credentials: 'include',
         body: JSON.stringify(updatedSms),
       }).catch((err) => console.warn('Sync to /api/admin/sms-settings failed:', err));
 
@@ -5318,7 +5560,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       console.warn('Failed to save settings to localStorage:', e);
     }
     try {
-      setDoc(doc(db, 'settings', 'store_settings'), cleanForFirestore(newSettings), { merge: true }).catch((err) => {
+      setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(newSettings), { merge: true }).catch((err) => {
         console.debug('Firestore store_settings sync warning:', err);
       });
     } catch {}
@@ -5420,48 +5662,84 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     updateMenuHighlights(updated);
   };
 
-  // Admin Authentication Actions
-  const adminLogin = (
+  // Verify server-side admin session token when authenticated so "Logout from all other devices" invalidates stale sessions
+  useEffect(() => {
+    if (!isAdminAuthenticated) return;
+    const token =
+      sessionStorage.getItem('redmode_admin_token') ||
+      localStorage.getItem('redmode_admin_token') ||
+      '';
+    fetch('/api/admin/verify-session', {
+      method: 'GET',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: 'include',
+    })
+      .then((r) => {
+        if (r.status === 401) {
+          setIsAdminAuthenticated(false);
+          sessionStorage.removeItem('redmode_admin_auth');
+          sessionStorage.removeItem('redmode_admin_token');
+          localStorage.removeItem('redmode_admin_trusted');
+          localStorage.removeItem('redmode_admin_token');
+        }
+      })
+      .catch(() => {});
+  }, [isAdminAuthenticated]);
+
+  // Admin Authentication Actions (Server-Side Verified Session Token)
+  const adminLogin = async (
     usernameInput: string,
     passwordInput: string,
     saveDevice: boolean,
     trustDevice: boolean
-  ): { success: boolean; message: string } => {
-    const validUsername = settings.adminUsername || 'admin';
-    const validPassword = settings.adminPassword || 'RedMode@100';
+  ): Promise<{ success: boolean; message: string }> => {
+    try {
+      const res = await fetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          username: usernameInput,
+          password: passwordInput,
+          trustDevice,
+          staffUsers: adminUsers.filter((u) => u.role !== 'Super Admin'),
+        }),
+      });
+      const data = await res.json().catch(() => null);
 
-    const normalizedUser = usernameInput.trim().toLowerCase();
-    const cleanDigits = usernameInput.replace(/\D/g, '');
-    const superAdminUser =
-      adminUsers.find((u) => u.role === 'Super Admin') || INITIAL_ADMIN_USERS[0];
-    const superCleanMobile = (superAdminUser?.mobile || '+91 73027 97464').replace(/\D/g, '');
-    const isSuperPhoneMatch =
-      cleanDigits.length >= 10 &&
-      (superCleanMobile.slice(-10) === cleanDigits.slice(-10) ||
-        cleanDigits.slice(-10) === '7302797464');
+      if (!res.ok || !data?.success) {
+        return {
+          success: false,
+          message: data?.message || 'Invalid credentials. Please enter your correct mobile number and password.',
+        };
+      }
 
-    const isSuperUserMatch =
-      normalizedUser === validUsername.toLowerCase() ||
-      normalizedUser === 'admin' ||
-      normalizedUser === 'myredmode@gmail.com' ||
-      normalizedUser === 'admin@redmode.in' ||
-      isSuperPhoneMatch ||
-      normalizedUser === (settings.supportEmail || 'myredmode@gmail.com').toLowerCase();
+      if (data.token) {
+        sessionStorage.setItem('redmode_admin_token', data.token);
+        if (trustDevice) {
+          localStorage.setItem('redmode_admin_token', data.token);
+        } else {
+          localStorage.removeItem('redmode_admin_token');
+        }
+      }
 
-    const trimmedPass = passwordInput.trim();
-    const isSuperPassMatch =
-      trimmedPass === validPassword ||
-      trimmedPass === 'RedMode@100' ||
-      trimmedPass.toLowerCase() === 'redmode@100' ||
-      trimmedPass.toLowerCase() === (validPassword || '').toLowerCase();
+      const authenticatedUser: AdminUser = data.user || {
+        ...(adminUsers.find((u) => u.role === 'Super Admin') || INITIAL_ADMIN_USERS[0]),
+        lastLogin: new Date().toISOString(),
+      };
 
-    // 1. Check Super Admin credentials
-    if (isSuperUserMatch && isSuperPassMatch) {
-      const updatedSuper = { ...superAdminUser, lastLogin: new Date().toISOString() };
-      setCurrentAdminUser(updatedSuper);
+      setCurrentAdminUser(authenticatedUser);
       try {
-        localStorage.setItem('redmode_current_admin_user', JSON.stringify(updatedSuper));
+        localStorage.setItem('redmode_current_admin_user', JSON.stringify(authenticatedUser));
       } catch (e) {}
+
+      if (authenticatedUser.role !== 'Super Admin') {
+        const updatedList = adminUsers.map((u) => (u.id === authenticatedUser.id ? authenticatedUser : u));
+        setAdminUsers(updatedList);
+        try {
+          localStorage.setItem('redmode_admin_users', JSON.stringify(updatedList));
+        } catch (e) {}
+      }
 
       setIsAdminAuthenticated(true);
       sessionStorage.setItem('redmode_admin_auth', 'true');
@@ -5472,81 +5750,76 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         localStorage.removeItem('redmode_admin_trusted');
       }
 
+      // Never store plaintext password in localStorage
       if (saveDevice) {
-        localStorage.setItem(
-          'redmode_admin_credentials',
-          JSON.stringify({ username: usernameInput, password: passwordInput, saved: true })
-        );
-        setAdminSavedCredentials({ username: usernameInput, password: passwordInput, saved: true });
+        const safeCreds = { username: usernameInput, saved: true };
+        localStorage.setItem('redmode_admin_credentials', JSON.stringify(safeCreds));
+        setAdminSavedCredentials(safeCreds);
       } else {
         localStorage.removeItem('redmode_admin_credentials');
         setAdminSavedCredentials({ username: '', saved: false });
       }
 
-      return { success: true, message: 'Super Admin authenticated successfully' };
+      return {
+        success: true,
+        message: data.message || 'Admin authenticated successfully',
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: 'Unable to reach authentication server. Please check your connection and try again.',
+      };
     }
-
-    // 2. Check Staff Admin credentials
-    const staffMatch = adminUsers.find(
-      (u) =>
-        u.role !== 'Super Admin' &&
-        (u.email.toLowerCase() === normalizedUser ||
-          (u.mobile && cleanDigits.length >= 10 && u.mobile.replace(/\D/g, '').slice(-10) === cleanDigits.slice(-10)) ||
-          (u.mobile && u.mobile.replace(/\D/g, '') === cleanDigits))
-    );
-
-    if (staffMatch) {
-      const validStaffPass = staffMatch.password || 'Staff@2026';
-      if (passwordInput === validStaffPass) {
-        if (staffMatch.status === 'disabled') {
-          return {
-            success: false,
-            message: 'Your staff account has been deactivated. Please contact Super Admin.',
-          };
-        }
-
-        const updatedStaff = { ...staffMatch, lastLogin: new Date().toISOString() };
-        const updatedList = adminUsers.map((u) => (u.id === staffMatch.id ? updatedStaff : u));
-        setAdminUsers(updatedList);
-        try {
-          localStorage.setItem('redmode_admin_users', JSON.stringify(updatedList));
-        } catch (e) {}
-
-        setCurrentAdminUser(updatedStaff);
-        try {
-          localStorage.setItem('redmode_current_admin_user', JSON.stringify(updatedStaff));
-        } catch (e) {}
-
-        setIsAdminAuthenticated(true);
-        sessionStorage.setItem('redmode_admin_auth', 'true');
-
-        if (trustDevice) {
-          localStorage.setItem('redmode_admin_trusted', 'true');
-        }
-
-        return {
-          success: true,
-          message: `Logged in as ${updatedStaff.name} (${updatedStaff.role})`,
-        };
-      }
-    }
-
-    return {
-      success: false,
-      message: 'Invalid credentials. Please enter your correct mobile number and password.',
-    };
   };
 
-  const adminGoogleLogin = (email?: string) => {
-    setIsAdminAuthenticated(true);
-    sessionStorage.setItem('redmode_admin_auth', 'true');
-    localStorage.setItem('redmode_admin_trusted', 'true');
+  const adminGoogleLogin = async (email?: string, idToken?: string) => {
+    try {
+      const res = await fetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          googleEmail: email,
+          googleIdToken: idToken,
+          trustDevice: true,
+          staffUsers: adminUsers.filter((u) => u.role !== 'Super Admin'),
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success) {
+        if (data.token) {
+          sessionStorage.setItem('redmode_admin_token', data.token);
+          localStorage.setItem('redmode_admin_token', data.token);
+        }
+        if (data.user) {
+          setCurrentAdminUser(data.user);
+          localStorage.setItem('redmode_current_admin_user', JSON.stringify(data.user));
+        }
+        setIsAdminAuthenticated(true);
+        sessionStorage.setItem('redmode_admin_auth', 'true');
+        localStorage.setItem('redmode_admin_trusted', 'true');
+      }
+    } catch (err) {
+      console.error('Admin Google session exchange failed:', err);
+    }
   };
 
   const adminLogout = () => {
+    const token =
+      sessionStorage.getItem('redmode_admin_token') ||
+      localStorage.getItem('redmode_admin_token') ||
+      '';
+    fetch('/api/admin/logout', {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: 'include',
+    }).catch(() => {});
+
     setIsAdminAuthenticated(false);
     sessionStorage.removeItem('redmode_admin_auth');
+    sessionStorage.removeItem('redmode_admin_token');
     localStorage.removeItem('redmode_admin_trusted');
+    localStorage.removeItem('redmode_admin_token');
     localStorage.removeItem('redmode_current_admin_user');
     const superAdmin =
       adminUsers.find((u) => u.role === 'Super Admin') || INITIAL_ADMIN_USERS[0];
@@ -5554,14 +5827,17 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setActiveView('home');
   };
 
-  const updateAdminPassword = (newPassword: string) => {
+  const updateAdminPassword = (_newPassword: string) => {
+    // Password is now stored and verified exclusively on the backend (/api/admin/change-password).
+    // Strip any legacy plaintext password from localStorage settings or saved credentials.
     setSettings((prev) => {
-      const updated = { ...prev, adminPassword: newPassword };
+      const updated = { ...prev };
+      delete (updated as any).adminPassword;
       localStorage.setItem('redmode_settings', JSON.stringify(updated));
       return updated;
     });
     setAdminSavedCredentials((prev) => {
-      const updated = { ...prev, password: newPassword };
+      const updated = { username: prev.username, saved: prev.saved };
       localStorage.setItem('redmode_admin_credentials', JSON.stringify(updated));
       return updated;
     });

@@ -1,442 +1,437 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { X, ArrowRight, ShieldCheck, CheckCircle2, Smartphone, RefreshCw, AlertCircle } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
-import { auth } from '../firebase';
-import { RecaptchaVerifier, signInWithPhoneNumber, ConfirmationResult } from 'firebase/auth';
-import { X, ShieldCheck, Phone, CheckCircle2, UserCheck, ArrowRight, RefreshCw, AlertCircle, Package, MapPin, Smartphone } from 'lucide-react';
 
-interface LoginModalProps {
-  isOpen?: boolean;
-  onClose?: () => void;
-}
+export const LoginModal: React.FC = () => {
+  const {
+    isLoginOpen,
+    setIsLoginOpen,
+    userProfile,
+    loginUser,
+    logoutUser,
+    setActiveView,
+    sendCustomerOtp,
+    verifyCustomerOtp,
+  } = useStore();
 
-export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
-  const { userProfile, sendCustomerOtp, verifyCustomerOtp, loginUser, logoutUser, isLoginOpen, setIsLoginOpen, orders, setActiveView } = useStore();
-  const [mobileNumber, setMobileNumber] = useState('');
-  const [saveForThisDevice, setSaveForThisDevice] = useState(true);
-  const [otpSent, setOtpSent] = useState(false);
-  const [otpCode, setOtpCode] = useState('');
-  const [isSending, setIsSending] = useState(false);
-  const [isVerifying, setIsVerifying] = useState(false);
+  const [step, setStep] = useState<'mobile' | 'otp'>('mobile');
+  const [mobile, setMobile] = useState(userProfile.mobile || '');
+  const [name, setName] = useState(userProfile.name || '');
+  const [otpDigits, setOtpDigits] = useState<string[]>(['', '', '', '', '', '']);
+  const [saveForThisDevice, setSaveForThisDevice] = useState<boolean>(
+    userProfile.savedForThisDevice !== undefined ? userProfile.savedForThisDevice : true
+  );
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
-  const [instantFallbackOtp, setInstantFallbackOtp] = useState<string | null>(null);
-  const [confirmationResult, setConfirmationResult] = useState<ConfirmationResult | null>(null);
-  const recaptchaVerifierRef = useRef<RecaptchaVerifier | null>(null);
+  const [resendTimer, setResendTimer] = useState<number>(0);
+  const [isSendingOtp, setIsSendingOtp] = useState<boolean>(false);
+  const [isVerifyingOtp, setIsVerifyingOtp] = useState<boolean>(false);
 
-  const show = isOpen !== undefined ? isOpen : isLoginOpen;
-  const handleClose = () => {
-    setErrorMessage(null);
-    setInfoMessage(null);
-    if (onClose) {
-      onClose();
-    } else {
-      setIsLoginOpen(false);
+  const otpInputRefs = useRef<(HTMLInputElement | null)[]>([]);
+
+  useEffect(() => {
+    if (isLoginOpen) {
+      setStep('mobile');
+      setOtpDigits(['', '', '', '', '', '']);
+      setErrorMessage(null);
+      setInfoMessage(null);
+      if (userProfile.mobile) setMobile(userProfile.mobile);
+      if (userProfile.name) setName(userProfile.name);
     }
-  };
+  }, [isLoginOpen, userProfile.mobile, userProfile.name]);
 
-  if (!show) return null;
+  useEffect(() => {
+    if (resendTimer <= 0) return;
+    const interval = setInterval(() => {
+      setResendTimer((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [resendTimer]);
 
-  const handleSendOtp = async (e: React.FormEvent) => {
+  if (!isLoginOpen) return null;
+
+  const cleanMobile = mobile.replace(/\D/g, '').slice(-10);
+
+  const handleRequestOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
     setInfoMessage(null);
 
-    const clean = mobileNumber.replace(/\D/g, '');
-    if (clean.length !== 10) {
-      setErrorMessage('Please enter a valid 10-digit mobile number.');
+    if (cleanMobile.length !== 10 || !/^[6-9]\d{9}$/.test(cleanMobile)) {
+      setErrorMessage('Please enter a valid 10-digit Indian mobile number.');
       return;
     }
 
-    setIsSending(true);
+    setIsSendingOtp(true);
     try {
-      // Trigger Google Firebase Phone Auth (Sends official Google SMS without TRAI DLT registration)
-      try {
-        if (!recaptchaVerifierRef.current) {
-          recaptchaVerifierRef.current = new RecaptchaVerifier(auth, 'customer-firebase-recaptcha', {
-            size: 'invisible',
-            callback: () => {},
-          });
-        }
-        signInWithPhoneNumber(auth, `+91${clean}`, recaptchaVerifierRef.current)
-          .then((confirmation) => {
-            setConfirmationResult(confirmation);
-          })
-          .catch(() => {});
-      } catch {}
-
-      const res = await sendCustomerOtp(clean);
-      if (res.success) {
-        setOtpSent(true);
-        setInfoMessage(res.message);
-        if (res.fallbackOtp) {
-          setInstantFallbackOtp(res.fallbackOtp);
-        } else {
-          setInstantFallbackOtp(null);
-        }
-      } else {
-        setErrorMessage(res.message);
+      const result = await sendCustomerOtp(cleanMobile);
+      if (!result.success) {
+        setErrorMessage(result.message);
+        setIsSendingOtp(false);
+        return;
       }
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Failed to send OTP. Please try again.');
+
+      setInfoMessage(result.message);
+      setStep('otp');
+      setResendTimer(30);
+      setTimeout(() => {
+        otpInputRefs.current[0]?.focus();
+      }, 100);
     } finally {
-      setIsSending(false);
+      setIsSendingOtp(false);
     }
   };
 
-  const handleVerifyOtp = async (e: React.FormEvent) => {
+  const handleOtpChange = (index: number, value: string) => {
+    const digit = value.replace(/\D/g, '').slice(-1);
+    const updated = [...otpDigits];
+    updated[index] = digit;
+    setOtpDigits(updated);
+    setErrorMessage(null);
+
+    if (digit && index < 5) {
+      otpInputRefs.current[index + 1]?.focus();
+    }
+  };
+
+  const handleOtpKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Backspace' && !otpDigits[index] && index > 0) {
+      otpInputRefs.current[index - 1]?.focus();
+    }
+  };
+
+  const handleOtpPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
+    if (pasted.length > 0) {
+      e.preventDefault();
+      const updated = ['', '', '', '', '', ''];
+      for (let i = 0; i < pasted.length; i++) {
+        updated[i] = pasted[i];
+      }
+      setOtpDigits(updated);
+      const focusIdx = Math.min(pasted.length, 5);
+      otpInputRefs.current[focusIdx]?.focus();
+    }
+  };
+
+  const handleResendOtp = async () => {
+    if (resendTimer > 0 || isSendingOtp) return;
+    setErrorMessage(null);
+    setIsSendingOtp(true);
+    try {
+      const result = await sendCustomerOtp(cleanMobile);
+      if (result.success) {
+        setOtpDigits(['', '', '', '', '', '']);
+        setInfoMessage(`A fresh 6-digit OTP has been sent to +91 ${cleanMobile}`);
+        setResendTimer(30);
+        otpInputRefs.current[0]?.focus();
+      } else {
+        setErrorMessage(result.message);
+      }
+    } finally {
+      setIsSendingOtp(false);
+    }
+  };
+
+  const handleVerifyOtpAndComplete = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
 
-    if (!otpCode.trim() || otpCode.trim().length < 6) {
-      setErrorMessage('Please enter the 6-digit verification code.');
+    const enteredOtp = otpDigits.join('');
+    if (enteredOtp.length !== 6) {
+      setErrorMessage('Please enter the complete 6-digit OTP sent to your mobile.');
       return;
     }
 
-    setIsVerifying(true);
-    const clean = mobileNumber.replace(/\D/g, '');
-
-    // 1. Check if OTP matches Google Firebase SMS OTP
-    if (confirmationResult) {
-      try {
-        await confirmationResult.confirm(otpCode.trim());
-        loginUser(clean);
-        setIsVerifying(false);
-        handleClose();
+    setIsVerifyingOtp(true);
+    try {
+      const verification = await verifyCustomerOtp(cleanMobile, enteredOtp, saveForThisDevice);
+      if (!verification.success) {
+        setErrorMessage(verification.message);
         return;
-      } catch {}
-    }
-
-    // 2. Verify with 2Factor / WhatsApp / Instant OTP
-    const res = verifyCustomerOtp(clean, otpCode.trim(), saveForThisDevice);
-
-    if (res.success) {
-      setIsVerifying(false);
-      handleClose();
-    } else {
-      setIsVerifying(false);
-      setErrorMessage(res.message);
-    }
-  };
-
-  const handleResend = async () => {
-    setErrorMessage(null);
-    const clean = mobileNumber.replace(/\D/g, '');
-    const res = await sendCustomerOtp(clean);
-    if (res.success) {
-      setInfoMessage(res.message || 'New OTP sent successfully.');
-      if (res.fallbackOtp) {
-        setInstantFallbackOtp(res.fallbackOtp);
       }
-    } else {
-      setErrorMessage(res.message);
+
+      if (name.trim()) {
+        loginUser({
+          name: name.trim(),
+          mobile: cleanMobile,
+          email: userProfile.email || '',
+          savedForThisDevice: saveForThisDevice,
+        });
+      }
+
+      setIsLoginOpen(false);
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Verification failed. Please check the code and try again.');
+    } finally {
+      setIsVerifyingOtp(false);
     }
   };
 
   return (
-    <div
-      onClick={handleClose}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-overlay"
-    >
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div
-        onClick={(e) => e.stopPropagation()}
-        className="relative w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden border border-zinc-200 animate-modal-pop"
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between p-5 border-b border-zinc-100 bg-zinc-50/70">
-          <div>
-            <h3 className="font-display text-lg font-bold text-zinc-900">
-              {userProfile.isLoggedIn ? 'Verified Customer Account' : 'Customer Mobile Sign In'}
-            </h3>
-            <p className="text-xs text-zinc-500 mt-0.5">
-              {userProfile.isLoggedIn
-                ? 'Your authenticated phone number is connected to orders.'
-                : 'Enter your 10-digit mobile number for instant OTP verification.'}
-            </p>
-          </div>
+        className="fixed inset-0 bg-black/60 backdrop-blur-xs transition-opacity"
+        onClick={() => setIsLoginOpen(false)}
+      />
+
+      <div className="relative w-full max-w-md bg-white border border-zinc-200 shadow-2xl overflow-hidden z-10 animate-in fade-in zoom-in-95 duration-200">
+        {/* Top Accent Banner */}
+        <div className="bg-[#121212] text-white p-6 relative">
           <button
-            onClick={handleClose}
-            className="p-1.5 text-zinc-400 hover:text-zinc-800 rounded-full hover:bg-zinc-200/50 cursor-pointer"
+            onClick={() => setIsLoginOpen(false)}
+            className="absolute top-4 right-4 p-2 text-zinc-400 hover:text-white transition cursor-pointer"
+            aria-label="Close"
           >
             <X className="w-5 h-5" />
           </button>
+
+          <span className="text-[10px] font-bold tracking-[0.25em] uppercase text-rose-400 block mb-1">
+            REDMODE Official Account
+          </span>
+          <h2 className="font-display text-2xl font-bold tracking-wide">
+            {userProfile.isLoggedIn
+              ? `Welcome, ${userProfile.name || `+91 ${userProfile.mobile}`}`
+              : step === 'mobile'
+              ? 'Mobile OTP Sign In'
+              : 'Verify 6-Digit OTP'}
+          </h2>
+          <p className="text-xs text-zinc-300 mt-1">
+            {userProfile.isLoggedIn
+              ? 'Your mobile number is verified and ready for instant shopping & order tracking.'
+              : step === 'mobile'
+              ? 'No password or username needed. Sign in securely using your 10-digit mobile number.'
+              : `Enter the 6-digit verification code sent to +91 ${cleanMobile}`}
+          </p>
         </div>
 
-        <div className="p-6">
-          {userProfile.isLoggedIn ? (
-            /* Logged in state */
-            <div className="space-y-4">
-              <div className="flex items-center gap-3 p-4 bg-zinc-50 rounded-xl border border-zinc-200">
-                <div className="w-12 h-12 rounded-full bg-[#121212] text-white flex items-center justify-center font-bold text-lg shadow-sm shrink-0">
-                  {userProfile.name ? userProfile.name.charAt(0).toUpperCase() : 'C'}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <h4 className="font-semibold text-zinc-900 truncate">{userProfile.name || 'REDMODE Customer'}</h4>
-                    <span className="text-[10px] font-mono bg-zinc-200/80 text-zinc-700 px-1.5 py-0.5 rounded">
-                      {userProfile.customerId || `CUST-${(userProfile.mobileOrEmail || '').slice(-6)}`}
-                    </span>
-                  </div>
-                  <p className="text-xs text-zinc-600 font-mono mt-0.5">+91 {userProfile.mobileOrEmail}</p>
-                  <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> Account Active
-                    </span>
-                    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-zinc-600 bg-zinc-100 px-2 py-0.5 rounded-full">
-                      <Smartphone className="w-3 h-3 text-zinc-500" />
-                      {userProfile.savedForThisDevice !== false ? 'Saved on Device' : 'Session Only'}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Customer Account Benefits Card */}
-              <div className="p-3.5 bg-zinc-50/70 rounded-xl border border-zinc-200/80 space-y-2 text-xs">
-                <div className="flex items-center justify-between text-zinc-700">
-                  <span className="flex items-center gap-1.5 font-medium">
-                    <Package className="w-4 h-4 text-zinc-600" /> Total Orders:
-                  </span>
-                  <span className="font-bold text-zinc-900 font-mono">
-                    {orders.filter((o) => {
-                      const custM = (userProfile.mobileOrEmail || '').replace(/\D/g, '').slice(-10);
-                      const ordM = (o.customer?.mobile || o.customer?.phone || '').replace(/\D/g, '').slice(-10);
-                      return custM && ordM === custM;
-                    }).length} Orders
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-zinc-700">
-                  <span className="flex items-center gap-1.5 font-medium">
-                    <MapPin className="w-4 h-4 text-zinc-600" /> Saved Addresses:
-                  </span>
-                  <span className="font-semibold text-zinc-800">
-                    {userProfile.savedAddresses && userProfile.savedAddresses.length > 0
-                      ? `${userProfile.savedAddresses.length} Saved`
-                      : 'Auto-saved on checkout'}
-                  </span>
-                </div>
-              </div>
-
-              {/* Actions */}
-              <div className="pt-2 flex flex-col gap-2">
-                <div className="flex gap-2.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      handleClose();
-                      setActiveView('track-order');
-                    }}
-                    className="flex-1 py-2.5 px-3 rounded-lg border border-zinc-300 text-zinc-800 text-xs font-semibold hover:bg-zinc-100 transition cursor-pointer flex items-center justify-center gap-1.5"
-                  >
-                    <Package className="w-4 h-4 text-zinc-600" />
-                    <span>My Orders & Tracking</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleClose}
-                    className="flex-1 py-2.5 px-3 rounded-lg bg-[#121212] text-white text-xs font-semibold hover:bg-zinc-800 transition cursor-pointer"
-                  >
-                    Continue Shopping
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    logoutUser();
-                    setOtpSent(false);
-                    setMobileNumber('');
-                    setOtpCode('');
-                  }}
-                  className="w-full py-1.5 text-center text-xs font-semibold text-rose-600 hover:text-rose-700 hover:underline cursor-pointer"
-                >
-                  Sign Out from this Device
-                </button>
+        {userProfile.isLoggedIn ? (
+          <div className="p-6 space-y-5">
+            <div className="p-4 bg-emerald-50 border border-emerald-200 flex items-center gap-3">
+              <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0" />
+              <div className="text-xs text-emerald-900">
+                <p className="font-bold">Verified Mobile Account</p>
+                <p className="text-emerald-700 mt-0.5">
+                  +91 {userProfile.mobile}{' '}
+                  {userProfile.savedForThisDevice ? '• Saved on this device' : '• Current session only'}
+                </p>
               </div>
             </div>
-          ) : !otpSent ? (
-            /* Mobile Phone Input Step */
-            <form onSubmit={handleSendOtp} className="space-y-4">
-              {errorMessage && (
-                <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700 flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>{errorMessage}</span>
+
+            <div className="space-y-2 text-xs text-zinc-600 border border-zinc-200 p-4 bg-zinc-50">
+              <div className="flex justify-between">
+                <span className="text-zinc-400 uppercase font-semibold">Mobile Number:</span>
+                <span className="font-bold text-zinc-900">+91 {userProfile.mobile}</span>
+              </div>
+              {userProfile.name && (
+                <div className="flex justify-between">
+                  <span className="text-zinc-400 uppercase font-semibold">Customer Name:</span>
+                  <span className="font-semibold text-zinc-900">{userProfile.name}</span>
                 </div>
               )}
-
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-700 mb-1.5">
-                  Mobile Number <span className="text-rose-600">*</span>
-                </label>
-                <div className="relative flex items-center">
-                  <span className="absolute left-3.5 text-sm font-semibold text-zinc-500 select-none">
-                    +91
+              {userProfile.address?.city && (
+                <div className="flex justify-between">
+                  <span className="text-zinc-400 uppercase font-semibold">Saved City:</span>
+                  <span className="font-semibold text-zinc-900">
+                    {userProfile.address.city}, {userProfile.address.state} - {userProfile.address.pincode}
                   </span>
-                  <input
-                    type="tel"
-                    required
-                    maxLength={10}
-                    autoFocus
-                    value={mobileNumber}
-                    onChange={(e) => setMobileNumber(e.target.value.replace(/\D/g, ''))}
-                    placeholder="98765 43210"
-                    className="w-full pl-13 pr-10 py-2.5 border border-zinc-300 rounded-lg text-sm text-zinc-900 tracking-wider focus:outline-none focus:ring-2 focus:ring-[#121212]"
-                  />
-                  <Phone className="w-4 h-4 text-zinc-400 absolute right-3.5" />
                 </div>
-                <p className="text-[11px] text-zinc-500 mt-1.5">
-                  A 6-digit OTP will be sent to your mobile for instant secure login.
-                </p>
-              </div>
+              )}
+            </div>
 
-              {/* Save Login for this Device */}
-              <div className="pt-0.5">
-                <label className="flex items-center gap-2.5 text-xs text-zinc-700 hover:text-zinc-900 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={saveForThisDevice}
-                    onChange={(e) => setSaveForThisDevice(e.target.checked)}
-                    className="w-4 h-4 rounded border-zinc-300 text-[#121212] accent-[#121212] focus:ring-[#121212] cursor-pointer"
-                  />
-                  <span className="font-medium text-zinc-800">Save login for this device</span>
-                </label>
-                <p className="text-[11px] text-zinc-400 pl-6.5 mt-0.5">
-                  Is device par baar-baar OTP verify nahi karna padega (Persistent Login).
-                </p>
-              </div>
-
+            <div className="grid grid-cols-2 gap-3 pt-1">
               <button
-                type="submit"
-                disabled={isSending}
-                className="w-full py-3 px-4 rounded-lg bg-[#121212] text-white text-sm font-semibold hover:bg-zinc-800 transition shadow-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                onClick={() => {
+                  setIsLoginOpen(false);
+                  setActiveView('account');
+                }}
+                className="py-3 bg-zinc-900 text-white text-xs font-bold tracking-widest uppercase hover:bg-zinc-800 transition cursor-pointer"
               >
-                {isSending ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Sending Code...</span>
-                  </>
-                ) : (
-                  <>
-                    <span>Send Verification OTP</span>
-                    <ArrowRight className="w-4 h-4" />
-                  </>
-                )}
+                My Orders & Profile
               </button>
-
-              <div className="text-[11px] text-zinc-500 text-center leading-relaxed pt-2">
-                By verifying your phone number, you agree to REDMODE's Terms of Service & Privacy Policy.
+              <button
+                onClick={() => {
+                  logoutUser();
+                  setStep('mobile');
+                  setMobile('');
+                }}
+                className="py-3 border border-rose-200 text-rose-700 text-xs font-bold tracking-widest uppercase hover:bg-rose-50 transition cursor-pointer"
+              >
+                Logout Device
+              </button>
+            </div>
+          </div>
+        ) : step === 'mobile' ? (
+          <form onSubmit={handleRequestOtp} className="p-6 space-y-4">
+            {errorMessage && (
+              <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{errorMessage}</span>
               </div>
-            </form>
-          ) : (
-            /* OTP Verification Step */
-            <form onSubmit={handleVerifyOtp} className="space-y-4">
-              {errorMessage && (
-                <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700 flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>{errorMessage}</span>
-                </div>
-              )}
+            )}
 
-              <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-xs text-emerald-900">
-                <div className="font-semibold flex items-center justify-between gap-1.5">
-                  <span className="flex items-center gap-1.5">
-                    <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                    <span>OTP Sent to +91 {mobileNumber}</span>
-                  </span>
-                  {instantFallbackOtp && (
-                    <button
-                      type="button"
-                      onClick={() => setOtpCode(instantFallbackOtp)}
-                      className="px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-800 text-white font-mono text-[11px] font-bold transition cursor-pointer"
-                    >
-                      Use OTP: {instantFallbackOtp}
-                    </button>
-                  )}
-                </div>
-                <p className="mt-1 text-[11px] text-emerald-800">
-                  {instantFallbackOtp
-                    ? `Instant Verification Code: ${instantFallbackOtp} (Click above or enter below to sign in)`
-                    : (infoMessage || 'Please enter the 6-digit verification code sent to your mobile.')}
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-700 mb-1.5">
-                  Enter 6-Digit OTP <span className="text-rose-600">*</span>
-                </label>
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-zinc-700 mb-1.5">
+                Mobile Number (WhatsApp / SMS) <span className="text-rose-600">*</span>
+              </label>
+              <div className="flex">
+                <span className="inline-flex items-center px-3.5 bg-zinc-100 border border-r-0 border-zinc-300 text-xs font-bold text-zinc-700">
+                  +91
+                </span>
                 <input
-                  type="text"
-                  maxLength={6}
+                  type="tel"
                   required
+                  maxLength={10}
+                  value={mobile}
+                  onChange={(e) => {
+                    setMobile(e.target.value.replace(/\D/g, ''));
+                    setErrorMessage(null);
+                  }}
+                  placeholder="Enter 10-digit mobile number"
+                  className="w-full px-3.5 py-3 border border-zinc-300 text-sm font-medium focus:outline-none focus:border-zinc-900"
                   autoFocus
-                  value={otpCode}
-                  onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
-                  placeholder="• • • • • •"
-                  className="w-full px-3.5 py-3 border border-zinc-300 rounded-lg text-center tracking-[0.4em] font-mono text-xl text-zinc-900 focus:outline-none focus:ring-2 focus:ring-[#121212]"
                 />
               </div>
+            </div>
 
-              {/* Save Login for this Device in OTP Screen */}
-              <div>
-                <label className="flex items-center gap-2.5 text-xs text-zinc-700 hover:text-zinc-900 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={saveForThisDevice}
-                    onChange={(e) => setSaveForThisDevice(e.target.checked)}
-                    className="w-4 h-4 rounded border-zinc-300 text-[#121212] accent-[#121212] focus:ring-[#121212] cursor-pointer"
-                  />
-                  <span className="font-medium text-zinc-800">Save login for this device</span>
-                </label>
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-zinc-700 mb-1.5">
+                Your Name <span className="text-zinc-400 font-normal">(Optional)</span>
+              </label>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. Priya Sharma"
+                className="w-full px-3.5 py-2.5 border border-zinc-300 text-sm focus:outline-none focus:border-zinc-900"
+              />
+            </div>
+
+            <label className="flex items-start gap-2.5 p-3 bg-zinc-50 border border-zinc-200 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={saveForThisDevice}
+                onChange={(e) => setSaveForThisDevice(e.target.checked)}
+                className="mt-0.5 w-4 h-4 accent-zinc-900 rounded cursor-pointer"
+              />
+              <div className="text-xs">
+                <span className="font-bold text-zinc-900 block">Save login for this device</span>
+                <span className="text-zinc-500 text-[11px]">
+                  Stay signed in on this browser so you don&apos;t have to verify OTP next time.
+                </span>
               </div>
+            </label>
 
-              <div className="flex items-center justify-between text-xs pt-1">
+            <div className="bg-zinc-50 p-3 border border-zinc-200 flex items-start gap-2.5 text-xs text-zinc-600">
+              <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
+              <span>
+                You will receive a 6-digit one-time verification code (OTP) to authenticate your account and view all orders.
+              </span>
+            </div>
+
+            <button
+              type="submit"
+              disabled={isSendingOtp}
+              className="w-full py-3.5 bg-[#121212] hover:bg-zinc-800 disabled:opacity-60 text-white text-xs font-bold tracking-widest uppercase transition flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <span>{isSendingOtp ? 'Sending OTP...' : 'Send 6-Digit OTP'}</span>
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleVerifyOtpAndComplete} className="p-6 space-y-5">
+            {errorMessage && (
+              <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{errorMessage}</span>
+              </div>
+            )}
+
+            {infoMessage && !errorMessage && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-medium flex items-center gap-2">
+                <Smartphone className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{infoMessage}</span>
+              </div>
+            )}
+
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-bold uppercase tracking-wider text-zinc-700">
+                  Enter 6-Digit OTP
+                </label>
                 <button
                   type="button"
                   onClick={() => {
-                    setOtpSent(false);
-                    setOtpCode('');
+                    setStep('mobile');
                     setErrorMessage(null);
                   }}
-                  className="text-zinc-500 hover:text-zinc-800 hover:underline cursor-pointer"
+                  className="text-[11px] font-bold text-rose-600 hover:underline cursor-pointer"
                 >
-                  Change Mobile
-                </button>
-                <button
-                  type="button"
-                  onClick={handleResend}
-                  className="text-rose-700 font-semibold hover:underline cursor-pointer"
-                >
-                  Resend OTP
+                  Change Number (+91 {cleanMobile})
                 </button>
               </div>
 
-              <button
-                type="submit"
-                disabled={isVerifying}
-                className="w-full py-3 px-4 rounded-lg bg-[#121212] text-white text-sm font-semibold hover:bg-zinc-800 transition shadow-sm disabled:opacity-70 flex items-center justify-center gap-2 cursor-pointer"
-              >
-                {isVerifying ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Verifying Code...</span>
-                  </>
-                ) : (
-                  <>
-                    <UserCheck className="w-4 h-4" />
-                    <span>Verify & Continue</span>
-                  </>
-                )}
-              </button>
+              <div className="grid grid-cols-6 gap-2">
+                {otpDigits.map((digit, idx) => (
+                  <input
+                    key={idx}
+                    ref={(el) => {
+                      otpInputRefs.current[idx] = el;
+                    }}
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={1}
+                    value={digit}
+                    onChange={(e) => handleOtpChange(idx, e.target.value)}
+                    onKeyDown={(e) => handleOtpKeyDown(idx, e)}
+                    onPaste={idx === 0 ? handleOtpPaste : undefined}
+                    className="w-full h-12 text-center text-lg font-bold border border-zinc-300 focus:border-zinc-900 focus:ring-1 focus:ring-zinc-900 focus:outline-none bg-white"
+                  />
+                ))}
+              </div>
+            </div>
 
-              <button
-                type="button"
-                onClick={handleClose}
-                className="w-full text-center text-xs text-zinc-500 hover:text-zinc-800 py-1 cursor-pointer"
-              >
-                Cancel
-              </button>
-            </form>
-          )}
-        </div>
+            <label className="flex items-start gap-2.5 p-3 bg-zinc-50 border border-zinc-200 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={saveForThisDevice}
+                onChange={(e) => setSaveForThisDevice(e.target.checked)}
+                className="mt-0.5 w-4 h-4 accent-zinc-900 rounded cursor-pointer"
+              />
+              <div className="text-xs">
+                <span className="font-bold text-zinc-900 block">Save login for this device</span>
+                <span className="text-zinc-500 text-[11px]">
+                  Keep my account logged in on this phone/computer for 1-click checkout.
+                </span>
+              </div>
+            </label>
+
+            <div className="flex items-center justify-between text-xs pt-1">
+              <span className="text-zinc-500">Didn&apos;t receive the code?</span>
+              {resendTimer > 0 ? (
+                <span className="font-semibold text-zinc-400">Resend OTP in {resendTimer}s</span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleResendOtp}
+                  className="font-bold text-zinc-900 hover:text-rose-600 flex items-center gap-1 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" /> Resend OTP
+                </button>
+              )}
+            </div>
+
+            <button
+              type="submit"
+              disabled={isVerifyingOtp}
+              className="w-full py-3.5 bg-[#121212] hover:bg-zinc-800 disabled:opacity-60 text-white text-xs font-bold tracking-widest uppercase transition flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <span>{isVerifyingOtp ? 'Verifying...' : 'Verify OTP & Sign In'}</span>
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          </form>
+        )}
       </div>
-      <div id="customer-firebase-recaptcha" className="invisible fixed bottom-0 left-0" />
     </div>
   );
 };

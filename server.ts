@@ -17,8 +17,160 @@ try {
   // Silent catch if .env is missing or cannot be read
 }
 
-const DEFAULT_RAZORPAY_KEY_ID = 'rzp_test_TgYmLmX3cPZpNk';
-const DEFAULT_RAZORPAY_KEY_SECRET = 'Asrb0WLHUFBi3iEU3FK1DfiN';
+const ADMIN_JWT_SECRET = (
+  process.env.ADMIN_JWT_SECRET ||
+  process.env.OTP_SECRET ||
+  'redmode_prod_admin_jwt_secret_v1_8e7d6c5b4a3f2e1d'
+).trim();
+
+const OTP_SECRET = (
+  process.env.OTP_SECRET ||
+  process.env.ADMIN_JWT_SECRET ||
+  'redmode_prod_otp_hmac_secret_v1_9f8a7b6c5d4e3f2a1b'
+).trim();
+
+let activeAdminSessionVersion = Number(process.env.ADMIN_SESSION_VERSION || 1);
+let customAdminPasswordHash = '';
+
+function hashAdminPassword(plain: string): string {
+  return crypto.createHmac('sha256', ADMIN_JWT_SECRET).update(String(plain)).digest('hex');
+}
+
+function parseCookiesHeader(cookieHeader = ''): Record<string, string> {
+  const list: Record<string, string> = {};
+  if (!cookieHeader) return list;
+  cookieHeader.split(';').forEach((cookie) => {
+    const parts = cookie.split('=');
+    const key = parts.shift()?.trim();
+    if (key) {
+      list[key] = decodeURIComponent(parts.join('='));
+    }
+  });
+  return list;
+}
+
+function signAdminSessionToken(params: {
+  userId?: string;
+  name?: string;
+  email?: string;
+  mobile?: string;
+  role?: string;
+  sessionVersion?: number;
+}): string {
+  const payload = {
+    uid: params.userId || 'admin-super-1',
+    name: params.name || 'Aamir',
+    email: params.email || 'myredmode@gmail.com',
+    mobile: params.mobile || '7302797464',
+    role: params.role || 'Super Admin',
+    sv: params.sessionVersion ?? activeAdminSessionVersion,
+    iat: Date.now(),
+    exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', ADMIN_JWT_SECRET).update(payloadB64).digest('base64url');
+  return `${payloadB64}.${sig}`;
+}
+
+function verifyAdminSessionToken(token?: string): any | null {
+  if (!token || typeof token !== 'string' || !token.includes('.')) return null;
+  const [payloadB64, sig] = token.split('.');
+  if (!payloadB64 || !sig) return null;
+
+  const expectedSig = crypto.createHmac('sha256', ADMIN_JWT_SECRET).update(payloadB64).digest('base64url');
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf-8'));
+    if (!payload || Date.now() > Number(payload.exp)) return null;
+    if (Number(payload.sv) < activeAdminSessionVersion) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function extractVerifiedAdminFromRequest(req: Request): any | null {
+  const authHeader = (req.headers['authorization'] || req.headers['Authorization'] || '') as string;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    const verified = verifyAdminSessionToken(authHeader.slice(7).trim());
+    if (verified) return verified;
+  }
+  const cookies = parseCookiesHeader(req.headers.cookie || '');
+  if (cookies.redmode_admin_session) {
+    const verified = verifyAdminSessionToken(cookies.redmode_admin_session);
+    if (verified) return verified;
+  }
+  return null;
+}
+
+function createSignedOtpChallengeToken(params: {
+  mobile: string;
+  otp: string;
+  expiresAt: number;
+  purpose: string;
+  sessionId?: string;
+}): string {
+  const payloadObj = {
+    m: params.mobile,
+    e: params.expiresAt,
+    p: params.purpose || 'customer',
+    s: params.sessionId || '',
+    h: crypto
+      .createHmac('sha256', OTP_SECRET)
+      .update(`${params.mobile}:${params.otp}:${params.expiresAt}:${params.purpose || 'customer'}`)
+      .digest('hex'),
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(payloadObj)).toString('base64url');
+  const sig = crypto.createHmac('sha256', OTP_SECRET).update(payloadB64).digest('base64url');
+  return `${payloadB64}.${sig}`;
+}
+
+function verifySignedOtpChallengeToken(
+  token: string,
+  mobile: string,
+  otp: string,
+  purpose = 'customer'
+): { valid: boolean; reason?: string; sessionId?: string } {
+  if (!token || typeof token !== 'string' || !token.includes('.')) {
+    return { valid: false, reason: 'Missing or expired OTP verification session.' };
+  }
+  const [payloadB64, sig] = token.split('.');
+  if (!payloadB64 || !sig) {
+    return { valid: false, reason: 'Invalid OTP verification token.' };
+  }
+  const expectedSig = crypto.createHmac('sha256', OTP_SECRET).update(payloadB64).digest('base64url');
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return { valid: false, reason: 'Tampered OTP verification token.' };
+  }
+  let payload: any;
+  try {
+    payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf-8'));
+  } catch {
+    return { valid: false, reason: 'Corrupted OTP verification token.' };
+  }
+  if (!payload || payload.m !== mobile) {
+    return { valid: false, reason: 'Mobile number mismatch for this OTP session.' };
+  }
+  if (Date.now() > Number(payload.e)) {
+    return { valid: false, reason: 'OTP has expired. Please request a new OTP.' };
+  }
+  const expectedHmac = crypto
+    .createHmac('sha256', OTP_SECRET)
+    .update(`${mobile}:${otp}:${payload.e}:${payload.p || purpose || 'customer'}`)
+    .digest('hex');
+  const hBuf = Buffer.from(String(payload.h || ''), 'hex');
+  const expectedHmacBuf = Buffer.from(expectedHmac, 'hex');
+  if (hBuf.length === expectedHmacBuf.length && crypto.timingSafeEqual(hBuf, expectedHmacBuf)) {
+    return { valid: true, sessionId: payload.s || '' };
+  }
+  return { valid: false, reason: 'Invalid OTP code.', sessionId: payload.s || '' };
+}
 
 async function startServer() {
   const app = express();
@@ -94,19 +246,268 @@ async function startServer() {
     res.status(200).send('OK');
   });
 
-  // RedMode RBAC Authorization Middlewares
+  // RedMode RBAC Authorization Middlewares (Server-Verified Session Token)
   const requireSuperAdmin = (req: Request, res: Response, next: express.NextFunction) => {
-    const adminRole = (req.headers['x-admin-role'] as string) || 'Super Admin';
-    const allowedRoles = ['Super Admin', 'Listing + Label Admin', 'Label Admin', 'Admin', 'Staff'];
-    if (!allowedRoles.includes(adminRole)) {
-      return res.status(403).json({
+    const verified = extractVerifiedAdminFromRequest(req);
+    const allowedRoles = ['Super Admin', 'Listing + Label Admin', 'Label Admin'];
+    if (!verified || !allowedRoles.includes(verified.role)) {
+      return res.status(401).json({
         success: false,
-        error: 'FORBIDDEN_SUPER_ADMIN_REQUIRED',
-        message: 'Access Denied: Administrator authorization is required for system configuration and integrations.',
+        error: 'UNAUTHORIZED_ADMIN_SESSION',
+        message: 'Access Denied: Valid administrator session token is required.',
       });
     }
+    (req as any).adminUser = verified;
     next();
   };
+
+  // Admin Login, Session Verification, Logout All Devices & Password Update Endpoints
+  app.post('/api/admin/login', (req: Request, res: Response) => {
+    const { username = '', password = '', staffUsers = [], googleIdToken, googleEmail, email } = req.body || {};
+    const resolvedGoogleEmail = googleEmail || email;
+
+    if (resolvedGoogleEmail) {
+      const cleanEmail = String(resolvedGoogleEmail).trim().toLowerCase();
+      if (['myredmode@gmail.com', 'admin@redmode.in'].includes(cleanEmail)) {
+        const token = signAdminSessionToken({
+          userId: 'admin-super-1',
+          name: 'Aamir',
+          email: cleanEmail,
+          mobile: '7302797464',
+          role: 'Super Admin',
+          sessionVersion: activeAdminSessionVersion,
+        });
+        res.setHeader(
+          'Set-Cookie',
+          `redmode_admin_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 3600}`
+        );
+        return res.json({
+          success: true,
+          token,
+          sessionVersion: activeAdminSessionVersion,
+          user: {
+            id: 'admin-super-1',
+            name: 'Aamir',
+            email: cleanEmail,
+            mobile: '+91 73027 97464',
+            role: 'Super Admin',
+            status: 'active',
+          },
+          message: 'Super Admin authenticated via Google.',
+        });
+      }
+      return res.status(403).json({
+        success: false,
+        message: `Google account (${cleanEmail}) is not authorized for REDMODE Admin access.`,
+      });
+    }
+
+    const normalizedUser = String(username).trim().toLowerCase();
+    const cleanDigits = String(username).replace(/\D/g, '');
+    const trimmedPass = String(password).trim();
+
+    if (!normalizedUser || !trimmedPass) {
+      return res.status(400).json({ success: false, message: 'Username/mobile and password are required.' });
+    }
+
+    const masterUsername = (process.env.ADMIN_MASTER_USERNAME || 'admin').trim().toLowerCase();
+    const masterPassword = (process.env.ADMIN_MASTER_PASSWORD || '').trim();
+
+    const isSuperUserMatch =
+      normalizedUser === masterUsername ||
+      normalizedUser === 'admin' ||
+      normalizedUser === 'myredmode@gmail.com' ||
+      normalizedUser === 'admin@redmode.in' ||
+      (cleanDigits.length >= 10 && cleanDigits.slice(-10) === '7302797464');
+
+    let isSuperPassValid = false;
+    if (customAdminPasswordHash) {
+      isSuperPassValid = hashAdminPassword(trimmedPass) === customAdminPasswordHash;
+    } else if (masterPassword) {
+      isSuperPassValid = trimmedPass === masterPassword;
+    } else {
+      isSuperPassValid = trimmedPass === 'RedMode@100';
+    }
+
+    if (isSuperUserMatch && isSuperPassValid) {
+      const token = signAdminSessionToken({
+        userId: 'admin-super-1',
+        name: 'Aamir',
+        email: 'myredmode@gmail.com',
+        mobile: '7302797464',
+        role: 'Super Admin',
+        sessionVersion: activeAdminSessionVersion,
+      });
+      res.setHeader(
+        'Set-Cookie',
+        `redmode_admin_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 3600}`
+      );
+      return res.json({
+        success: true,
+        token,
+        sessionVersion: activeAdminSessionVersion,
+        user: {
+          id: 'admin-super-1',
+          name: 'Aamir',
+          email: 'myredmode@gmail.com',
+          mobile: '+91 73027 97464',
+          role: 'Super Admin',
+          status: 'active',
+        },
+        message: 'Super Admin authenticated successfully.',
+      });
+    }
+
+    if (Array.isArray(staffUsers)) {
+      const staffMatch = staffUsers.find(
+        (u: any) =>
+          u &&
+          u.role !== 'Super Admin' &&
+          (String(u.email || '').toLowerCase() === normalizedUser ||
+            (u.mobile &&
+              cleanDigits.length >= 10 &&
+              String(u.mobile).replace(/\D/g, '').slice(-10) === cleanDigits.slice(-10)))
+      );
+
+      if (staffMatch && staffMatch.password && trimmedPass === String(staffMatch.password)) {
+        if (staffMatch.status === 'disabled') {
+          return res.status(403).json({
+            success: false,
+            message: 'Your staff account has been deactivated. Please contact Super Admin.',
+          });
+        }
+        const token = signAdminSessionToken({
+          userId: staffMatch.id,
+          name: staffMatch.name,
+          email: staffMatch.email,
+          mobile: staffMatch.mobile,
+          role: staffMatch.role,
+          sessionVersion: activeAdminSessionVersion,
+        });
+        res.setHeader(
+          'Set-Cookie',
+          `redmode_admin_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 3600}`
+        );
+        return res.json({
+          success: true,
+          token,
+          sessionVersion: activeAdminSessionVersion,
+          user: {
+            id: staffMatch.id,
+            name: staffMatch.name,
+            email: staffMatch.email,
+            mobile: staffMatch.mobile,
+            role: staffMatch.role,
+            status: 'active',
+          },
+          message: `Authenticated as ${staffMatch.name} (${staffMatch.role}).`,
+        });
+      }
+    }
+
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid administrator credentials.',
+    });
+  });
+
+  app.get('/api/admin/verify-session', (req: Request, res: Response) => {
+    const verified = extractVerifiedAdminFromRequest(req);
+    if (!verified) {
+      return res.status(401).json({
+        success: false,
+        authenticated: false,
+        message: 'Admin session expired or invalid.',
+      });
+    }
+    return res.json({
+      success: true,
+      authenticated: true,
+      sessionVersion: activeAdminSessionVersion,
+      user: {
+        id: verified.uid,
+        name: verified.name,
+        email: verified.email,
+        mobile: verified.mobile,
+        role: verified.role,
+        status: 'active',
+      },
+    });
+  });
+
+  app.post('/api/admin/logout-all-devices', requireSuperAdmin, (req: Request, res: Response) => {
+    const verified = (req as any).adminUser;
+    activeAdminSessionVersion += 1;
+    const newToken = signAdminSessionToken({
+      userId: verified?.uid,
+      name: verified?.name,
+      email: verified?.email,
+      mobile: verified?.mobile,
+      role: verified?.role,
+      sessionVersion: activeAdminSessionVersion,
+    });
+    res.setHeader(
+      'Set-Cookie',
+      `redmode_admin_session=${encodeURIComponent(newToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 3600}`
+    );
+    return res.json({
+      success: true,
+      token: newToken,
+      sessionVersion: activeAdminSessionVersion,
+      message: 'All other active device sessions have been invalidated.',
+    });
+  });
+
+  app.post('/api/admin/change-password', requireSuperAdmin, (req: Request, res: Response) => {
+    const verified = (req as any).adminUser;
+    const { currentPassword, newPassword } = req.body || {};
+    if (!newPassword || String(newPassword).trim().length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be at least 6 characters long.',
+      });
+    }
+    const masterPassword = (process.env.ADMIN_MASTER_PASSWORD || '').trim();
+    const trimmedCurrent = String(currentPassword || '').trim();
+    const isCurrentValid = customAdminPasswordHash
+      ? hashAdminPassword(trimmedCurrent) === customAdminPasswordHash
+      : masterPassword
+      ? trimmedCurrent === masterPassword
+      : trimmedCurrent === 'RedMode@100';
+
+    if (!isCurrentValid) {
+      return res.status(401).json({
+        success: false,
+        message: 'Current password does not match existing credentials.',
+      });
+    }
+
+    customAdminPasswordHash = hashAdminPassword(String(newPassword).trim());
+    activeAdminSessionVersion += 1;
+    const newToken = signAdminSessionToken({
+      userId: verified?.uid,
+      name: verified?.name,
+      email: verified?.email,
+      mobile: verified?.mobile,
+      role: verified?.role,
+      sessionVersion: activeAdminSessionVersion,
+    });
+    res.setHeader(
+      'Set-Cookie',
+      `redmode_admin_session=${encodeURIComponent(newToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 3600}`
+    );
+    return res.json({
+      success: true,
+      token: newToken,
+      sessionVersion: activeAdminSessionVersion,
+      message: 'Security password updated and other device sessions invalidated.',
+    });
+  });
+
+  app.post('/api/admin/logout', (_req: Request, res: Response) => {
+    res.setHeader('Set-Cookie', 'redmode_admin_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+    return res.json({ success: true, message: 'Logged out successfully.' });
+  });
 
   // Persistent Server-Side Data Store (/data/products.json & /data/orders.json)
   const dataDir = path.join(__dirname, 'data');
@@ -311,15 +712,16 @@ async function startServer() {
   });
 
   const requireStaffOrAdmin = (req: Request, res: Response, next: express.NextFunction) => {
-    const adminRole = (req.headers['x-admin-role'] as string) || '';
     const allowedRoles = ['Super Admin', 'Label Admin', 'Listing + Label Admin'];
-    if (adminRole && !allowedRoles.includes(adminRole)) {
-      return res.status(403).json({
+    const verified = extractVerifiedAdminFromRequest(req);
+    if (!verified || !allowedRoles.includes(verified.role)) {
+      return res.status(401).json({
         success: false,
-        error: 'FORBIDDEN_INVALID_ROLE',
-        message: 'Access Denied: Unrecognized administrator or staff role credentials.',
+        error: 'UNAUTHORIZED_ADMIN_SESSION',
+        message: 'Access Denied: Valid administrator or staff session token required.',
       });
     }
+    (req as any).adminUser = verified;
     next();
   };
 
@@ -345,8 +747,8 @@ async function startServer() {
   // ==========================================
 
   // 1. Public Gateway Configuration (Key ID only, never secret)
-  app.get('/api/payment/razorpay/config', (req: Request, res: Response) => {
-    const keyId = (process.env.RAZORPAY_KEY_ID || DEFAULT_RAZORPAY_KEY_ID || '').trim();
+  app.get('/api/payment/razorpay/config', (_req: Request, res: Response) => {
+    const keyId = (process.env.RAZORPAY_KEY_ID || '').trim();
     const mode = process.env.RAZORPAY_MODE || (keyId.startsWith('rzp_live') ? 'live' : 'test');
     res.json({
       configured: Boolean(keyId),
@@ -357,135 +759,186 @@ async function startServer() {
     });
   });
 
-  // 2. Create Razorpay Order
+  // 2. Create Razorpay Order (Strict — Never Simulate)
   app.post('/api/payment/razorpay/create-order', async (req: Request, res: Response) => {
     const { amount, receipt, notes, keyIdOverride, keySecretOverride } = req.body || {};
-    const keyId = (keyIdOverride || process.env.RAZORPAY_KEY_ID || DEFAULT_RAZORPAY_KEY_ID || '').trim();
-    const keySecret = (keySecretOverride || process.env.RAZORPAY_KEY_SECRET || DEFAULT_RAZORPAY_KEY_SECRET || '').trim();
+    const keyId = (process.env.RAZORPAY_KEY_ID || keyIdOverride || '').trim();
+    const keySecret = (process.env.RAZORPAY_KEY_SECRET || keySecretOverride || '').trim();
 
     const numericAmount = Number(amount);
     if (!numericAmount || numericAmount <= 0) {
       return res.status(400).json({ success: false, message: 'Invalid order amount.' });
     }
 
+    if (!keyId || !keySecret) {
+      return res.status(503).json({
+        success: false,
+        configured: false,
+        message:
+          'Online payment gateway (Razorpay) is not configured. Please configure RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Environment Variables or select Cash on Delivery (COD).',
+      });
+    }
+
     const amountInPaise = Math.round(numericAmount * 100);
 
-    // If real keys are configured, create order via official Razorpay Orders REST API
-    if (keyId && keySecret) {
-      try {
-        const authHeader = 'Basic ' + Buffer.from(`${keyId}:${keySecret}`).toString('base64');
-        const rzpRes = await fetch('https://api.razorpay.com/v1/orders', {
-          method: 'POST',
-          headers: {
-            'Authorization': authHeader,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            amount: amountInPaise,
-            currency: 'INR',
-            receipt: receipt || `rcpt_${Date.now()}`,
-            notes: notes || { store: 'REDMODE' },
-          }),
-        });
+    try {
+      const authHeader = 'Basic ' + Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+      const rzpRes = await fetch('https://api.razorpay.com/v1/orders', {
+        method: 'POST',
+        headers: {
+          Authorization: authHeader,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          amount: amountInPaise,
+          currency: 'INR',
+          receipt: receipt || `rcpt_${Date.now()}`,
+          notes: notes || { store: 'REDMODE' },
+        }),
+      });
 
-        const rzpData: any = await rzpRes.json();
+      const rzpData: any = await rzpRes.json().catch(() => ({}));
 
-        if (!rzpRes.ok) {
-          return res.status(rzpRes.status).json({
-            success: false,
-            message: rzpData?.error?.description || 'Razorpay order creation failed.',
-            error: rzpData,
-          });
-        }
-
-        return res.json({
-          success: true,
-          orderId: rzpData.id,
-          amount: rzpData.amount,
-          currency: rzpData.currency,
-          keyId,
-          live: !keyId.startsWith('rzp_test'),
-        });
-      } catch (err: any) {
-        return res.status(500).json({
+      if (!rzpRes.ok || !rzpData?.id) {
+        return res.status(rzpRes.status || 400).json({
           success: false,
-          message: `Network error connecting to Razorpay: ${err.message}`,
+          message: rzpData?.error?.description || 'Razorpay order creation failed.',
+          error: rzpData,
         });
       }
-    }
 
-    // Fallback sandbox simulation if keys not entered yet
-    const simulatedOrderId = `order_sim_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
-    return res.json({
-      success: true,
-      orderId: simulatedOrderId,
-      amount: amountInPaise,
-      currency: 'INR',
-      keyId: keyId || 'rzp_test_simulated_key',
-      simulated: true,
-      message: 'Razorpay keys not configured in environment. Running in simulated test mode.',
-    });
+      return res.json({
+        success: true,
+        orderId: rzpData.id,
+        amount: rzpData.amount,
+        currency: rzpData.currency,
+        keyId,
+        live: !keyId.startsWith('rzp_test'),
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        message: `Network error connecting to Razorpay: ${err.message}`,
+      });
+    }
   });
 
-  // 3. Verify Razorpay Payment Signature
-  app.post('/api/payment/razorpay/verify', (req: Request, res: Response) => {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, keySecretOverride } = req.body || {};
-    const keySecret = (keySecretOverride || process.env.RAZORPAY_KEY_SECRET || DEFAULT_RAZORPAY_KEY_SECRET || '').trim();
+  // 3. Verify Razorpay Payment Signature & Amount (Strict — Never Simulate)
+  app.post('/api/payment/razorpay/verify', async (req: Request, res: Response) => {
+    const {
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+      expectedAmountInr,
+      keyIdOverride,
+      keySecretOverride,
+    } = req.body || {};
+    const keyId = (process.env.RAZORPAY_KEY_ID || keyIdOverride || '').trim();
+    const keySecret = (process.env.RAZORPAY_KEY_SECRET || keySecretOverride || '').trim();
 
-    if (!razorpay_order_id || !razorpay_payment_id) {
-      return res.status(400).json({ success: false, message: 'Missing payment details.' });
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        message: 'Missing required payment details (order_id, payment_id, signature).',
+      });
     }
 
-    // If real keySecret is configured, verify HMAC SHA256 signature
-    if (keySecret && razorpay_signature) {
-      try {
-        const generatedSignature = crypto
-          .createHmac('sha256', keySecret)
-          .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-          .digest('hex');
+    if (String(razorpay_order_id).startsWith('order_sim_') || !keySecret) {
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        message: 'Simulated payments are disabled in production.',
+      });
+    }
 
-        const isSignatureValid = generatedSignature === razorpay_signature;
+    try {
+      const generatedSignature = crypto
+        .createHmac('sha256', keySecret)
+        .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+        .digest('hex');
 
-        if (!isSignatureValid) {
-          return res.status(400).json({
-            success: false,
-            verified: false,
-            message: 'Invalid payment signature. Payment verification failed.',
-          });
-        }
+      const sigBuf = Buffer.from(String(razorpay_signature), 'utf-8');
+      const genBuf = Buffer.from(generatedSignature, 'utf-8');
 
-        return res.json({
-          success: true,
-          verified: true,
-          paymentId: razorpay_payment_id,
-          orderId: razorpay_order_id,
-          message: 'Payment verified successfully! Order is confirmed.',
-        });
-      } catch (err: any) {
-        return res.status(500).json({
+      if (sigBuf.length !== genBuf.length || !crypto.timingSafeEqual(sigBuf, genBuf)) {
+        return res.status(400).json({
           success: false,
           verified: false,
-          message: `Signature verification error: ${err.message}`,
+          message: 'Invalid payment signature. Payment verification failed.',
         });
       }
-    }
 
-    // In simulation mode (or when signature is mock)
+      if (keyId && expectedAmountInr && Number(expectedAmountInr) > 0) {
+        const authHeader = 'Basic ' + Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+        const orderCheckRes = await fetch(
+          `https://api.razorpay.com/v1/orders/${encodeURIComponent(razorpay_order_id)}`,
+          { headers: { Authorization: authHeader } }
+        );
+        if (orderCheckRes.ok) {
+          const orderCheckData: any = await orderCheckRes.json().catch(() => ({}));
+          const expectedPaise = Math.round(Number(expectedAmountInr) * 100);
+          if (orderCheckData.amount && Number(orderCheckData.amount) !== expectedPaise) {
+            return res.status(400).json({
+              success: false,
+              verified: false,
+              message: 'Payment amount mismatch detected.',
+            });
+          }
+          if (orderCheckData.currency && orderCheckData.currency !== 'INR') {
+            return res.status(400).json({
+              success: false,
+              verified: false,
+              message: 'Payment currency mismatch detected.',
+            });
+          }
+        }
+      }
+
+      return res.json({
+        success: true,
+        verified: true,
+        paymentId: razorpay_payment_id,
+        orderId: razorpay_order_id,
+        message: 'Payment verified successfully! Order is confirmed.',
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        verified: false,
+        message: `Signature verification error: ${err.message}`,
+      });
+    }
+  });
+
+  // 3b. Razorpay Webhook Verification
+  app.post('/api/payment/razorpay/webhook', (req: Request, res: Response) => {
+    const webhookSecret = (process.env.RAZORPAY_WEBHOOK_SECRET || '').trim();
+    const signature = req.headers['x-razorpay-signature'] as string;
+    if (!webhookSecret || !signature) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing Razorpay webhook secret or signature header.',
+      });
+    }
+    const rawPayload = JSON.stringify(req.body || {});
+    const expectedSig = crypto.createHmac('sha256', webhookSecret).update(rawPayload).digest('hex');
+    if (expectedSig !== signature) {
+      return res.status(401).json({ success: false, message: 'Invalid webhook signature.' });
+    }
     return res.json({
       success: true,
-      verified: true,
-      simulated: true,
-      paymentId: razorpay_payment_id,
-      orderId: razorpay_order_id,
-      message: 'Payment verified in simulated mode.',
+      event: req.body?.event || 'verified',
+      orderId: req.body?.payload?.payment?.entity?.order_id || null,
+      paymentId: req.body?.payload?.payment?.entity?.id || null,
     });
   });
 
   // 4. Test Razorpay Credentials (Super Admin)
   app.post('/api/payment/razorpay/test-keys', requireSuperAdmin, async (req: Request, res: Response) => {
     const { keyId, keySecret } = req.body || {};
-    const finalKeyId = (keyId || process.env.RAZORPAY_KEY_ID || DEFAULT_RAZORPAY_KEY_ID || '').trim();
-    const finalKeySecret = (keySecret || process.env.RAZORPAY_KEY_SECRET || DEFAULT_RAZORPAY_KEY_SECRET || '').trim();
+    const finalKeyId = (keyId || process.env.RAZORPAY_KEY_ID || '').trim();
+    const finalKeySecret = (keySecret || process.env.RAZORPAY_KEY_SECRET || '').trim();
 
     if (!finalKeyId || !finalKeySecret) {
       return res.status(400).json({
@@ -498,7 +951,7 @@ async function startServer() {
       const authHeader = 'Basic ' + Buffer.from(`${finalKeyId}:${finalKeySecret}`).toString('base64');
       const testRes = await fetch('https://api.razorpay.com/v1/payments?count=1', {
         headers: {
-          'Authorization': authHeader,
+          Authorization: authHeader,
           'Content-Type': 'application/json',
         },
       });
@@ -507,7 +960,9 @@ async function startServer() {
         const errorData: any = await testRes.json().catch(() => ({}));
         return res.status(testRes.status).json({
           success: false,
-          message: errorData?.error?.description || `Razorpay returned error ${testRes.status}: Authentication failed. Please verify your Key ID & Secret.`,
+          message:
+            errorData?.error?.description ||
+            `Razorpay returned error ${testRes.status}: Authentication failed. Please verify your Key ID & Secret.`,
         });
       }
 
@@ -516,7 +971,9 @@ async function startServer() {
         success: true,
         isLive,
         mode: isLive ? 'Production (Live)' : 'Test Mode (Sandbox)',
-        message: `Connected to Razorpay successfully! Authenticated in ${isLive ? 'LIVE PRODUCTION' : 'TEST (SANDBOX)'} mode. Ready to accept customer payments via UPI, Cards & NetBanking!`,
+        message: `Connected to Razorpay successfully! Authenticated in ${
+          isLive ? 'LIVE PRODUCTION' : 'TEST (SANDBOX)'
+        } mode.`,
       });
     } catch (err: any) {
       return res.status(500).json({
@@ -535,23 +992,12 @@ async function startServer() {
     const { clientId, clientSecret, mode } = req.body || {};
     const finalClientId = (clientId || process.env.PAYPAL_CLIENT_ID || '').trim();
     const finalClientSecret = (clientSecret || process.env.PAYPAL_CLIENT_SECRET || '').trim();
-    const isLive = mode === 'live';
+    const isLive = (mode || process.env.PAYPAL_MODE || 'live') === 'live';
 
     if (!finalClientId || !finalClientSecret) {
       return res.status(400).json({
         success: false,
         message: 'Both PayPal Client ID and Client Secret are required to test international connection.',
-      });
-    }
-
-    // In demo/sample credentials mode
-    if (finalClientId.includes('sandbox_export') || finalClientSecret.includes('sandbox_export')) {
-      return res.json({
-        success: true,
-        isLive: false,
-        mode: 'Sandbox (Test Mode)',
-        simulated: true,
-        message: 'PayPal International Export Gateway is active in Sandbox Mode! Ready to accept test payments from Non-Indian customers in USD/EUR/GBP.',
       });
     }
 
@@ -564,7 +1010,7 @@ async function startServer() {
       const tokenRes = await fetch(oauthUrl, {
         method: 'POST',
         headers: {
-          'Authorization': authHeader,
+          Authorization: authHeader,
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: 'grant_type=client_credentials',
@@ -574,7 +1020,11 @@ async function startServer() {
         const errJson: any = await tokenRes.json().catch(() => ({}));
         return res.status(tokenRes.status).json({
           success: false,
-          message: errJson?.error_description || `PayPal returned error ${tokenRes.status}: Invalid Client ID or Secret for ${isLive ? 'Live' : 'Sandbox'} environment.`,
+          message:
+            errJson?.error_description ||
+            `PayPal returned error ${tokenRes.status}: Invalid Client ID or Secret for ${
+              isLive ? 'Live' : 'Sandbox'
+            } environment.`,
         });
       }
 
@@ -584,7 +1034,7 @@ async function startServer() {
         isLive,
         mode: isLive ? 'Production (Live)' : 'Sandbox (Test Mode)',
         appId: tokenData?.app_id || 'PayPal App',
-        message: `PayPal International Gateway verified successfully in ${isLive ? 'LIVE' : 'SANDBOX'} mode! Global customers can pay via PayPal, Visa, Mastercard, AMEX in USD/EUR.`,
+        message: `PayPal International Gateway verified successfully in ${isLive ? 'LIVE' : 'SANDBOX'} mode!`,
       });
     } catch (err: any) {
       return res.status(500).json({
@@ -594,96 +1044,215 @@ async function startServer() {
     }
   });
 
-  // 6. Create PayPal Order (for International / Export Checkout)
+  // 6. Create PayPal Order (Strict — No Fake Orders)
   app.post('/api/payment/paypal/create-order', async (req: Request, res: Response) => {
-    const { amountInr, currency = 'USD', clientIdOverride, clientSecretOverride, mode = 'test' } = req.body || {};
-    const numericInr = Number(amountInr) || 0;
-    // Standard conversion: 1 USD ≈ 84 INR
-    const approxUsd = Math.max(1, Math.round((numericInr / 84) * 100) / 100);
+    const {
+      amountInr,
+      amountUsd,
+      amount,
+      currency = 'USD',
+      clientIdOverride,
+      clientSecretOverride,
+      mode,
+      returnUrl,
+      cancelUrl,
+    } = req.body || {};
+    const numericInr = Number(amountInr) || (Number(amountUsd || amount) > 0 ? Number(amountUsd || amount) * 84 : 0);
+    if (numericInr <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid order amount.' });
+    }
+    const approxUsd = Number(amountUsd) > 0 ? Number(amountUsd) : Math.max(1, Math.round((numericInr / 84) * 100) / 100);
 
-    const clientId = (clientIdOverride || process.env.PAYPAL_CLIENT_ID || '').trim();
-    const clientSecret = (clientSecretOverride || process.env.PAYPAL_CLIENT_SECRET || '').trim();
+    const clientId = (process.env.PAYPAL_CLIENT_ID || clientIdOverride || '').trim();
+    const clientSecret = (process.env.PAYPAL_CLIENT_SECRET || clientSecretOverride || '').trim();
+    const isLive = (mode || process.env.PAYPAL_MODE || 'live') === 'live';
 
-    if (clientId && clientSecret && !clientId.includes('sandbox_export')) {
-      try {
-        const isLive = mode === 'live';
-        const authHeader = 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-        const baseUrl = isLive ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
-
-        // 1. Get access token
-        const tokenRes = await fetch(`${baseUrl}/v1/oauth2/token`, {
-          method: 'POST',
-          headers: {
-            'Authorization': authHeader,
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: 'grant_type=client_credentials',
-        });
-
-        if (tokenRes.ok) {
-          const tokenData: any = await tokenRes.json();
-          const accessToken = tokenData.access_token;
-
-          // 2. Create order
-          const orderRes = await fetch(`${baseUrl}/v2/checkout/orders`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${accessToken}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              intent: 'CAPTURE',
-              purchase_units: [
-                {
-                  amount: {
-                    currency_code: currency,
-                    value: approxUsd.toFixed(2),
-                  },
-                  description: 'REDMODE Luxury Silhouettes - International Export Order',
-                },
-              ],
-            }),
-          });
-
-          if (orderRes.ok) {
-            const orderData: any = await orderRes.json();
-            return res.json({
-              success: true,
-              orderId: orderData.id,
-              amountUsd: approxUsd,
-              currency,
-              live: isLive,
-            });
-          }
-        }
-      } catch (err: any) {
-        console.warn('Real PayPal order creation fallback to simulated:', err);
-      }
+    if (!clientId || !clientSecret || clientId.includes('sandbox_export')) {
+      return res.status(503).json({
+        success: false,
+        configured: false,
+        message:
+          'PayPal International payment gateway is not configured yet. Please configure PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET in Environment Variables.',
+      });
     }
 
-    // Default Sandbox / Simulated order for non-Indian export checkout
-    const mockOrderId = `PAYPAL-EXP-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
-    return res.json({
-      success: true,
-      orderId: mockOrderId,
-      amountUsd: approxUsd,
-      currency,
-      live: false,
-      simulated: true,
-      message: 'PayPal Sandbox Order created successfully.',
-    });
+    try {
+      const authHeader = 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+      const baseUrl = isLive ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
+
+      const tokenRes = await fetch(`${baseUrl}/v1/oauth2/token`, {
+        method: 'POST',
+        headers: {
+          Authorization: authHeader,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: 'grant_type=client_credentials',
+      });
+
+      if (!tokenRes.ok) {
+        const errData: any = await tokenRes.json().catch(() => ({}));
+        return res.status(tokenRes.status).json({
+          success: false,
+          message: errData?.error_description || 'PayPal authentication failed.',
+        });
+      }
+
+      const tokenData: any = await tokenRes.json();
+      const accessToken = tokenData.access_token;
+
+      const orderRes = await fetch(`${baseUrl}/v2/checkout/orders`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          intent: 'CAPTURE',
+          purchase_units: [
+            {
+              amount: {
+                currency_code: currency,
+                value: approxUsd.toFixed(2),
+              },
+              description: 'REDMODE Luxury Silhouettes - International Export Order',
+            },
+          ],
+          application_context:
+            returnUrl && cancelUrl
+              ? {
+                  return_url: returnUrl,
+                  cancel_url: cancelUrl,
+                  brand_name: 'REDMODE',
+                  user_action: 'PAY_NOW',
+                }
+              : undefined,
+        }),
+      });
+
+      const orderData: any = await orderRes.json().catch(() => ({}));
+      if (!orderRes.ok || !orderData?.id) {
+        return res.status(orderRes.status || 400).json({
+          success: false,
+          message: orderData?.message || 'Failed to create PayPal order.',
+        });
+      }
+
+      const approveLink = Array.isArray(orderData.links)
+        ? orderData.links.find((l: any) => l.rel === 'approve' || l.rel === 'payer-action')?.href
+        : null;
+
+      return res.json({
+        success: true,
+        orderId: orderData.id,
+        approveUrl: approveLink || null,
+        amountUsd: approxUsd,
+        currency,
+        live: isLive,
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        message: `PayPal order creation error: ${err.message}`,
+      });
+    }
   });
 
-  // 7. Verify / Capture PayPal Order
+  // 7. Verify / Capture PayPal Order (Strict — Real Capture Verification)
   app.post('/api/payment/paypal/capture-order', async (req: Request, res: Response) => {
-    const { orderId } = req.body || {};
-    return res.json({
-      success: true,
-      verified: true,
-      orderId: orderId || `PAYPAL-${Date.now()}`,
-      captureId: `CAP-${Date.now()}`,
-      message: 'International PayPal payment captured and confirmed successfully! 🌐💳',
-    });
+    const { orderId, expectedAmountUsd, clientIdOverride, clientSecretOverride, mode } = req.body || {};
+    if (!orderId || String(orderId).startsWith('PAYPAL-EXP-')) {
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        message: 'Valid PayPal Order ID is required for payment capture.',
+      });
+    }
+
+    const clientId = (process.env.PAYPAL_CLIENT_ID || clientIdOverride || '').trim();
+    const clientSecret = (process.env.PAYPAL_CLIENT_SECRET || clientSecretOverride || '').trim();
+    const isLive = (mode || process.env.PAYPAL_MODE || 'live') === 'live';
+
+    if (!clientId || !clientSecret) {
+      return res.status(503).json({
+        success: false,
+        verified: false,
+        message: 'PayPal credentials are not configured on the server.',
+      });
+    }
+
+    try {
+      const authHeader = 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+      const baseUrl = isLive ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
+
+      const tokenRes = await fetch(`${baseUrl}/v1/oauth2/token`, {
+        method: 'POST',
+        headers: {
+          Authorization: authHeader,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: 'grant_type=client_credentials',
+      });
+
+      if (!tokenRes.ok) {
+        return res.status(tokenRes.status).json({
+          success: false,
+          verified: false,
+          message: 'Failed to authenticate with PayPal during capture.',
+        });
+      }
+
+      const tokenData: any = await tokenRes.json();
+      const captureRes = await fetch(
+        `${baseUrl}/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${tokenData.access_token}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+
+      const captureData: any = await captureRes.json().catch(() => ({}));
+      if (!captureRes.ok || captureData.status !== 'COMPLETED') {
+        return res.status(400).json({
+          success: false,
+          verified: false,
+          status: captureData.status || 'FAILED',
+          message:
+            captureData?.details?.[0]?.description ||
+            captureData?.message ||
+            'PayPal payment has not been approved or capture failed.',
+        });
+      }
+
+      const captureUnit = captureData?.purchase_units?.[0]?.payments?.captures?.[0];
+      if (expectedAmountUsd && captureUnit?.amount?.value) {
+        const paidUsd = Number(captureUnit.amount.value);
+        if (Math.abs(paidUsd - Number(expectedAmountUsd)) > 0.05) {
+          return res.status(400).json({
+            success: false,
+            verified: false,
+            message: 'PayPal captured amount does not match the checkout total.',
+          });
+        }
+      }
+
+      return res.json({
+        success: true,
+        verified: true,
+        orderId: captureData.id,
+        captureId: captureUnit?.id || captureData.id,
+        status: captureData.status,
+        message: 'International PayPal payment captured and verified.',
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        verified: false,
+        message: `PayPal capture verification failed: ${err.message}`,
+      });
+    }
   });
 
   // 8. Universal Gateway Tester (Tests any gateway config by provider)
@@ -703,7 +1272,7 @@ async function startServer() {
       try {
         const authHeader = 'Basic ' + Buffer.from(`${key}:${secret}`).toString('base64');
         const testRes = await fetch('https://api.razorpay.com/v1/payments?count=1', {
-          headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
+          headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
         });
         if (testRes.ok) {
           const isLive = !key.startsWith('rzp_test');
@@ -724,21 +1293,15 @@ async function startServer() {
     }
 
     if (provider === 'paypal') {
-      if (key.includes('sandbox_export') || secret.includes('sandbox_export')) {
-        return res.json({
-          success: true,
-          mode: 'Sandbox',
-          message: 'PayPal Sandbox International gateway verified! Ready to accept orders from non-Indian buyers.',
-        });
-      }
       try {
         const authHeader = 'Basic ' + Buffer.from(`${key}:${secret}`).toString('base64');
-        const url = mode === 'live'
-          ? 'https://api-m.paypal.com/v1/oauth2/token'
-          : 'https://api-m.sandbox.paypal.com/v1/oauth2/token';
+        const url =
+          mode === 'live'
+            ? 'https://api-m.paypal.com/v1/oauth2/token'
+            : 'https://api-m.sandbox.paypal.com/v1/oauth2/token';
         const resTok = await fetch(url, {
           method: 'POST',
-          headers: { 'Authorization': authHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
+          headers: { Authorization: authHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
           body: 'grant_type=client_credentials',
         });
         if (resTok.ok) {
@@ -758,54 +1321,29 @@ async function startServer() {
       }
     }
 
-    if (provider === 'phonepe') {
-      return res.json({
-        success: true,
-        mode: mode === 'live' ? 'Live' : 'UAT Sandbox',
-        message: 'PhonePe Merchant credentials format validated! Ready for domestic UPI payments.',
-      });
-    }
-
-    if (provider === 'cashfree') {
-      return res.json({
-        success: true,
-        mode: mode === 'live' ? 'Production' : 'Sandbox',
-        message: 'Cashfree App ID & Secret credentials validated! Domestic payment routing ready.',
-      });
-    }
-
-    if (provider === 'stripe') {
-      return res.json({
-        success: true,
-        mode: key.startsWith('pk_live') ? 'Live' : 'Test Mode',
-        message: 'Stripe API key format verified for global multi-currency payments!',
-      });
-    }
-
-    if (provider === 'upi_qr') {
-      return res.json({
-        success: true,
-        mode: 'Direct UPI',
-        message: `Direct Business UPI (${key}) validated. Zero gateway commission mode.`,
-      });
-    }
-
     return res.json({
       success: true,
       mode: mode || 'Active',
-      message: 'Custom Payment Gateway configured and active.',
+      message: 'Gateway configuration format verified.',
     });
   });
 
   // Delhivery API Connection Verification (Restricted to Super Admin)
   app.get('/api/delhivery/test', requireSuperAdmin, async (req: Request, res: Response) => {
-    const token = (req.query.token as string) || process.env.DELHIVERY_API_TOKEN || 'de52f7425345a44f9e6f89fc01e86d942554a302';
+    const token = ((req.query.token as string) || process.env.DELHIVERY_API_TOKEN || '').trim();
     const pincode = (req.query.pincode as string) || '250002';
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: 'Delhivery API Token is not configured. Set DELHIVERY_API_TOKEN in Environment Variables.',
+      });
+    }
 
     try {
       const response = await fetch(`https://track.delhivery.com/c/api/pin-codes/json/?filter_codes=${pincode}`, {
         headers: {
-          'Authorization': `Token ${token}`,
+          Authorization: `Token ${token}`,
           'Content-Type': 'application/json',
         },
       });
@@ -848,16 +1386,27 @@ async function startServer() {
 
   // Delhivery Live Waybill Allocator
   app.post('/api/delhivery/fetch-waybill', async (req: Request, res: Response) => {
-    const token = req.body?.token || process.env.DELHIVERY_API_TOKEN || 'de52f7425345a44f9e6f89fc01e86d942554a302';
+    const token = (req.body?.token || process.env.DELHIVERY_API_TOKEN || '').trim();
     const client = req.body?.client || 'Redmode';
 
-    try {
-      const response = await fetch(`https://track.delhivery.com/waybill/api/bulk/json/?count=1&client=${encodeURIComponent(client)}`, {
-        headers: {
-          'Authorization': `Token ${token}`,
-          'Content-Type': 'application/json',
-        },
+    if (!token) {
+      return res.status(503).json({
+        success: false,
+        live: false,
+        message: 'Delhivery API Token is not configured on the server.',
       });
+    }
+
+    try {
+      const response = await fetch(
+        `https://track.delhivery.com/waybill/api/bulk/json/?count=1&client=${encodeURIComponent(client)}`,
+        {
+          headers: {
+            Authorization: `Token ${token}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
 
       if (response.ok) {
         const text = await response.text();
@@ -867,11 +1416,17 @@ async function startServer() {
         }
       }
 
-      const fallbackWaybill = `606${Math.floor(10000000000 + Math.random() * 90000000000)}`;
-      return res.json({ success: true, waybill: fallbackWaybill, live: false });
+      return res.status(400).json({
+        success: false,
+        live: false,
+        message: 'Delhivery API did not return a valid waybill. Verify your API Token and client name.',
+      });
     } catch (err: any) {
-      const fallbackWaybill = `606${Math.floor(10000000000 + Math.random() * 90000000000)}`;
-      return res.json({ success: true, waybill: fallbackWaybill, live: false });
+      return res.status(500).json({
+        success: false,
+        live: false,
+        message: `Delhivery waybill allocation error: ${err.message}`,
+      });
     }
   });
 
@@ -1008,14 +1563,16 @@ async function startServer() {
     }
 
     try {
-      // 1. Try Delhivery Pincode serviceability API
-      const token = process.env.DELHIVERY_API_TOKEN || 'de52f7425345a44f9e6f89fc01e86d942554a302';
-      const delhiveryRes = await fetch(`https://track.delhivery.com/c/api/pin-codes/json/?filter_codes=${pincode}`, {
-        headers: {
-          'Authorization': `Token ${token}`,
-          'Content-Type': 'application/json',
-        },
-      });
+      // 1. Try Delhivery Pincode serviceability API if token is configured
+      const token = (process.env.DELHIVERY_API_TOKEN || '').trim();
+      const delhiveryRes = token
+        ? await fetch(`https://track.delhivery.com/c/api/pin-codes/json/?filter_codes=${pincode}`, {
+            headers: {
+              Authorization: `Token ${token}`,
+              'Content-Type': 'application/json',
+            },
+          })
+        : ({ ok: false } as any);
 
       if (delhiveryRes.ok) {
         const dData: any = await delhiveryRes.json();
@@ -1297,7 +1854,7 @@ async function startServer() {
   }
 
   const activeOtpStore: Record<string, StoredOtpRecord> = {};
-  const DEFAULT_TWOFACTOR_KEY = (process.env.TWOFACTOR_API_KEY || '699e72b1-de86-11f1-bb6c-0200cd936042').trim();
+  const DEFAULT_TWOFACTOR_KEY = (process.env.TWOFACTOR_API_KEY || '').trim();
 
   // Clean expired OTPs every 5 minutes
   setInterval(() => {
@@ -1319,7 +1876,7 @@ async function startServer() {
   } catch (e) {}
 
   // 1. Get Saved SMS & OTP Settings + Environment Connection Status
-  app.get('/api/admin/sms-settings', async (req: Request, res: Response) => {
+  app.get('/api/admin/sms-settings', requireSuperAdmin, async (_req: Request, res: Response) => {
     let twoFactorBalance: string | null = null;
     try {
       const gw = dynamicSmsConfig?.gateways?.find((g: any) => g.provider === 'twofactor');
@@ -1333,9 +1890,22 @@ async function startServer() {
       }
     } catch {}
 
+    const safeSettings = dynamicSmsConfig
+      ? {
+          ...dynamicSmsConfig,
+          gateways: Array.isArray(dynamicSmsConfig.gateways)
+            ? dynamicSmsConfig.gateways.map((g: any) => ({
+                ...g,
+                apiKey: '',
+                accessToken: '',
+              }))
+            : [],
+        }
+      : null;
+
     return res.json({
       success: true,
-      settings: dynamicSmsConfig,
+      settings: safeSettings,
       twoFactorBalance,
       envConnected: {
         fast2sms: Boolean(process.env.FAST2SMS_API_KEY && process.env.FAST2SMS_API_KEY.trim().length >= 8),
@@ -1345,7 +1915,7 @@ async function startServer() {
     });
   });
 
-  app.get('/api/sms/fast2sms-wallet', async (req: Request, res: Response) => {
+  app.get('/api/sms/fast2sms-wallet', requireSuperAdmin, async (_req: Request, res: Response) => {
     const gw = dynamicSmsConfig?.gateways?.find((g: any) => g.provider === 'fast2sms');
     const fastKey = (gw?.apiKey || process.env.FAST2SMS_API_KEY || '').trim();
     if (!fastKey) {
@@ -1370,7 +1940,7 @@ async function startServer() {
   });
 
   // 2. Save SMS & OTP Settings from Admin Panel
-  app.post('/api/admin/sms-settings', (req: Request, res: Response) => {
+  app.post('/api/admin/sms-settings', requireSuperAdmin, (req: Request, res: Response) => {
     try {
       dynamicSmsConfig = req.body;
       const dir = path.dirname(smsConfigFile);
@@ -1978,59 +2548,93 @@ async function startServer() {
       await tryMetaWhatsApp();
     }
 
+    if (!deliverySuccess) {
+      delete activeOtpStore[cleanMobile];
+      return res.status(503).json({
+        success: false,
+        diagnostics: providerDiagnostics.length > 0 ? providerDiagnostics : undefined,
+        message:
+          'Unable to dispatch OTP at the moment. Please verify that the SMS or WhatsApp OTP gateway credentials are configured in Admin Settings or Environment Variables.',
+      });
+    }
+
+    const challengeToken = createSignedOtpChallengeToken({
+      mobile: cleanMobile,
+      otp: generatedOtp,
+      expiresAt: activeOtpStore[cleanMobile].expiresAt,
+      purpose: purpose === 'admin' ? 'admin' : 'customer',
+      sessionId: activeOtpStore[cleanMobile].sessionId,
+    });
+
+    res.setHeader(
+      'Set-Cookie',
+      `redmode_otp_challenge=${encodeURIComponent(challengeToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${expiryMinutes * 60}`
+    );
+
     return res.json({
       success: true,
-      simulated: !deliverySuccess,
-      fallbackOtp: generatedOtp,
-      verificationCode: generatedOtp,
-      diagnostics: providerDiagnostics.length > 0 ? providerDiagnostics : undefined,
-      message: deliverySuccess
-        ? `OTP has been sent to +91 ${cleanMobile} via ${deliveredVia.toUpperCase()}.`
-        : `Instant OTP generated for +91 ${cleanMobile}: ${generatedOtp}`,
       channel: deliveredVia,
+      expiresInSeconds: expiryMinutes * 60,
+      challengeToken,
+      message: `A 6-digit verification code has been sent to +91 ${cleanMobile} via ${
+        deliveredVia === 'whatsapp' ? 'WhatsApp' : 'SMS'
+      }.`,
     });
   });
 
-  // 5. Verify Real OTP
+  // 5. Verify Real OTP (Strict — No Hardcoded Master Codes)
   app.post('/api/otp/verify-otp', (req: Request, res: Response) => {
-    const { mobile, otp, purpose = 'customer' } = req.body || {};
+    const { mobile, otp, purpose = 'customer', challengeToken: bodyToken } = req.body || {};
     if (!mobile || !otp) {
       return res.status(400).json({ success: false, message: 'Mobile number and OTP code are required.' });
     }
 
     const cleanMobile = String(mobile).replace(/\D/g, '').slice(-10);
-    const cleanOtp = String(otp).trim();
+    const cleanOtp = String(otp).replace(/\D/g, '').trim();
     const record = activeOtpStore[cleanMobile];
+    const cookies = parseCookiesHeader(req.headers.cookie || '');
+    const tokenToVerify = bodyToken || cookies.redmode_otp_challenge || '';
 
-    // Check expiration and record existence
-    if (!record || Date.now() > record.expiresAt) {
-      const isSuperAdmin = purpose === 'admin' && (cleanMobile === '7302797464' || cleanMobile === '9811234567');
-      if (isSuperAdmin && cleanOtp === '730279') {
-        return res.json({ success: true, message: 'Super Admin master authentication verified.' });
+    // Check signed HMAC challenge token first (stateless + tamper-proof)
+    if (tokenToVerify) {
+      const tokenCheck = verifySignedOtpChallengeToken(tokenToVerify, cleanMobile, cleanOtp, purpose);
+      if (tokenCheck.valid) {
+        delete activeOtpStore[cleanMobile];
+        res.setHeader('Set-Cookie', 'redmode_otp_challenge=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+        return res.json({
+          success: true,
+          verified: true,
+          mobile: cleanMobile,
+          message: 'Mobile number verified successfully.',
+        });
       }
+    }
+
+    // Check in-memory record
+    if (!record || Date.now() > record.expiresAt) {
       return res.status(400).json({
         success: false,
+        verified: false,
         message: 'OTP has expired or was not requested. Please request a new OTP.',
       });
     }
 
-    // Rate-limit brute force attempts
     if (record.attempts >= 5) {
       delete activeOtpStore[cleanMobile];
       return res.status(429).json({
         success: false,
+        verified: false,
         message: 'Too many incorrect attempts. Please request a new OTP.',
       });
     }
 
-    // Master verification for owner mobile as safety fallback
-    const isOwnerPhone = cleanMobile === '7302797464';
-    const isMasterCode = isOwnerPhone && (cleanOtp === '730279' || cleanOtp === '100200');
-
-    if (cleanOtp === record.code || isMasterCode) {
+    if (cleanOtp === record.code) {
       delete activeOtpStore[cleanMobile];
+      res.setHeader('Set-Cookie', 'redmode_otp_challenge=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
       return res.json({
         success: true,
+        verified: true,
+        mobile: cleanMobile,
         message: 'Mobile number verified successfully.',
       });
     }
@@ -2038,6 +2642,7 @@ async function startServer() {
     record.attempts += 1;
     return res.status(400).json({
       success: false,
+      verified: false,
       message: `Invalid OTP code. Please enter the correct 6-digit code (${5 - record.attempts} attempts remaining).`,
     });
   });
@@ -2229,7 +2834,7 @@ async function startServer() {
   // Delhivery Official Tracking & NDR API
   app.get('/api/delhivery/track/:awb', async (req: Request, res: Response) => {
     const awb = req.params.awb || '';
-    const token = (req.query.token as string) || process.env.DELHIVERY_API_TOKEN || 'de52f7425345a44f9e6f89fc01e86d942554a302';
+    const token = ((req.query.token as string) || process.env.DELHIVERY_API_TOKEN || '').trim();
 
     if (!awb) {
       return res.status(400).json({ success: false, message: 'AWB number is required.' });

@@ -4265,11 +4265,11 @@ export const AdminPanel: React.FC = () => {
           {/* VIEW: INTEGRATIONS (Dedicated External Service & API Integrations) */}
           {activeTab === 'integrations' && (
             currentAdminUser.role === 'Super Admin' ? (
-            <div className="space-y-6 max-w-5xl">
+            <div className="space-y-4 max-w-5xl">
               {/* Header */}
-              <div className="border-b border-slate-200/80 pb-5">
+              <div className="border-b border-slate-200/80 pb-3.5">
                 <div>
-                  <h2 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
+                  <h2 className="text-lg sm:text-xl font-bold text-slate-900 tracking-tight">
                     {integrationSubTab === 'payments'
                       ? 'Payment Integration'
                       : integrationSubTab === 'couriers'
@@ -4278,13 +4278,13 @@ export const AdminPanel: React.FC = () => {
                       ? 'SMS & OTP Service Integrations'
                       : 'Meta WhatsApp'}
                   </h2>
-                  <p className="text-xs sm:text-sm text-slate-500 mt-1">
+                  <p className="text-xs text-slate-500 mt-0.5">
                     {integrationSubTab === 'payments'
                       ? 'Connect and manage payment gateways for domestic and international export checkout.'
                       : integrationSubTab === 'couriers'
                       ? 'Connect and manage external logistics couriers for order shipping and delivery.'
                       : integrationSubTab === 'sms'
-                      ? 'Connect and manage transactional OTP gateways (Meta WhatsApp Cloud, 2Factor, Fast2SMS, MSG91) for logins and COD verification.'
+                      ? 'Configure 2Factor.in SMS and Meta WhatsApp Cloud OTP gateways for logins and COD verification.'
                       : 'Connect and manage WhatsApp Business messaging API for automated customer alerts.'}
                   </p>
                 </div>

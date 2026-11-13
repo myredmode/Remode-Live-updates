@@ -136,11 +136,11 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
         enabled: true,
         isPrimary: true,
         targetMarket: 'domestic',
-        apiKey: settings.razorpaySettings?.keyId || 'rzp_test_TgYmLmX3cPZpNk',
-        apiSecret: settings.razorpaySettings?.keySecret || 'Asrb0WLHUFBi3iEU3FK1DfiN',
+        apiKey: settings.razorpaySettings?.keyId || '',
+        apiSecret: settings.razorpaySettings?.keySecret || '',
         merchantName: settings.razorpaySettings?.merchantName || 'REDMODE',
         currency: 'INR',
-        mode: settings.razorpaySettings?.mode || 'test',
+        mode: settings.razorpaySettings?.mode || 'live',
         themeColor: '#111827',
       },
       {
@@ -150,11 +150,11 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
         enabled: true,
         isPrimary: false,
         targetMarket: 'international',
-        apiKey: 'paypal_sandbox_export_client_id',
-        apiSecret: 'paypal_sandbox_export_secret_key',
+        apiKey: '',
+        apiSecret: '',
         merchantName: 'REDMODE International',
         currency: 'USD',
-        mode: 'test',
+        mode: 'live',
         themeColor: '#003087',
       },
     ];
@@ -351,9 +351,13 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
       }
     };
 
-    const headers = {
+    const adminToken =
+      sessionStorage.getItem('redmode_admin_token') ||
+      localStorage.getItem('redmode_admin_token') ||
+      '';
+    const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'x-admin-role': 'Super Admin',
+      ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
     };
 
     try {
