@@ -106,7 +106,7 @@ export default async function handler(req, res) {
     }
   }
 
-  const requireAdminRole = (allowedRoles = ['Super Admin', 'Listing + Label Admin', 'Label Admin']) => {
+  const requireAdminRole = (allowedRoles = ['Super Admin', 'Listing Admin', 'Listing + Label Admin', 'Label Admin']) => {
     const verified = extractVerifiedAdmin(req);
     if (!verified || !allowedRoles.includes(verified.role)) {
       res.status(401).json({
@@ -144,49 +144,27 @@ export default async function handler(req, res) {
   // ============================================================================
   // 3. ADMIN AUTHENTICATION & SESSION MANAGEMENT
   // ============================================================================
-  if (pathStr === 'admin/login' && req.method === 'POST') {
-    const { username = '', password = '', staffUsers = [], googleIdToken, googleEmail, email } = body;
-    const resolvedGoogleEmail = googleEmail || email;
+  if (!globalThis.__redmodeAdminLoginAttempts) {
+    globalThis.__redmodeAdminLoginAttempts = {};
+  }
+  const adminLoginAttempts = globalThis.__redmodeAdminLoginAttempts;
 
-    // Option A: Google Workspace / Firebase Admin Email Login
-    if (resolvedGoogleEmail) {
-      const cleanEmail = String(resolvedGoogleEmail).trim().toLowerCase();
-      const allowedOwnerEmails = ['myredmode@gmail.com', 'admin@redmode.in'];
-      if (allowedOwnerEmails.includes(cleanEmail)) {
-        const token = signAdminSessionToken({
-          userId: 'admin-super-1',
-          name: 'Aamir',
-          email: cleanEmail,
-          mobile: '7302797464',
-          role: 'Super Admin',
-          sessionVersion: activeAdminSessionVersion,
-        });
-        res.setHeader(
-          'Set-Cookie',
-          `redmode_admin_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 3600}`
-        );
-        return res.status(200).json({
-          success: true,
-          token,
-          sessionVersion: activeAdminSessionVersion,
-          user: {
-            id: 'admin-super-1',
-            name: 'Aamir',
-            email: cleanEmail,
-            mobile: '+91 73027 97464',
-            role: 'Super Admin',
-            status: 'active',
-          },
-          message: 'Super Admin authenticated via Google.',
-        });
-      }
-      return res.status(403).json({
+  if (pathStr === 'admin/login' && req.method === 'POST') {
+    const clientIp = String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'local')
+      .split(',')[0]
+      .trim();
+    const now = Date.now();
+    const rateRecord = adminLoginAttempts[clientIp];
+    if (rateRecord && now < rateRecord.resetAt && rateRecord.count >= 10) {
+      const waitMin = Math.max(1, Math.ceil((rateRecord.resetAt - now) / 60000));
+      return res.status(429).json({
         success: false,
-        message: `Google account (${cleanEmail}) is not authorized for REDMODE Admin access.`,
+        message: `Too many failed login attempts. Please wait ${waitMin} minute(s) and try again.`,
       });
     }
 
-    // Option B: Username/Mobile + Password Login
+    const { username = '', password = '', staffUsers = [] } = body;
+
     const normalizedUser = String(username).trim().toLowerCase();
     const cleanDigits = String(username).replace(/\D/g, '');
     const trimmedPass = String(password).trim();
@@ -194,7 +172,7 @@ export default async function handler(req, res) {
     if (!normalizedUser || !trimmedPass) {
       return res.status(400).json({
         success: false,
-        message: 'Username/mobile and password are required.',
+        message: 'Admin username and password are required.',
       });
     }
 
@@ -204,6 +182,7 @@ export default async function handler(req, res) {
     const isSuperUserMatch =
       normalizedUser === masterUsername ||
       normalizedUser === 'admin' ||
+      normalizedUser === 'aamir' ||
       normalizedUser === 'myredmode@gmail.com' ||
       normalizedUser === 'admin@redmode.in' ||
       (cleanDigits.length >= 10 && cleanDigits.slice(-10) === '7302797464');
@@ -214,11 +193,11 @@ export default async function handler(req, res) {
     } else if (masterPassword) {
       isSuperPassValid = trimmedPass === masterPassword;
     } else {
-      // Initial setup password when ADMIN_MASTER_PASSWORD is not yet set in environment
       isSuperPassValid = trimmedPass === 'RedMode@100';
     }
 
     if (isSuperUserMatch && isSuperPassValid) {
+      delete adminLoginAttempts[clientIp];
       const token = signAdminSessionToken({
         userId: 'admin-super-1',
         name: 'Aamir',
@@ -253,7 +232,9 @@ export default async function handler(req, res) {
         (u) =>
           u &&
           u.role !== 'Super Admin' &&
-          (String(u.email || '').toLowerCase() === normalizedUser ||
+          (String(u.name || '').trim().toLowerCase() === normalizedUser ||
+            String(u.email || '').trim().toLowerCase() === normalizedUser ||
+            String(u.id || '').trim().toLowerCase() === normalizedUser ||
             (u.mobile &&
               cleanDigits.length >= 10 &&
               String(u.mobile).replace(/\D/g, '').slice(-10) === cleanDigits.slice(-10)))
@@ -266,6 +247,7 @@ export default async function handler(req, res) {
             message: 'Your staff account has been deactivated. Please contact Super Admin.',
           });
         }
+        delete adminLoginAttempts[clientIp];
         const token = signAdminSessionToken({
           userId: staffMatch.id,
           name: staffMatch.name,
@@ -295,9 +277,15 @@ export default async function handler(req, res) {
       }
     }
 
+    if (!rateRecord || now >= rateRecord.resetAt) {
+      adminLoginAttempts[clientIp] = { count: 1, resetAt: now + 15 * 60 * 1000 };
+    } else {
+      rateRecord.count += 1;
+    }
+
     return res.status(401).json({
       success: false,
-      message: 'Invalid administrator credentials.',
+      message: 'Invalid username or password. Please verify your credentials and try again.',
     });
   }
 
@@ -1033,10 +1021,11 @@ export default async function handler(req, res) {
       background: #fff;
     }
     .hdr { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #000; padding-bottom: 8px; margin-bottom: 8px; }
-    .logo { font-size: 20px; font-weight: 900; letter-spacing: -0.5px; }
+    .logo-crop { width: 155px; height: 36px; overflow: hidden; display: flex; align-items: center; justify-content: flex-start; }
+    .logo-img { width: 200px; height: 200px; object-fit: cover; margin-left: -16px; mix-blend-mode: multiply; }
     .logo-del { font-size: 15px; font-weight: 900; color: #E52229; letter-spacing: 0.5px; }
     .routing { text-align: right; }
-    .sort-code { font-size: 22px; font-weight: 900; font-family: monospace; }
+    .sort-code { font-size: 20px; font-weight: 900; font-family: monospace; }
     .awb-box { text-align: center; border-bottom: 2px solid #000; padding: 10px 0; margin-bottom: 8px; }
     .barcode-bars {
       display: inline-block;
@@ -1051,7 +1040,9 @@ export default async function handler(req, res) {
     .sec-title { font-size: 10px; font-weight: 800; text-transform: uppercase; color: #333; margin-bottom: 3px; }
     .name { font-size: 14px; font-weight: 800; margin-bottom: 2px; }
     .addr { font-size: 11px; line-height: 1.4; }
-    .shipper { font-size: 10px; line-height: 1.4; border-bottom: 1px dashed #000; padding-bottom: 8px; margin-bottom: 8px; }
+    .shipper { font-size: 10px; line-height: 1.4; border-bottom: 1px dashed #000; padding-bottom: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .rto-emblem { width: 34px; height: 30px; overflow: hidden; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .rto-emblem img { width: 52px; height: 52px; object-fit: cover; mix-blend-mode: multiply; }
     .pay-pill { display: inline-block; background: #000; color: #fff; font-weight: 900; font-size: 13px; padding: 3px 8px; border-radius: 3px; }
     .footer { font-size: 9px; text-align: center; color: #444; }
   </style>
@@ -1059,8 +1050,10 @@ export default async function handler(req, res) {
 <body>
   <div class="hdr">
     <div>
-      <div class="logo">REDMODE</div>
-      <div style="font-size:10px; font-weight:700; color:#555;">WOMEN ETHNIC WEAR</div>
+      <div class="logo-crop">
+        <img src="/assets/aistudio/2_cc1df8cf.jpg" alt="REDMODE" class="logo-img" />
+      </div>
+      <div style="font-size:9px; font-weight:800; color:#555; letter-spacing:0.4px;">WOMEN ETHNIC WEAR &bull; EXPRESS</div>
     </div>
     <div class="routing">
       <div class="logo-del">DELHIVERY</div>
@@ -1092,14 +1085,19 @@ export default async function handler(req, res) {
     </div>
   </div>
   <div class="shipper">
-    <div class="sec-title">RETURN / PICKUP WAREHOUSE (ORIGIN):</div>
-    <strong>REDMODE B2C (Client: Redmode)</strong><br>
-    1807, Zakir Hussain Colony, Near Madina Masjid,<br>
-    Meerut, Uttar Pradesh, India - 250002<br>
-    Contact: +91 73027 97464 | myredmode@gmail.com
+    <div>
+      <div class="sec-title">RETURN / PICKUP WAREHOUSE (ORIGIN):</div>
+      <strong>REDMODE B2C (Client: Redmode)</strong><br>
+      1807, Zakir Hussain Colony, Near Madina Masjid,<br>
+      Meerut, Uttar Pradesh, India - 250002<br>
+      Contact: +91 73027 97464 | myredmode@gmail.com
+    </div>
+    <div class="rto-emblem">
+      <img src="/assets/aistudio/1_fdd0186c.jpg" alt="REDMODE" />
+    </div>
   </div>
   <div class="footer">
-    Official Delhivery B2C Thermal Dispatch Manifest • Non-Negotiable
+    Official REDMODE &times; Delhivery B2C Thermal Dispatch Label • Non-Negotiable
   </div>
   <script>
     window.onload = function() {

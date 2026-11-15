@@ -736,6 +736,7 @@ export interface AdminActivityLog {
 
 export type AdminRole =
   | 'Super Admin'
+  | 'Listing Admin'
   | 'Label Admin'
   | 'Listing + Label Admin';
 

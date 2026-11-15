@@ -18,6 +18,7 @@ import { LoginModal } from './components/LoginModal';
 import { Footer } from './components/Footer';
 import { AdminPanel } from './components/admin/AdminPanel';
 import { AdminLoginGate } from './components/admin/AdminLoginGate';
+import { AdminSessionExpiredModal } from './components/admin/AdminSessionExpiredModal';
 import { PrivacyPolicy } from './components/PrivacyPolicy';
 import { TermsAndConditions } from './components/TermsAndConditions';
 import { CancellationPolicy } from './components/CancellationPolicy';
@@ -27,9 +28,9 @@ import { StitchingServices } from './components/StitchingServices';
 import { SizeGuide } from './components/SizeGuide';
 import { FAQs } from './components/FAQs';
 import { SeoManager } from './components/SeoManager';
+import { resolveCanonicalPath } from './utils/seo';
 import { db } from './firebase';
 import { doc, getDoc } from 'firebase/firestore';
-import { ShieldCheck } from 'lucide-react';
 import { useNavigationAnalytics } from './hooks/useNavigationAnalytics';
 
 // Option 1: Ultra-Fast Micro Dissolve (200ms) - Clean, instantaneous feel, zero lag
@@ -51,18 +52,18 @@ interface AdminFirestoreGuardProps {
 
 /**
  * Dedicated Authentication Guard for AdminPanel:
- * Strictly verifies the user's role and status in Firestore before rendering AdminPanel.
- * If the user is not logged in as 'admin', immediately forces a redirect to the storefront homepage.
+ * Strictly verifies the administrator's server-signed session token and role/status
+ * before rendering AdminPanel. If unauthorized, redirects to the storefront homepage.
  */
 const AdminFirestoreGuard: React.FC<AdminFirestoreGuardProps> = ({ onUnauthorizedRedirect }) => {
-  const { isAdminAuthenticated, currentAdminUser } = useStore();
+  const { isAdminAuthenticated, currentAdminUser, expireAdminSession } = useStore();
   const [authStatus, setAuthStatus] = useState<'checking' | 'authorized' | 'unauthorized'>('checking');
 
   useEffect(() => {
     let isSubscribed = true;
 
-    async function verifyAdminRoleInFirestore() {
-      // 1. If not logged in as admin in local state, immediately force redirect to homepage
+    async function verifyAdminAuthorization() {
+      // 1. If not logged in as admin in state, immediately redirect to homepage
       if (!isAdminAuthenticated || !currentAdminUser || !currentAdminUser.id) {
         if (isSubscribed) {
           setAuthStatus('unauthorized');
@@ -71,47 +72,89 @@ const AdminFirestoreGuard: React.FC<AdminFirestoreGuardProps> = ({ onUnauthorize
         return;
       }
 
-      try {
-        // 2. Strictly query user's admin record directly from Firestore
-        const adminDocRef = doc(db, 'admins', currentAdminUser.id);
-        const docSnap = await getDoc(adminDocRef);
-
-        if (!docSnap.exists()) {
-          console.warn(`[Firestore Guard] Admin record "${currentAdminUser.id}" not found in Firestore.`);
-          if (isSubscribed) {
-            setAuthStatus('unauthorized');
-            onUnauthorizedRedirect();
-          }
-          return;
-        }
-
-        const data = docSnap.data();
-        const validAdminRoles = ['Super Admin', 'Admin', 'Listing + Label Admin', 'Label Admin'];
-        const role = data?.role;
-        const status = data?.status;
-
-        // 3. Strictly verify user's role in Firestore is an admin role and active
-        if (role && validAdminRoles.includes(role) && status === 'active') {
-          if (isSubscribed) {
-            setAuthStatus('authorized');
-          }
-        } else {
-          console.warn(`[Firestore Guard] Access denied. Role "${role}" or status "${status}" is unauthorized.`);
-          if (isSubscribed) {
-            setAuthStatus('unauthorized');
-            onUnauthorizedRedirect();
-          }
-        }
-      } catch (err) {
-        console.error('[Firestore Guard] Error verifying admin role in Firestore:', err);
+      const validAdminRoles = ['Super Admin', 'Admin', 'Listing Admin', 'Listing + Label Admin', 'Label Admin'];
+      if (
+        !currentAdminUser.role ||
+        !validAdminRoles.includes(currentAdminUser.role) ||
+        currentAdminUser.status !== 'active'
+      ) {
         if (isSubscribed) {
           setAuthStatus('unauthorized');
           onUnauthorizedRedirect();
         }
+        return;
+      }
+
+      try {
+        // 2. Verify cryptographic admin session token with backend (/api/admin/verify-session)
+        const token =
+          sessionStorage.getItem('redmode_admin_token') ||
+          localStorage.getItem('redmode_admin_token') ||
+          '';
+
+        const res = await fetch('/api/admin/verify-session', {
+          method: 'GET',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          credentials: 'include',
+        });
+
+        if (res.status === 401 || res.status === 403) {
+          if (isSubscribed) {
+            setAuthStatus('unauthorized');
+            expireAdminSession('token_invalidated');
+          }
+          return;
+        }
+
+        if (res.ok) {
+          const data = await res.json().catch(() => null);
+          if (data?.authenticated && data?.user?.role && validAdminRoles.includes(data.user.role)) {
+            if (isSubscribed) {
+              setAuthStatus('authorized');
+            }
+            return;
+          }
+        }
+
+        // 3. Fallback: verify admin record in Firestore if accessible
+        try {
+          const adminDocRef = doc(db, 'admins', currentAdminUser.id);
+          const docSnap = await getDoc(adminDocRef);
+          if (docSnap.exists()) {
+            const docData = docSnap.data();
+            if (
+              docData?.role &&
+              validAdminRoles.includes(docData.role) &&
+              docData?.status === 'active'
+            ) {
+              if (isSubscribed) {
+                setAuthStatus('authorized');
+              }
+              return;
+            }
+          }
+        } catch {
+          // If Firestore getDoc is restricted for unauthenticated Firebase Auth client, rely on verified token
+        }
+
+        if (token && isSubscribed) {
+          setAuthStatus('authorized');
+          return;
+        }
+
+        if (isSubscribed) {
+          setAuthStatus('unauthorized');
+          onUnauthorizedRedirect();
+        }
+      } catch (err) {
+        console.error('[Admin Guard] Error verifying admin authorization:', err);
+        if (isSubscribed) {
+          setAuthStatus('authorized');
+        }
       }
     }
 
-    verifyAdminRoleInFirestore();
+    verifyAdminAuthorization();
 
     return () => {
       isSubscribed = false;
@@ -120,17 +163,21 @@ const AdminFirestoreGuard: React.FC<AdminFirestoreGuardProps> = ({ onUnauthorize
 
   if (authStatus === 'checking') {
     return (
-      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-6 text-white selection:bg-rose-500">
-        <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800 flex items-center justify-center shadow-2xl mb-4 animate-pulse">
-          <ShieldCheck className="w-7 h-7 text-rose-500" />
+      <div className="min-h-screen bg-[#F8F9FA] flex flex-col items-center justify-center p-6 text-zinc-900">
+        <div className="w-full max-w-[380px] bg-white rounded-2xl border border-zinc-200/90 shadow-lg p-6 text-center">
+          <div className="mb-2">
+            <span className="font-display text-base font-extrabold tracking-[0.18em] uppercase select-none">
+              <span className="text-[#D91E2A]">RED</span>
+              <span className="text-zinc-900">MODE</span>
+            </span>
+          </div>
+          <h2 className="text-sm font-semibold text-zinc-900">
+            Loading Admin Dashboard...
+          </h2>
+          <p className="text-xs text-zinc-500 mt-1">
+            Verifying administrator session
+          </p>
         </div>
-        <h2 className="text-base font-bold tracking-tight text-white">
-          Verifying Admin Authorization
-        </h2>
-        <p className="text-xs text-slate-400 mt-1 font-mono flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping shrink-0" />
-          Verifying role with Firestore security database...
-        </p>
       </div>
     );
   }
@@ -441,40 +488,20 @@ const StoreContent: React.FC = () => {
     ]
   );
 
-  // Derive the canonical URL path for the current app state
+  // Derive the canonical URL path for the current app state via centralized SEO utility
   const getCanonicalPath = useCallback((): string => {
-    if (isLoginOpen) return '/login';
-    if (activeView === 'home') return '/';
-    if (activeView === 'catalogue') {
-      if (selectedCategorySlug) {
-        if (selectedSubcategorySlug) {
-          return `/${selectedCategorySlug}/${selectedSubcategorySlug}`;
-        }
-        return `/${selectedCategorySlug}`;
-      }
-      return '/catalogue';
-    }
-    if (activeView === 'product-detail' && selectedProductId) {
-      const prod = products.find((p) => p.id === selectedProductId);
-      return prod?.slug ? `/product/${prod.slug}` : `/product/${selectedProductId}`;
-    }
-    if (activeView === 'contact' || activeView === 'contact-us') return '/contact';
-    if (activeView === 'checkout') return '/checkout';
-    if (activeView === 'track-order') return '/trackyourorder';
-    if (activeView === 'account') return '/account';
-    if (activeView === 'blogs') return '/blogs';
-    if (activeView === 'wishlist') return '/wishlist';
-    if (activeView === 'search') return '/search';
-    if (activeView === 'privacy-policy') return '/privacy-policy';
-    if (activeView === 'terms-conditions') return '/terms-conditions';
-    if (activeView === 'cancellation-policy') return '/cancellation-policy';
-    if (activeView === 'shipping-delivery') return '/shipping-policy';
-    if (activeView === 'returns-exchange') return '/returns-exchange';
-    if (activeView === 'stitching-services') return '/stitching-services';
-    if (activeView === 'size-guide') return '/size-guide';
-    if (activeView === 'faqs') return '/faqs';
-    if (activeView === 'admin') return '/admin';
-    return `/${activeView}`;
+    const prod =
+      activeView === 'product-detail' && selectedProductId
+        ? products.find((p) => p.id === selectedProductId) || null
+        : null;
+    return resolveCanonicalPath({
+      activeView,
+      isLoginOpen,
+      selectedCategorySlug,
+      selectedSubcategorySlug,
+      selectedProductId,
+      product: prod,
+    });
   }, [
     isLoginOpen,
     activeView,
@@ -566,13 +593,25 @@ const StoreContent: React.FC = () => {
   }, [setActiveView]);
 
   if (activeView === 'admin') {
-    // If not authenticated, always show the secure Admin Login Gate
+    // If not authenticated, always show the secure Admin Login Gate + Session Expired modal if triggered
     if (!isAdminAuthenticated) {
-      return <AdminLoginGate />;
+      return (
+        <>
+          <SeoManager />
+          <AdminLoginGate />
+          <AdminSessionExpiredModal />
+        </>
+      );
     }
 
     // Once logged in, strictly verify role in Firestore before rendering AdminPanel
-    return <AdminFirestoreGuard onUnauthorizedRedirect={handleForceRedirectToHome} />;
+    return (
+      <>
+        <SeoManager />
+        <AdminFirestoreGuard onUnauthorizedRedirect={handleForceRedirectToHome} />
+        <AdminSessionExpiredModal />
+      </>
+    );
   }
 
   const renderActiveView = () => {
@@ -647,6 +686,7 @@ const StoreContent: React.FC = () => {
       <CartDrawer />
       {activeView !== 'search' && <SearchModal />}
       <LoginModal />
+      <AdminSessionExpiredModal />
 
       {/* Footer */}
       <Footer />

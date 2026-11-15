@@ -480,20 +480,75 @@ export const OrderManagementPanel: React.FC<OrderManagementPanelProps> = ({ init
     return raw.replace(/[^0-9]/g, '');
   };
 
+  const handleOpenSampleLabel = () => {
+    const sampleOrder: Order = {
+      id: 'SAMPLE-ORDER-RM2026',
+      createdAt: new Date().toISOString(),
+      orderStatus: 'Confirmed',
+      paymentMode: 'COD',
+      paymentStatus: 'COD',
+      subtotal: 1499,
+      discount: 0,
+      gst: 71,
+      deliveryCharge: 0,
+      total: 1499,
+      awb_number: 'RM606696100088IN',
+      customer: {
+        name: 'Ananya Sharma (Sample Customer)',
+        mobile: '+91 98765 43210',
+        phone: '+91 98765 43210',
+        email: 'ananya.sample@redmode.in',
+        house: 'Flat 402, Royal Heritage Apartments',
+        address: 'Connaught Place, Near Central Park',
+        landmark: 'Opposite Metro Gate 2',
+        city: 'New Delhi',
+        state: 'Delhi',
+        pincode: '110001',
+      },
+      items: [
+        {
+          productId: 'RM-SAMPLE-01',
+          name: 'REDMODE Crimson Embroidered Festive Kurta Set',
+          image: '/assets/aistudio/1_fdd0186c.jpg',
+          size: 'M',
+          color: 'Crimson Red',
+          quantity: 1,
+          price: 1499,
+        },
+      ],
+    };
+    setPrintModalTab('label');
+    setSelectedBulkOrdersForPrint(null);
+    setSelectedOrderForPrint(sampleOrder);
+  };
+
   return (
     <div className="space-y-5">
-      {/* 1. HEADER: Title & Subtitle with Order Icon */}
-      <div className="flex items-center justify-between border-b border-slate-200/80 pb-4">
+      {/* 1. HEADER: Title & Subtitle with Order Icon + Sample Label Button (Admin Only) */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/80 pb-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center shadow-xs shrink-0">
             <Package className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Orders</h1>
+            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Orders &amp; Shipping Labels</h1>
             <p className="text-xs text-slate-500 mt-0.5">
-              Manage customer confirmations, accepted orders and fulfillment.
+              Manage customer confirmations, accepted orders and REDMODE branded 4x6 thermal labels.
             </p>
           </div>
+        </div>
+
+        {/* Admin-Only Sample Shipping Label Preview & Download Button */}
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          <button
+            type="button"
+            onClick={handleOpenSampleLabel}
+            className="px-3.5 py-2 bg-[#E52229] hover:bg-red-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-2 shadow-xs cursor-pointer active:scale-95"
+            title="Preview and download a sample REDMODE 4x6 thermal shipping label with brand logo"
+          >
+            <Tag className="w-3.5 h-3.5" />
+            <span>Sample Label (Preview / Download)</span>
+          </button>
         </div>
       </div>
 

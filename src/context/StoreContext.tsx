@@ -735,6 +735,10 @@ interface StoreContextType {
 
   // Admin Security & Authentication
   isAdminAuthenticated: boolean;
+  isAdminSessionExpired: boolean;
+  adminSessionExpiredReason: 'inactivity' | 'token_invalidated' | null;
+  dismissAdminSessionExpired: () => void;
+  expireAdminSession: (reason?: 'inactivity' | 'token_invalidated') => void;
   adminLogin: (
     username: string,
     password: string,
@@ -776,7 +780,8 @@ interface StoreContextType {
     email: string;
     mobile?: string;
     password?: string;
-    role: 'Label Admin' | 'Listing + Label Admin';
+    role: 'Listing Admin' | 'Label Admin' | 'Listing + Label Admin';
+    permissions?: string[];
   }) => { success: boolean; message: string; user?: AdminUser };
   updateAdminUser: (
     id: string,
@@ -784,8 +789,9 @@ interface StoreContextType {
       name: string;
       email: string;
       mobile: string;
-      role: 'Label Admin' | 'Listing + Label Admin';
+      role: 'Listing Admin' | 'Label Admin' | 'Listing + Label Admin';
       password?: string;
+      permissions?: string[];
     }>
   ) => { success: boolean; message: string };
   toggleAdminUserStatus: (id: string) => { success: boolean; message: string };
@@ -833,6 +839,16 @@ const INITIAL_ADMIN_USERS: AdminUser[] = [
     status: 'active',
     lastLogin: new Date().toISOString(),
     createdAt: '2026-01-15T00:00:00.000Z',
+  },
+  {
+    id: 'admin-staff-listing-only',
+    name: 'Priya Nair',
+    email: 'priya.listing@redmode.in',
+    mobile: '+91 98334 56789',
+    role: 'Listing Admin',
+    status: 'active',
+    lastLogin: new Date().toISOString(),
+    createdAt: '2026-01-20T00:00:00.000Z',
   },
   {
     id: 'admin-staff-listing',
@@ -1115,19 +1131,44 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const initialNav = useMemo(() => parseCurrentLocation(INITIAL_PRODUCTS), []);
   const [activeView, setActiveView] = useState<ActiveView>(initialNav.view);
 
-  // Admin Security & Device Authentication State
+  // Admin Security & Device Authentication State (with 30-minute inactivity check)
+  const ADMIN_INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+  const ADMIN_LAST_ACTIVITY_KEY = 'redmode_admin_last_activity';
+
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState<boolean>(() => {
     try {
       const isTrusted = localStorage.getItem('redmode_admin_trusted') === 'true';
       const sessionAuth = sessionStorage.getItem('redmode_admin_auth') === 'true';
       if (!isTrusted && !sessionAuth) return false;
 
+      // Check if 30 minutes of inactivity elapsed while tab/browser was closed or idle
+      const rawLastActivity =
+        sessionStorage.getItem('redmode_admin_last_activity') ||
+        localStorage.getItem('redmode_admin_last_activity');
+      if (rawLastActivity) {
+        const elapsed = Date.now() - Number(rawLastActivity);
+        if (!isNaN(elapsed) && elapsed >= 30 * 60 * 1000) {
+          sessionStorage.removeItem('redmode_admin_auth');
+          sessionStorage.removeItem('redmode_admin_token');
+          sessionStorage.removeItem('redmode_admin_last_activity');
+          localStorage.removeItem('redmode_admin_trusted');
+          localStorage.removeItem('redmode_admin_token');
+          localStorage.removeItem('redmode_current_admin_user');
+          localStorage.removeItem('redmode_admin_last_activity');
+          sessionStorage.setItem('redmode_admin_expired_pending', 'inactivity');
+          return false;
+        }
+      }
+
       // Verify that stored admin user exists and holds an active admin role
       const savedUser = localStorage.getItem('redmode_current_admin_user');
       if (savedUser) {
         const parsed = JSON.parse(savedUser);
-        const validRoles: AdminRole[] = ['Super Admin', 'Label Admin', 'Listing + Label Admin'];
+        const validRoles: AdminRole[] = ['Super Admin', 'Listing Admin', 'Label Admin', 'Listing + Label Admin'];
         if (parsed && validRoles.includes(parsed.role) && parsed.status === 'active') {
+          const nowStr = String(Date.now());
+          sessionStorage.setItem('redmode_admin_last_activity', nowStr);
+          localStorage.setItem('redmode_admin_last_activity', nowStr);
           return true;
         }
       }
@@ -1135,6 +1176,27 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } catch (e) {
       return false;
     }
+  });
+
+  const [isAdminSessionExpired, setIsAdminSessionExpired] = useState<boolean>(() => {
+    try {
+      return Boolean(sessionStorage.getItem('redmode_admin_expired_pending'));
+    } catch {
+      return false;
+    }
+  });
+
+  const [adminSessionExpiredReason, setAdminSessionExpiredReason] = useState<
+    'inactivity' | 'token_invalidated' | null
+  >(() => {
+    try {
+      const pending = sessionStorage.getItem('redmode_admin_expired_pending');
+      if (pending === 'inactivity' || pending === 'token_invalidated') {
+        sessionStorage.removeItem('redmode_admin_expired_pending');
+        return pending;
+      }
+    } catch {}
+    return null;
   });
 
   const [adminSavedCredentials, setAdminSavedCredentials] = useState<{
@@ -1165,7 +1227,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          const validRoles: AdminRole[] = ['Super Admin', 'Label Admin', 'Listing + Label Admin'];
+          const validRoles: AdminRole[] = ['Super Admin', 'Listing Admin', 'Label Admin', 'Listing + Label Admin'];
           const filtered = parsed.filter((u: AdminUser) => validRoles.includes(u.role));
           const hasSuper = filtered.some((u: AdminUser) => u.role === 'Super Admin');
           if (hasSuper && filtered.length > 0) {
@@ -5096,7 +5158,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     email: string;
     mobile?: string;
     password?: string;
-    role: 'Label Admin' | 'Listing + Label Admin';
+    role: 'Listing Admin' | 'Label Admin' | 'Listing + Label Admin';
+    permissions?: string[];
   }): { success: boolean; message: string; user?: AdminUser } => {
     if (currentAdminUser.role !== 'Super Admin') {
       return { success: false, message: 'Unauthorized: Only Super Admin can create staff accounts.' };
@@ -5112,8 +5175,15 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (!cleanEmail || !cleanEmail.includes('@')) {
       return { success: false, message: 'Please enter a valid staff email address.' };
     }
-    if (cleanRole !== 'Label Admin' && cleanRole !== 'Listing + Label Admin') {
-      return { success: false, message: 'Invalid role. Only Label Admin and Listing + Label Admin are allowed.' };
+    if (
+      cleanRole !== 'Listing Admin' &&
+      cleanRole !== 'Label Admin' &&
+      cleanRole !== 'Listing + Label Admin'
+    ) {
+      return {
+        success: false,
+        message: 'Invalid role. Only Listing Admin, Label Admin, and Listing + Label Admin are allowed.',
+      };
     }
 
     const emailExists = adminUsers.some(
@@ -5131,6 +5201,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       password: data.password?.trim() || 'Staff@2026',
       role: cleanRole,
       status: 'active',
+      permissions: Array.isArray(data.permissions) ? data.permissions : undefined,
       createdAt: new Date().toISOString(),
     };
 
@@ -5161,8 +5232,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       name: string;
       email: string;
       mobile: string;
-      role: 'Label Admin' | 'Listing + Label Admin';
+      role: 'Listing Admin' | 'Label Admin' | 'Listing + Label Admin';
       password?: string;
+      permissions?: string[];
     }>
   ): { success: boolean; message: string } => {
     if (currentAdminUser.role !== 'Super Admin') {
@@ -5189,7 +5261,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     }
 
-    if (updates.role && updates.role !== 'Label Admin' && updates.role !== 'Listing + Label Admin') {
+    if (
+      updates.role &&
+      updates.role !== 'Listing Admin' &&
+      updates.role !== 'Label Admin' &&
+      updates.role !== 'Listing + Label Admin'
+    ) {
       return { success: false, message: 'Invalid role selection.' };
     }
 
@@ -5199,6 +5276,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       name: updates.name ? updates.name.trim() : targetUser.name,
       email: updates.email ? updates.email.trim().toLowerCase() : targetUser.email,
       mobile: updates.mobile !== undefined ? updates.mobile.trim() : targetUser.mobile,
+      permissions:
+        updates.permissions !== undefined ? updates.permissions : targetUser.permissions,
       updatedAt: new Date().toISOString(),
     };
 
@@ -6275,13 +6354,26 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             <title>REDMODE Dispatch Manifest</title>
             <style>
               body { font-family: sans-serif; padding: 24px; color: #0f172a; }
+              .hdr { display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid #0f172a; padding-bottom: 12px; margin-bottom: 16px; }
+              .logo-crop { width: 175px; height: 42px; overflow: hidden; display: flex; align-items: center; justify-content: flex-start; }
+              .logo-img { width: 220px; height: 220px; object-fit: cover; margin-left: -18px; mix-blend-mode: multiply; }
               table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 12px; }
               th { background: #f1f5f9; padding: 8px; border: 1px solid #cbd5e1; text-align: left; }
             </style>
           </head>
           <body>
-            <h2>REDMODE COURIER DISPATCH MANIFEST</h2>
-            <p>Date: ${new Date().toLocaleDateString('en-IN')} &bull; Total Consignments: ${validAwbs.length}</p>
+            <div class="hdr">
+              <div>
+                <div class="logo-crop">
+                  <img src="/assets/aistudio/2_cc1df8cf.jpg" alt="REDMODE" class="logo-img" />
+                </div>
+                <div style="font-size: 11px; font-weight: 700; color: #475569; margin-top: 2px;">COURIER DISPATCH MANIFEST &bull; WOMEN'S FASHION &amp; GARMENTS</div>
+              </div>
+              <div style="text-align: right; font-size: 12px;">
+                <strong>Date:</strong> ${new Date().toLocaleDateString('en-IN')}<br/>
+                <strong>Total Consignments:</strong> ${validAwbs.length}
+              </div>
+            </div>
             <table>
               <thead>
                 <tr>
@@ -6295,7 +6387,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 ${rows}
               </tbody>
             </table>
-            <script>window.print();</script>
+            <script>window.onload = function() { setTimeout(function() { window.print(); }, 350); };</script>
           </body>
           </html>
         `);
@@ -6460,29 +6552,189 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     updateMenuHighlights(updated);
   };
 
-  // Verify server-side admin session token when authenticated so "Logout from all other devices" invalidates stale sessions
+  const dismissAdminSessionExpired = useCallback(() => {
+    setIsAdminSessionExpired(false);
+    setAdminSessionExpiredReason(null);
+    try {
+      sessionStorage.removeItem('redmode_admin_expired_pending');
+    } catch {}
+  }, []);
+
+  const expireAdminSession = useCallback(
+    (reason: 'inactivity' | 'token_invalidated' = 'inactivity') => {
+      const token =
+        sessionStorage.getItem('redmode_admin_token') ||
+        localStorage.getItem('redmode_admin_token') ||
+        '';
+      if (token) {
+        fetch('/api/admin/logout', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+          credentials: 'include',
+        }).catch(() => {});
+      }
+
+      setIsAdminAuthenticated(false);
+      setAdminSessionExpiredReason(reason);
+      setIsAdminSessionExpired(true);
+
+      try {
+        sessionStorage.removeItem('redmode_admin_auth');
+        sessionStorage.removeItem('redmode_admin_token');
+        sessionStorage.removeItem(ADMIN_LAST_ACTIVITY_KEY);
+        localStorage.removeItem('redmode_admin_trusted');
+        localStorage.removeItem('redmode_admin_token');
+        localStorage.removeItem('redmode_current_admin_user');
+        localStorage.removeItem(ADMIN_LAST_ACTIVITY_KEY);
+      } catch {}
+
+      const superAdmin =
+        adminUsers.find((u) => u.role === 'Super Admin') || INITIAL_ADMIN_USERS[0];
+      setCurrentAdminUser(superAdmin);
+    },
+    [adminUsers, ADMIN_LAST_ACTIVITY_KEY]
+  );
+
+  // Automatic 30-Minute Inactivity Session Timeout & Token Validation Engine
   useEffect(() => {
     if (!isAdminAuthenticated) return;
-    const token =
-      sessionStorage.getItem('redmode_admin_token') ||
-      localStorage.getItem('redmode_admin_token') ||
-      '';
-    fetch('/api/admin/verify-session', {
-      method: 'GET',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      credentials: 'include',
-    })
-      .then((r) => {
-        if (r.status === 401) {
-          setIsAdminAuthenticated(false);
-          sessionStorage.removeItem('redmode_admin_auth');
-          sessionStorage.removeItem('redmode_admin_token');
-          localStorage.removeItem('redmode_admin_trusted');
-          localStorage.removeItem('redmode_admin_token');
+
+    let inactivityTimerId: ReturnType<typeof setTimeout> | null = null;
+    let lastRecordedMs = Date.now();
+
+    const readLastActivity = (): number => {
+      try {
+        const stored =
+          sessionStorage.getItem(ADMIN_LAST_ACTIVITY_KEY) ||
+          localStorage.getItem(ADMIN_LAST_ACTIVITY_KEY);
+        if (stored) {
+          const parsed = Number(stored);
+          if (!isNaN(parsed) && parsed > 0) return parsed;
         }
+      } catch {}
+      return lastRecordedMs;
+    };
+
+    const writeLastActivity = (ts: number) => {
+      lastRecordedMs = ts;
+      try {
+        const str = String(ts);
+        sessionStorage.setItem(ADMIN_LAST_ACTIVITY_KEY, str);
+        localStorage.setItem(ADMIN_LAST_ACTIVITY_KEY, str);
+      } catch {}
+    };
+
+    const scheduleTimeoutCheck = () => {
+      if (inactivityTimerId) clearTimeout(inactivityTimerId);
+      const elapsed = Date.now() - readLastActivity();
+      const remaining = Math.max(ADMIN_INACTIVITY_TIMEOUT_MS - elapsed, 0);
+      inactivityTimerId = setTimeout(() => {
+        const currentElapsed = Date.now() - readLastActivity();
+        if (currentElapsed >= ADMIN_INACTIVITY_TIMEOUT_MS) {
+          expireAdminSession('inactivity');
+        } else {
+          scheduleTimeoutCheck();
+        }
+      }, remaining + 50);
+    };
+
+    // Initialize activity timestamp if missing
+    const initialLast = readLastActivity();
+    if (Date.now() - initialLast >= ADMIN_INACTIVITY_TIMEOUT_MS) {
+      expireAdminSession('inactivity');
+      return;
+    }
+    writeLastActivity(Date.now());
+    scheduleTimeoutCheck();
+
+    // Throttled user activity handler (updates timestamp at most once every 5s)
+    const handleUserActivity = () => {
+      const now = Date.now();
+      if (now - readLastActivity() >= ADMIN_INACTIVITY_TIMEOUT_MS) {
+        expireAdminSession('inactivity');
+        return;
+      }
+      if (now - lastRecordedMs >= 5000) {
+        writeLastActivity(now);
+        scheduleTimeoutCheck();
+      }
+    };
+
+    const verifyServerToken = () => {
+      const token =
+        sessionStorage.getItem('redmode_admin_token') ||
+        localStorage.getItem('redmode_admin_token') ||
+        '';
+      fetch('/api/admin/verify-session', {
+        method: 'GET',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        credentials: 'include',
       })
-      .catch(() => {});
-  }, [isAdminAuthenticated]);
+        .then((r) => {
+          if (r.status === 401 || r.status === 403) {
+            expireAdminSession('token_invalidated');
+          }
+        })
+        .catch(() => {});
+    };
+
+    // Verify token immediately on mount/auth and periodically
+    verifyServerToken();
+
+    const intervalId = setInterval(() => {
+      const elapsed = Date.now() - readLastActivity();
+      if (elapsed >= ADMIN_INACTIVITY_TIMEOUT_MS) {
+        expireAdminSession('inactivity');
+      }
+    }, 15000);
+
+    const tokenVerifyIntervalId = setInterval(verifyServerToken, 120000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        const elapsed = Date.now() - readLastActivity();
+        if (elapsed >= ADMIN_INACTIVITY_TIMEOUT_MS) {
+          expireAdminSession('inactivity');
+        } else {
+          verifyServerToken();
+        }
+      }
+    };
+
+    const handleStorageSync = (e: StorageEvent) => {
+      if (e.key === 'redmode_admin_token' && !e.newValue) {
+        expireAdminSession('token_invalidated');
+      } else if (e.key === ADMIN_LAST_ACTIVITY_KEY && e.newValue) {
+        lastRecordedMs = Number(e.newValue) || Date.now();
+        scheduleTimeoutCheck();
+      }
+    };
+
+    const activityEvents: (keyof WindowEventMap)[] = [
+      'mousemove',
+      'mousedown',
+      'keydown',
+      'touchstart',
+      'scroll',
+      'click',
+    ];
+    activityEvents.forEach((evt) =>
+      window.addEventListener(evt, handleUserActivity, { passive: true })
+    );
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('storage', handleStorageSync);
+
+    return () => {
+      if (inactivityTimerId) clearTimeout(inactivityTimerId);
+      clearInterval(intervalId);
+      clearInterval(tokenVerifyIntervalId);
+      activityEvents.forEach((evt) =>
+        window.removeEventListener(evt, handleUserActivity)
+      );
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('storage', handleStorageSync);
+    };
+  }, [isAdminAuthenticated, expireAdminSession, ADMIN_INACTIVITY_TIMEOUT_MS, ADMIN_LAST_ACTIVITY_KEY]);
 
   // Admin Authentication Actions (Server-Side Verified Session Token)
   const adminLogin = async (
@@ -6508,7 +6760,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (!res.ok || !data?.success) {
         return {
           success: false,
-          message: data?.message || 'Invalid credentials. Please enter your correct mobile number and password.',
+          message: data?.message || 'Invalid username or password. Please verify your credentials and try again.',
         };
       }
 
@@ -6538,6 +6790,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           localStorage.setItem('redmode_admin_users', JSON.stringify(updatedList));
         } catch (e) {}
       }
+
+      const nowStr = String(Date.now());
+      sessionStorage.setItem(ADMIN_LAST_ACTIVITY_KEY, nowStr);
+      localStorage.setItem(ADMIN_LAST_ACTIVITY_KEY, nowStr);
+      sessionStorage.removeItem('redmode_admin_expired_pending');
+      setIsAdminSessionExpired(false);
+      setAdminSessionExpiredReason(null);
 
       setIsAdminAuthenticated(true);
       sessionStorage.setItem('redmode_admin_auth', 'true');
@@ -6593,6 +6852,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           setCurrentAdminUser(data.user);
           localStorage.setItem('redmode_current_admin_user', JSON.stringify(data.user));
         }
+        const nowStr = String(Date.now());
+        sessionStorage.setItem(ADMIN_LAST_ACTIVITY_KEY, nowStr);
+        localStorage.setItem(ADMIN_LAST_ACTIVITY_KEY, nowStr);
+        sessionStorage.removeItem('redmode_admin_expired_pending');
+        setIsAdminSessionExpired(false);
+        setAdminSessionExpiredReason(null);
         setIsAdminAuthenticated(true);
         sessionStorage.setItem('redmode_admin_auth', 'true');
         localStorage.setItem('redmode_admin_trusted', 'true');
@@ -6614,11 +6879,16 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }).catch(() => {});
 
     setIsAdminAuthenticated(false);
+    setIsAdminSessionExpired(false);
+    setAdminSessionExpiredReason(null);
     sessionStorage.removeItem('redmode_admin_auth');
     sessionStorage.removeItem('redmode_admin_token');
+    sessionStorage.removeItem(ADMIN_LAST_ACTIVITY_KEY);
+    sessionStorage.removeItem('redmode_admin_expired_pending');
     localStorage.removeItem('redmode_admin_trusted');
     localStorage.removeItem('redmode_admin_token');
     localStorage.removeItem('redmode_current_admin_user');
+    localStorage.removeItem(ADMIN_LAST_ACTIVITY_KEY);
     const superAdmin =
       adminUsers.find((u) => u.role === 'Super Admin') || INITIAL_ADMIN_USERS[0];
     setCurrentAdminUser(superAdmin);
@@ -6778,6 +7048,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         incrementProductViews,
         // Admin Auth
         isAdminAuthenticated,
+        isAdminSessionExpired,
+        adminSessionExpiredReason,
+        dismissAdminSessionExpired,
+        expireAdminSession,
         adminLogin,
         adminGoogleLogin,
         adminLogout,

@@ -27,7 +27,7 @@ service cloud.firestore {
     function hasValidAdminAuditStamp(data) {
       return data is map &&
         (!('updatedByRole' in data) ||
-          data.updatedByRole in ['Super Admin', 'Listing + Label Admin', 'Label Admin']);
+          data.updatedByRole in ['Super Admin', 'Listing Admin', 'Listing + Label Admin', 'Label Admin']);
     }
 
     function isValidProductPayload(data) {
@@ -71,7 +71,7 @@ service cloud.firestore {
       allow get: if isSignedIn() && (request.auth.uid == adminId || isAdmin());
       allow list: if isAdmin();
       allow create, update: if isAdmin() &&
-        request.resource.data.role in ['Super Admin', 'Listing + Label Admin', 'Label Admin'] &&
+        request.resource.data.role in ['Super Admin', 'Listing Admin', 'Listing + Label Admin', 'Label Admin'] &&
         !('password' in request.resource.data);
       allow delete: if isSuperAdminEmail();
     }

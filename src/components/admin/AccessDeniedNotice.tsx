@@ -1,48 +1,113 @@
 import React from 'react';
-import { ShieldAlert, ArrowLeft } from 'lucide-react';
-import { AdminRole } from '../../types';
+import { ShieldAlert, ArrowRight, Lock } from 'lucide-react';
+import { AdminRole, AdminUser } from '../../types';
+import {
+  AdminPermission,
+  hasAllPermissions,
+  hasAnyPermission,
+  PERMISSION_CATALOG,
+} from '../../utils/rbac';
 
 interface AccessDeniedNoticeProps {
   role: AdminRole;
   section: string;
+  requiredPermission?: AdminPermission | string;
   onRedirect: () => void;
 }
 
 export const AccessDeniedNotice: React.FC<AccessDeniedNoticeProps> = ({
   role,
   section,
+  requiredPermission,
   onRedirect,
 }) => {
+  const defaultWorkspaceName =
+    role === 'Label Admin'
+      ? 'Orders & Shipping Labels'
+      : role === 'Listing Admin' || role === 'Listing + Label Admin'
+      ? 'Product Catalog & Listings'
+      : 'Dashboard';
+
+  const permissionDef = requiredPermission
+    ? PERMISSION_CATALOG.find((p) => p.key === requiredPermission)
+    : undefined;
+
   return (
-    <div className="min-h-[420px] flex items-center justify-center p-6">
-      <div className="bg-white rounded-2xl border border-rose-200 p-8 max-w-md w-full text-center shadow-sm space-y-4">
-        <div className="w-16 h-16 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center mx-auto border border-rose-200 shadow-inner">
-          <ShieldAlert className="w-8 h-8" />
-        </div>
+    <div className="bg-white border border-rose-200 rounded-2xl p-8 max-w-xl mx-auto my-8 text-center shadow-xs space-y-4">
+      <div className="w-12 h-12 rounded-2xl bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center mx-auto">
+        <ShieldAlert className="w-6 h-6" />
+      </div>
+      <div className="space-y-1.5">
+        <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-rose-100 text-rose-800">
+          Role-Based Access Control (RBAC)
+        </span>
+        <h3 className="text-lg font-extrabold text-slate-900">
+          Restricted Access: {section}
+        </h3>
+        <p className="text-xs text-slate-600 leading-relaxed max-w-md mx-auto">
+          Your active staff role is{' '}
+          <strong className="text-slate-900 font-bold">{role}</strong>. Access to{' '}
+          <span className="font-semibold text-slate-800">{section}</span> is
+          restricted to authorized roles or accounts granted the required
+          granular permission by the{' '}
+          <strong className="text-rose-600 font-semibold">Super Admin</strong>.
+        </p>
+      </div>
 
-        <div>
-          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase bg-rose-100 text-rose-800 border border-rose-200">
-            Access Restricted (403)
+      {requiredPermission && (
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-700">
+          <Lock className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+          <span>
+            Required Permission:{' '}
+            <code className="font-mono font-bold text-slate-900">
+              {permissionDef ? `${permissionDef.label} (${requiredPermission})` : requiredPermission}
+            </code>
           </span>
-          <h3 className="text-lg font-extrabold text-slate-900 mt-2">
-            Section Restricted: {section}
-          </h3>
-          <p className="text-xs text-slate-500 mt-2 leading-relaxed">
-            Your current staff role (<strong>{role}</strong>) does not have authorization to view or configure this administrative area.
-          </p>
         </div>
+      )}
 
-        <div className="pt-2">
-          <button
-            type="button"
-            onClick={onRedirect}
-            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-slate-950 hover:bg-slate-800 text-white text-xs font-bold transition shadow-xs cursor-pointer"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Return to Your Assigned Workspace</span>
-          </button>
-        </div>
+      <div className="pt-2">
+        <button
+          type="button"
+          onClick={onRedirect}
+          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-black text-white text-xs font-bold transition shadow-xs cursor-pointer"
+        >
+          <span>Go to {defaultWorkspaceName}</span>
+          <ArrowRight className="w-3.5 h-3.5" />
+        </button>
       </div>
     </div>
   );
+};
+
+interface PermissionGuardProps {
+  user: AdminUser | AdminRole | null | undefined;
+  permission: AdminPermission | AdminPermission[];
+  mode?: 'any' | 'all';
+  fallback?: React.ReactNode;
+  children: React.ReactNode;
+}
+
+/**
+ * Declarative wrapper component that conditionally renders children only if the
+ * current admin user holds the required granular permission(s).
+ */
+export const PermissionGuard: React.FC<PermissionGuardProps> = ({
+  user,
+  permission,
+  mode = 'any',
+  fallback = null,
+  children,
+}) => {
+  const permissions = Array.isArray(permission) ? permission : [permission];
+  const allowed =
+    mode === 'all'
+      ? hasAllPermissions(user, permissions)
+      : hasAnyPermission(user, permissions);
+
+  if (!allowed) {
+    return <>{fallback}</>;
+  }
+
+  return <>{children}</>;
 };

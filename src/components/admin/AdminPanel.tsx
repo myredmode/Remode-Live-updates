@@ -82,8 +82,18 @@ import {
 } from 'lucide-react';
 import { getOrderBatchStatus, getMetaWhatsAppTemplates } from '../../utils/orderTiming';
 import { AdminLoginGate } from './AdminLoginGate';
-import { AccessDeniedNotice } from './AccessDeniedNotice';
-import { hasPermission, isTabAllowed, getDefaultTabForRole, getRoleBadgeInfo } from '../../utils/rbac';
+import { AccessDeniedNotice, PermissionGuard } from './AccessDeniedNotice';
+import {
+  AdminPermission,
+  PERMISSION_CATALOG,
+  PermissionCategory,
+  hasPermission,
+  getEffectivePermissions,
+  getDefaultPermissionsForRole,
+  isTabAllowed,
+  getDefaultTabForRole,
+  getRoleBadgeInfo,
+} from '../../utils/rbac';
 import { recordFirestoreAuditLog, AuditLogPayload } from '../../utils/auditLogger';
 export { recordFirestoreAuditLog as logAdminSecurityAction } from '../../utils/auditLogger';
 import {
@@ -137,8 +147,21 @@ export const AdminPanel: React.FC = () => {
 
   // Navigation State
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
-    return getDefaultTabForRole(currentAdminUser.role);
+    return getDefaultTabForRole(currentAdminUser);
   });
+
+  // Granular Permission Evaluation Helper for AdminPanel rendering logic
+  const can = useCallback(
+    (permission: AdminPermission): boolean => {
+      return hasPermission(currentAdminUser, permission);
+    },
+    [currentAdminUser]
+  );
+
+  const effectivePermissions = useMemo(
+    () => getEffectivePermissions(currentAdminUser),
+    [currentAdminUser]
+  );
   const [catalogExpanded, setCatalogExpanded] = useState(false);
   const [financesExpanded, setFinancesExpanded] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -223,12 +246,12 @@ export const AdminPanel: React.FC = () => {
     [updateSettings, logCriticalAdminAction]
   );
 
-  // Enforce role-based tab access
+  // Enforce role-based and granular permission-based tab access
   useEffect(() => {
-    if (!isTabAllowed(currentAdminUser.role, activeTab)) {
-      setActiveTab(getDefaultTabForRole(currentAdminUser.role));
+    if (!isTabAllowed(currentAdminUser, activeTab)) {
+      setActiveTab(getDefaultTabForRole(currentAdminUser));
     }
-  }, [currentAdminUser.role, activeTab]);
+  }, [currentAdminUser, activeTab]);
 
   // Close user dropdown on outside click or Escape
   useEffect(() => {
@@ -304,7 +327,17 @@ export const AdminPanel: React.FC = () => {
   const [newAdminEmail, setNewAdminEmail] = useState('');
   const [newAdminMobile, setNewAdminMobile] = useState('');
   const [newAdminPassword, setNewAdminPassword] = useState('');
-  const [newAdminRole, setNewAdminRole] = useState<'Label Admin' | 'Listing + Label Admin' | ''>('Label Admin');
+  const [newAdminRole, setNewAdminRole] = useState<
+    'Listing Admin' | 'Label Admin' | 'Listing + Label Admin' | ''
+  >('Listing Admin');
+  const [newAdminPermissions, setNewAdminPermissions] = useState<AdminPermission[]>(() =>
+    getDefaultPermissionsForRole('Listing Admin')
+  );
+  const [permissionEditorUser, setPermissionEditorUser] = useState<AdminUser | null>(null);
+  const [permissionEditorDraft, setPermissionEditorDraft] = useState<AdminPermission[]>([]);
+  const [permissionEditorRoleDraft, setPermissionEditorRoleDraft] = useState<
+    'Listing Admin' | 'Label Admin' | 'Listing + Label Admin'
+  >('Listing Admin');
   const [formErrors, setFormErrors] = useState<{
     name?: string;
     email?: string;
@@ -322,7 +355,8 @@ export const AdminPanel: React.FC = () => {
     setNewAdminEmail('');
     setNewAdminMobile('');
     setNewAdminPassword('');
-    setNewAdminRole('Label Admin');
+    setNewAdminRole('Listing Admin');
+    setNewAdminPermissions(getDefaultPermissionsForRole('Listing Admin'));
     setIsAddAdminModalOpen(true);
   };
 
@@ -330,6 +364,49 @@ export const AdminPanel: React.FC = () => {
     setIsAddAdminModalOpen(false);
     setAdminMgmtError(null);
     setFormErrors({});
+  };
+
+  const handleOpenPermissionEditor = (targetAdmin: AdminUser) => {
+    if (targetAdmin.role === 'Super Admin') return;
+    setPermissionEditorUser(targetAdmin);
+    setPermissionEditorRoleDraft(targetAdmin.role);
+    setPermissionEditorDraft(getEffectivePermissions(targetAdmin));
+  };
+
+  const handleSavePermissionEditor = () => {
+    if (!permissionEditorUser) return;
+    const res = updateAdminUser(permissionEditorUser.id, {
+      role: permissionEditorRoleDraft,
+      permissions: permissionEditorDraft,
+    });
+    if (res.success) {
+      setLocalAdminUsers((prev) =>
+        prev.map((u) =>
+          u.id === permissionEditorUser.id
+            ? { ...u, role: permissionEditorRoleDraft, permissions: permissionEditorDraft }
+            : u
+        )
+      );
+      setAdminMgmtSuccess(
+        `Updated role (${permissionEditorRoleDraft}) and ${permissionEditorDraft.length} granular permissions for ${permissionEditorUser.name}.`
+      );
+      setTimeout(() => setAdminMgmtSuccess(null), 4000);
+      logCriticalAdminAction(
+        `Updated granular permissions for '${permissionEditorUser.name}' (${permissionEditorRoleDraft})`,
+        'User',
+        permissionEditorUser.id,
+        {
+          oldValue: `Role: ${permissionEditorUser.role}`,
+          newValue: `Role: ${permissionEditorRoleDraft} (${permissionEditorDraft.length} permissions)`,
+          metadata: {
+            userId: permissionEditorUser.id,
+            role: permissionEditorRoleDraft,
+            permissions: permissionEditorDraft,
+          },
+        }
+      );
+    }
+    setPermissionEditorUser(null);
   };
 
   // Lock body scroll and listen for ESC key when Add Admin modal is open
@@ -436,8 +513,12 @@ export const AdminPanel: React.FC = () => {
     // 3. Validate Role Selection
     if (!newAdminRole) {
       errors.role = 'Please select a role for the administrator.';
-    } else if (newAdminRole !== 'Label Admin' && newAdminRole !== 'Listing + Label Admin') {
-      errors.role = 'Invalid role. Only Label Admin or Listing + Label Admin are allowed.';
+    } else if (
+      newAdminRole !== 'Listing Admin' &&
+      newAdminRole !== 'Label Admin' &&
+      newAdminRole !== 'Listing + Label Admin'
+    ) {
+      errors.role = 'Invalid role. Only Listing Admin, Label Admin, or Listing + Label Admin are allowed.';
     }
 
     // 4. Optional Mobile Number validation
@@ -467,7 +548,8 @@ export const AdminPanel: React.FC = () => {
       email: cleanEmail,
       mobile: newAdminMobile.trim() || undefined,
       password: newAdminPassword.trim() || undefined,
-      role: newAdminRole as 'Label Admin' | 'Listing + Label Admin',
+      role: newAdminRole as 'Listing Admin' | 'Label Admin' | 'Listing + Label Admin',
+      permissions: newAdminPermissions,
     });
 
     if (!res.success) {
@@ -489,19 +571,20 @@ export const AdminPanel: React.FC = () => {
     setNewAdminEmail('');
     setNewAdminMobile('');
     setNewAdminPassword('');
-    setNewAdminRole('Label Admin');
+    setNewAdminRole('Listing Admin');
+    setNewAdminPermissions(getDefaultPermissionsForRole('Listing Admin'));
     setFormErrors({});
     setAdminMgmtError(null);
     setIsAddAdminModalOpen(false);
     setTimeout(() => setAdminMgmtSuccess(null), 4000);
   };
 
-  // Synchronize activeTab if role changes
+  // Synchronize activeTab if role or permissions change
   useEffect(() => {
-    if (!isTabAllowed(currentAdminUser.role, activeTab)) {
-      setActiveTab(getDefaultTabForRole(currentAdminUser.role));
+    if (!isTabAllowed(currentAdminUser, activeTab)) {
+      setActiveTab(getDefaultTabForRole(currentAdminUser));
     }
-  }, [currentAdminUser.role, activeTab]);
+  }, [currentAdminUser, activeTab]);
 
   // Filter States
   const [timeFilter, setTimeFilter] = useState<TimeFilter>('Yearly');
@@ -1186,7 +1269,7 @@ export const AdminPanel: React.FC = () => {
     if (!isAdminAuthenticated) return false;
     if (!currentAdminUser) return false;
     if (currentAdminUser.status === 'disabled') return false;
-    const validRoles = ['Super Admin', 'Label Admin', 'Listing + Label Admin'];
+    const validRoles = ['Super Admin', 'Listing Admin', 'Label Admin', 'Listing + Label Admin'];
     return validRoles.includes(currentAdminUser.role);
   }, [isAdminAuthenticated, currentAdminUser]);
 
@@ -1251,18 +1334,21 @@ export const AdminPanel: React.FC = () => {
                         <p className="text-sm font-bold text-slate-900 truncate leading-tight">
                           {currentAdminUser.name}
                         </p>
-                        <div className="flex items-center gap-1 mt-0.5">
+                        <div className="flex items-center gap-1 mt-0.5 flex-wrap">
                           {currentAdminUser.role === 'Super Admin' ? (
                             <span className="text-[10px] font-bold uppercase tracking-wider text-red-600">
                               SUPER ADMIN
                             </span>
                           ) : (
                             <span
-                              className={`text-[9px] px-1.5 py-0.2 rounded font-medium uppercase ${roleBadge.badgeBg} ${roleBadge.badgeText}`}
+                              className={`text-[9px] px-1.5 py-0.2 rounded font-medium uppercase border ${roleBadge.colorClass}`}
                             >
                               {currentAdminUser.role}
                             </span>
                           )}
+                          <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200 font-semibold">
+                            {effectivePermissions.length} Perms
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -1276,45 +1362,86 @@ export const AdminPanel: React.FC = () => {
                   {/* Merged Inline Collapsible Options (Seamlessly inside the same box) */}
                   {isUserMenuOpen && (
                     <div className="border-t border-slate-200/80 p-1.5 space-y-1 bg-slate-50/60 animate-in fade-in slide-in-from-top-1 duration-150">
-                      {currentAdminUser.role === 'Super Admin' && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSettingsInitialSection('profile');
-                              setActiveTab('settings');
-                            }}
-                            className={`w-full flex items-center gap-2.5 px-3 py-2 text-xs rounded-xl transition cursor-pointer font-medium ${
-                              activeTab === 'settings'
-                                ? 'bg-white text-slate-950 font-bold shadow-2xs'
-                                : 'text-slate-700 hover:text-slate-900 hover:bg-white/80'
-                            }`}
-                          >
-                            <Settings className="w-4 h-4 text-slate-500" />
-                            <span>Profile & Settings</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setActiveTab('admin-management');
-                            }}
-                            className={`w-full flex items-center justify-between px-3 py-2 text-xs rounded-xl transition cursor-pointer font-medium ${
-                              activeTab === 'admin-management'
-                                ? 'bg-white text-slate-950 font-bold shadow-2xs'
-                                : 'text-slate-700 hover:text-slate-900 hover:bg-white/80'
-                            }`}
-                          >
-                            <div className="flex items-center gap-2.5">
-                              <Users className="w-4 h-4 text-slate-500" />
-                              <span>Admin Management</span>
-                            </div>
-                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-200/80 text-slate-600 font-semibold uppercase border border-slate-300/60">
-                              Roles
-                            </span>
-                          </button>
-                        </>
+                      {can('view_settings') && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSettingsInitialSection('profile');
+                            setActiveTab('settings');
+                          }}
+                          className={`w-full flex items-center gap-2.5 px-3 py-2 text-xs rounded-xl transition cursor-pointer font-medium ${
+                            activeTab === 'settings'
+                              ? 'bg-white text-slate-950 font-bold shadow-2xs'
+                              : 'text-slate-700 hover:text-slate-900 hover:bg-white/80'
+                          }`}
+                        >
+                          <Settings className="w-4 h-4 text-slate-500" />
+                          <span>Profile &amp; Settings</span>
+                        </button>
                       )}
+
+                      {can('manage_admins') && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveTab('admin-management');
+                          }}
+                          className={`w-full flex items-center justify-between px-3 py-2 text-xs rounded-xl transition cursor-pointer font-medium ${
+                            activeTab === 'admin-management'
+                              ? 'bg-white text-slate-950 font-bold shadow-2xs'
+                              : 'text-slate-700 hover:text-slate-900 hover:bg-white/80'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5">
+                            <Users className="w-4 h-4 text-slate-500" />
+                            <span>Admin Management</span>
+                          </div>
+                          <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-200/80 text-slate-600 font-semibold uppercase border border-slate-300/60">
+                            Roles
+                          </span>
+                        </button>
+                      )}
+
+                      {/* Quick Role Persona Switcher to verify RBAC restrictions */}
+                      {localAdminUsers.filter((u) => u.status === 'active').length > 1 && (
+                        <div className="pt-1 mt-1 border-t border-slate-200/70">
+                          <div className="px-2.5 py-1 text-[9px] font-bold uppercase tracking-wider text-slate-400">
+                            Switch Active Role View
+                          </div>
+                          <div className="space-y-0.5">
+                            {localAdminUsers
+                              .filter((u) => u.status === 'active')
+                              .map((u) => (
+                                <button
+                                  key={u.id}
+                                  type="button"
+                                  onClick={() => {
+                                    switchAdminUser(u);
+                                    setActiveTab(getDefaultTabForRole(u));
+                                    setIsUserMenuOpen(false);
+                                  }}
+                                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-[11px] rounded-lg transition cursor-pointer ${
+                                    u.id === currentAdminUser.id
+                                      ? 'bg-slate-900 text-white font-bold'
+                                      : 'text-slate-700 hover:bg-white'
+                                  }`}
+                                >
+                                  <span className="truncate">{u.name}</span>
+                                  <span
+                                    className={`text-[9px] px-1.5 py-0.2 rounded font-semibold shrink-0 ${
+                                      u.id === currentAdminUser.id
+                                        ? 'bg-white/20 text-white'
+                                        : 'bg-slate-100 text-slate-600'
+                                    }`}
+                                  >
+                                    {u.role}
+                                  </span>
+                                </button>
+                              ))}
+                          </div>
+                        </div>
+                      )}
+
                       <button
                         type="button"
                         onClick={adminLogout}
@@ -1414,8 +1541,8 @@ export const AdminPanel: React.FC = () => {
                 )}
 
                 <nav className="space-y-1">
-                  {/* Home (Super Admin only) */}
-                  {currentAdminUser.role === 'Super Admin' && (
+                  {/* Home (Requires view_dashboard permission) */}
+                  {can('view_dashboard') && (
                     <button
                       onClick={() => setActiveTab('home')}
                       className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer text-left ${
@@ -1429,42 +1556,50 @@ export const AdminPanel: React.FC = () => {
                     </button>
                   )}
 
-                  {/* Orders & Shipping Labels (All Staff & Super Admin) */}
-                  <button
-                    onClick={() => setActiveTab('finances')}
-                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
-                      activeTab === 'finances'
-                        ? 'bg-slate-100 text-slate-900 font-bold'
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3">
-                      <Package className="w-4 h-4 shrink-0" />
-                      {!sidebarCollapsed && (
-                        <span>
-                          {currentAdminUser.role === 'Label Admin'
-                            ? 'Orders & Labels'
-                            : 'Orders'}
+                  {/* Orders & Shipping Labels (Requires view_orders permission) */}
+                  {can('view_orders') && (
+                    <button
+                      onClick={() => setActiveTab('finances')}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
+                        activeTab === 'finances'
+                          ? 'bg-slate-100 text-slate-900 font-bold'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <Package className="w-4 h-4 shrink-0" />
+                        {!sidebarCollapsed && (
+                          <span>
+                            {currentAdminUser.role === 'Label Admin'
+                              ? 'Orders & Labels'
+                              : 'Orders'}
+                          </span>
+                        )}
+                      </div>
+                      {!sidebarCollapsed && orderCounts.pending > 0 && (
+                        <span className="px-1.5 py-0.2 bg-amber-500 text-white rounded text-[9px] font-bold">
+                          {orderCounts.pending}
                         </span>
                       )}
-                    </div>
-                    {!sidebarCollapsed && orderCounts.pending > 0 && (
-                      <span className="px-1.5 py-0.2 bg-amber-500 text-white rounded text-[9px] font-bold">
-                        {orderCounts.pending}
-                      </span>
-                    )}
-                  </button>
+                    </button>
+                  )}
 
-                  {/* Catalog (Super Admin and Listing + Label Admin) */}
-                  {currentAdminUser.role !== 'Label Admin' && (
+                  {/* Catalog (Requires view_products, add_product, or manage_inventory) */}
+                  {(can('view_products') || can('add_product') || can('manage_inventory')) && (
                     <div>
                       <button
                         onClick={() => {
-                          setActiveTab('catalog');
+                          if (can('view_products')) {
+                            setActiveTab('catalog');
+                          } else if (can('manage_inventory')) {
+                            setActiveTab('inventory');
+                          } else if (can('add_product')) {
+                            handleOpenAddProduct();
+                          }
                           setCatalogExpanded(!catalogExpanded);
                         }}
                         className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
-                          activeTab === 'catalog'
+                          activeTab === 'catalog' || activeTab === 'add-product' || activeTab === 'inventory'
                             ? 'bg-slate-100 text-slate-900 font-bold'
                             : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
                         }`}
@@ -1483,67 +1618,73 @@ export const AdminPanel: React.FC = () => {
                       </button>
                       {!sidebarCollapsed && catalogExpanded && (
                         <div className="pl-9 pr-2 py-1 space-y-1 text-xs text-slate-500">
-                          <button
-                            type="button"
-                            onClick={handleOpenAddProduct}
-                            className={`w-full text-left py-1.5 px-2 rounded-lg transition flex items-center justify-between font-semibold cursor-pointer ${
-                              activeTab === 'add-product' && !editingProduct
-                                ? 'bg-slate-900 text-white font-bold shadow-xs'
-                                : 'text-slate-700 hover:bg-slate-100'
-                            }`}
-                          >
-                            <span className="flex items-center gap-1.5">
-                              <Plus className="w-3.5 h-3.5" />
-                              <span>Add Product</span>
-                            </span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setActiveTab('inventory')}
-                            className={`w-full text-left py-1.5 px-2 rounded-lg transition flex items-center justify-between font-semibold cursor-pointer ${
-                              activeTab === 'inventory'
-                                ? 'bg-slate-900 text-white font-bold shadow-xs'
-                                : 'text-slate-700 hover:bg-slate-100'
-                            }`}
-                          >
-                            <span className="flex items-center gap-1.5">
-                              <Boxes className="w-3.5 h-3.5" />
-                              <span>Inventory &amp; Stock</span>
-                            </span>
-                            {lowStockCount > 0 && (
-                              <span
-                                className={`text-[9px] px-1.5 py-0.2 rounded font-bold ${
-                                  activeTab === 'inventory'
-                                    ? 'bg-rose-500 text-white'
-                                    : 'bg-rose-100 text-rose-700'
-                                }`}
-                              >
-                                {lowStockCount} low
+                          {can('add_product') && (
+                            <button
+                              type="button"
+                              onClick={handleOpenAddProduct}
+                              className={`w-full text-left py-1.5 px-2 rounded-lg transition flex items-center justify-between font-semibold cursor-pointer ${
+                                activeTab === 'add-product' && !editingProduct
+                                  ? 'bg-slate-900 text-white font-bold shadow-xs'
+                                  : 'text-slate-700 hover:bg-slate-100'
+                              }`}
+                            >
+                              <span className="flex items-center gap-1.5">
+                                <Plus className="w-3.5 h-3.5" />
+                                <span>Add Product</span>
                               </span>
-                            )}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setActiveTab('catalog');
-                              setCatalogCategoryFilter('all');
-                            }}
-                            className={`w-full text-left py-1.5 px-2 rounded-lg hover:text-slate-900 transition flex items-center justify-between ${
-                              activeTab === 'catalog' && catalogCategoryFilter === 'all'
-                                ? 'text-slate-900 font-bold bg-slate-100'
-                                : 'text-slate-600'
-                            }`}
-                          >
-                            <span>All Products</span>
-                            <span className="text-[10px] text-slate-400">{products.length}</span>
-                          </button>
+                            </button>
+                          )}
+                          {can('manage_inventory') && (
+                            <button
+                              type="button"
+                              onClick={() => setActiveTab('inventory')}
+                              className={`w-full text-left py-1.5 px-2 rounded-lg transition flex items-center justify-between font-semibold cursor-pointer ${
+                                activeTab === 'inventory'
+                                  ? 'bg-slate-900 text-white font-bold shadow-xs'
+                                  : 'text-slate-700 hover:bg-slate-100'
+                              }`}
+                            >
+                              <span className="flex items-center gap-1.5">
+                                <Boxes className="w-3.5 h-3.5" />
+                                <span>Inventory &amp; Stock</span>
+                              </span>
+                              {lowStockCount > 0 && (
+                                <span
+                                  className={`text-[9px] px-1.5 py-0.2 rounded font-bold ${
+                                    activeTab === 'inventory'
+                                      ? 'bg-rose-500 text-white'
+                                      : 'bg-rose-100 text-rose-700'
+                                  }`}
+                                >
+                                  {lowStockCount} low
+                                </span>
+                              )}
+                            </button>
+                          )}
+                          {can('view_products') && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveTab('catalog');
+                                setCatalogCategoryFilter('all');
+                              }}
+                              className={`w-full text-left py-1.5 px-2 rounded-lg hover:text-slate-900 transition flex items-center justify-between ${
+                                activeTab === 'catalog' && catalogCategoryFilter === 'all'
+                                  ? 'text-slate-900 font-bold bg-slate-100'
+                                  : 'text-slate-600'
+                              }`}
+                            >
+                              <span>All Products</span>
+                              <span className="text-[10px] text-slate-400">{products.length}</span>
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
                   )}
 
-                  {/* Categories & Banners Direct Sidebar Tab */}
-                  {(currentAdminUser.role === 'Super Admin' || currentAdminUser.role === 'Listing + Label Admin') && (
+                  {/* Categories & Banners Direct Sidebar Tab (Requires manage_categories) */}
+                  {can('manage_categories') && (
                     <button
                       onClick={() => setActiveTab('categories-banners')}
                       className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer text-left ${
@@ -1557,172 +1698,201 @@ export const AdminPanel: React.FC = () => {
                     </button>
                   )}
 
-                  {/* Customers, Marketing, Analytics (Super Admin exclusive) */}
-                  {currentAdminUser.role === 'Super Admin' && (
-                    <>
-                      <button
-                        onClick={() => setActiveTab('customers')}
-                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer text-left ${
-                          activeTab === 'customers'
-                            ? 'bg-slate-100 text-slate-900 font-bold'
-                            : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                        }`}
-                      >
-                        <Users className="w-4 h-4 shrink-0" />
-                        {!sidebarCollapsed && <span className="truncate text-left">Customers</span>}
-                      </button>
+                  {/* Customers (Requires view_customers) */}
+                  {can('view_customers') && (
+                    <button
+                      onClick={() => setActiveTab('customers')}
+                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer text-left ${
+                        activeTab === 'customers'
+                          ? 'bg-slate-100 text-slate-900 font-bold'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                      }`}
+                    >
+                      <Users className="w-4 h-4 shrink-0" />
+                      {!sidebarCollapsed && <span className="truncate text-left">Customers</span>}
+                    </button>
+                  )}
 
-                      <button
-                        onClick={() => setActiveTab('marketing')}
-                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer text-left ${
-                          activeTab === 'marketing'
-                            ? 'bg-slate-100 text-slate-900 font-bold'
-                            : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                        }`}
-                      >
-                        <Megaphone className="w-4 h-4 shrink-0 text-slate-500" />
-                        {!sidebarCollapsed && <span className="truncate text-left">Marketing &amp; Announcements</span>}
-                      </button>
+                  {/* Marketing (Requires view_marketing) */}
+                  {can('view_marketing') && (
+                    <button
+                      onClick={() => setActiveTab('marketing')}
+                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer text-left ${
+                        activeTab === 'marketing'
+                          ? 'bg-slate-100 text-slate-900 font-bold'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                      }`}
+                    >
+                      <Megaphone className="w-4 h-4 shrink-0 text-slate-500" />
+                      {!sidebarCollapsed && <span className="truncate text-left">Marketing &amp; Announcements</span>}
+                    </button>
+                  )}
 
-                      <button
-                        onClick={() => setActiveTab('analytics')}
-                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer text-left ${
-                          activeTab === 'analytics'
-                            ? 'bg-slate-100 text-slate-900 font-bold'
-                            : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                        }`}
-                      >
-                        <BarChart2 className="w-4 h-4 shrink-0" />
-                        {!sidebarCollapsed && <span className="truncate text-left">Analytics</span>}
-                      </button>
+                  {/* Analytics (Requires view_analytics) */}
+                  {can('view_analytics') && (
+                    <button
+                      onClick={() => setActiveTab('analytics')}
+                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer text-left ${
+                        activeTab === 'analytics'
+                          ? 'bg-slate-100 text-slate-900 font-bold'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                      }`}
+                    >
+                      <BarChart2 className="w-4 h-4 shrink-0" />
+                      {!sidebarCollapsed && <span className="truncate text-left">Analytics</span>}
+                    </button>
+                  )}
 
-                      <button
-                        onClick={() => {
-                          setActiveTab('admin-management');
-                        }}
-                        className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition cursor-pointer ${
-                          activeTab === 'admin-management'
-                            ? 'bg-slate-100 text-slate-900 font-bold'
-                            : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                        }`}
-                        title="Staff & Admin Roles Manager"
-                      >
-                        <div className="flex items-center gap-3">
-                          <Users className="w-4 h-4 shrink-0 text-slate-700" />
-                          {!sidebarCollapsed && <span>Admin Management</span>}
-                        </div>
-                        {!sidebarCollapsed && (
-                          <span className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-slate-100 text-slate-700 border border-slate-200">
-                            Staff
-                          </span>
-                        )}
-                      </button>
-                    </>
+                  {/* Admin Management (Requires manage_admins) */}
+                  {can('manage_admins') && (
+                    <button
+                      onClick={() => {
+                        setActiveTab('admin-management');
+                      }}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition cursor-pointer ${
+                        activeTab === 'admin-management'
+                          ? 'bg-slate-100 text-slate-900 font-bold'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                      }`}
+                      title="Staff & Admin Roles Manager"
+                    >
+                      <div className="flex items-center gap-3">
+                        <Users className="w-4 h-4 shrink-0 text-slate-700" />
+                        {!sidebarCollapsed && <span>Admin Management</span>}
+                      </div>
+                      {!sidebarCollapsed && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-slate-100 text-slate-700 border border-slate-200">
+                          RBAC
+                        </span>
+                      )}
+                    </button>
                   )}
                 </nav>
               </div>
 
-              {/* Integrations Section (Super Admin exclusive) */}
-              {currentAdminUser.role === 'Super Admin' && (
+              {/* Integrations & System Settings Section (Enforced via granular permissions) */}
+              {(can('manage_integrations') || can('manage_domain_dns') || can('view_settings')) && (
                 <div>
                   {!sidebarCollapsed && (
                     <div className="text-[11px] font-medium text-slate-400 tracking-wider mb-1 px-1">
-                      <span>Integrations</span>
+                      <span>Integrations &amp; System</span>
                     </div>
                   )}
                   <div className="space-y-1">
-                    <button
-                      onClick={() => {
-                        setActiveTab('integrations');
-                        setIntegrationSubTab('couriers');
-                      }}
-                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
-                        activeTab === 'integrations' && integrationSubTab === 'couriers'
-                          ? 'bg-slate-100 text-slate-900 font-bold'
-                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                      }`}
-                    >
-                      <Truck className="w-4 h-4 shrink-0 text-slate-900" />
-                      {!sidebarCollapsed && <span>Courier Channels</span>}
-                    </button>
+                    {can('manage_integrations') && (
+                      <>
+                        <button
+                          onClick={() => {
+                            setActiveTab('integrations');
+                            setIntegrationSubTab('couriers');
+                          }}
+                          className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
+                            activeTab === 'integrations' && integrationSubTab === 'couriers'
+                              ? 'bg-slate-100 text-slate-900 font-bold'
+                              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                          }`}
+                        >
+                          <Truck className="w-4 h-4 shrink-0 text-slate-900" />
+                          {!sidebarCollapsed && <span>Courier Channels</span>}
+                        </button>
 
-                    <button
-                      onClick={() => {
-                        setActiveTab('integrations');
-                        setIntegrationSubTab('payments');
-                      }}
-                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
-                        activeTab === 'integrations' && integrationSubTab === 'payments'
-                          ? 'bg-slate-100 text-slate-900 font-bold'
-                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                      }`}
-                    >
-                      <CreditCard className="w-4 h-4 shrink-0 text-slate-900" />
-                      {!sidebarCollapsed && <span>Payment Integration</span>}
-                    </button>
+                        <button
+                          onClick={() => {
+                            setActiveTab('integrations');
+                            setIntegrationSubTab('payments');
+                          }}
+                          className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
+                            activeTab === 'integrations' && integrationSubTab === 'payments'
+                              ? 'bg-slate-100 text-slate-900 font-bold'
+                              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                          }`}
+                        >
+                          <CreditCard className="w-4 h-4 shrink-0 text-slate-900" />
+                          {!sidebarCollapsed && <span>Payment Integration</span>}
+                        </button>
 
-                    <button
-                      onClick={() => {
-                        setActiveTab('integrations');
-                        setIntegrationSubTab('whatsapp');
-                      }}
-                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
-                        activeTab === 'integrations' && integrationSubTab === 'whatsapp'
-                          ? 'bg-slate-100 text-slate-900 font-bold'
-                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                      }`}
-                    >
-                      <MessageSquare className="w-4 h-4 shrink-0 text-slate-900" />
-                      {!sidebarCollapsed && <span>Meta WhatsApp</span>}
-                    </button>
+                        <button
+                          onClick={() => {
+                            setActiveTab('integrations');
+                            setIntegrationSubTab('whatsapp');
+                          }}
+                          className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
+                            activeTab === 'integrations' && integrationSubTab === 'whatsapp'
+                              ? 'bg-slate-100 text-slate-900 font-bold'
+                              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                          }`}
+                        >
+                          <MessageSquare className="w-4 h-4 shrink-0 text-slate-900" />
+                          {!sidebarCollapsed && <span>Meta WhatsApp</span>}
+                        </button>
 
-                    <button
-                      onClick={() => {
-                        setActiveTab('integrations');
-                        setIntegrationSubTab('sms');
-                      }}
-                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
-                        activeTab === 'integrations' && integrationSubTab === 'sms'
-                          ? 'bg-slate-100 text-slate-900 font-bold'
-                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                      }`}
-                    >
-                      <Smartphone className="w-4 h-4 shrink-0 text-slate-900" />
-                      {!sidebarCollapsed && <span>SMS &amp; OTP Service</span>}
-                    </button>
+                        <button
+                          onClick={() => {
+                            setActiveTab('integrations');
+                            setIntegrationSubTab('sms');
+                          }}
+                          className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
+                            activeTab === 'integrations' && integrationSubTab === 'sms'
+                              ? 'bg-slate-100 text-slate-900 font-bold'
+                              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                          }`}
+                        >
+                          <Smartphone className="w-4 h-4 shrink-0 text-slate-900" />
+                          {!sidebarCollapsed && <span>SMS &amp; OTP Service</span>}
+                        </button>
+                      </>
+                    )}
 
-                    <button
-                      onClick={() => setActiveTab('domain-dns')}
-                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
-                        activeTab === 'domain-dns'
-                          ? 'bg-slate-100 text-slate-900 font-bold'
-                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                      }`}
-                      title="Custom Domain & DNS (Google Hosting)"
-                    >
-                      <div className="flex items-center gap-3">
-                        <Globe className="w-4 h-4 shrink-0 text-slate-900" />
-                        {!sidebarCollapsed && <span>Domain &amp; DNS</span>}
-                      </div>
-                      {!sidebarCollapsed && (
-                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 text-emerald-800">
-                          Live
-                        </span>
-                      )}
-                    </button>
+                    {can('manage_domain_dns') && (
+                      <button
+                        onClick={() => setActiveTab('domain-dns')}
+                        className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
+                          activeTab === 'domain-dns'
+                            ? 'bg-slate-100 text-slate-900 font-bold'
+                            : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                        }`}
+                        title="Custom Domain & DNS (Google Hosting)"
+                      >
+                        <div className="flex items-center gap-3">
+                          <Globe className="w-4 h-4 shrink-0 text-slate-900" />
+                          {!sidebarCollapsed && <span>Domain &amp; DNS</span>}
+                        </div>
+                        {!sidebarCollapsed && (
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 text-emerald-800">
+                            Live
+                          </span>
+                        )}
+                      </button>
+                    )}
 
-                    <button
-                      onClick={() => setActiveTab('settings')}
-                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
-                        activeTab === 'settings'
-                          ? 'bg-slate-100 text-slate-900 font-bold'
-                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                      }`}
-                    >
-                      <Settings className="w-4 h-4 shrink-0 text-slate-900" />
-                      {!sidebarCollapsed && <span>Store Settings</span>}
-                    </button>
+                    {can('view_settings') && (
+                      <button
+                        onClick={() => setActiveTab('settings')}
+                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
+                          activeTab === 'settings'
+                            ? 'bg-slate-100 text-slate-900 font-bold'
+                            : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                        }`}
+                      >
+                        <Settings className="w-4 h-4 shrink-0 text-slate-900" />
+                        {!sidebarCollapsed && <span>Store Settings</span>}
+                      </button>
+                    )}
                   </div>
+                </div>
+              )}
+
+              {/* Active Role Scope Summary Card for Non-Super-Admins */}
+              {!sidebarCollapsed && currentAdminUser.role !== 'Super Admin' && (
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                      Active RBAC Scope
+                    </span>
+                    <span className={`w-2 h-2 rounded-full ${roleBadge.dotClass}`} />
+                  </div>
+                  <p className="text-xs font-bold text-slate-900">{roleBadge.label}</p>
+                  <p className="text-[10px] text-slate-500 leading-relaxed">{roleBadge.shortDesc}</p>
                 </div>
               )}
             </div>
@@ -1798,13 +1968,13 @@ export const AdminPanel: React.FC = () => {
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       setIsSearchFocused(false);
-                      if (searchQuery.trim().toLowerCase().includes('admin')) {
+                      if (searchQuery.trim().toLowerCase().includes('admin') && can('manage_admins')) {
                         setActiveTab('admin-management');
                         setSearchQuery('');
-                      } else if (currentAdminUser.role !== 'Label Admin') {
+                      } else if (can('view_products')) {
                         setActiveTab('catalog');
                         setCatalogSearch(searchQuery);
-                      } else {
+                      } else if (can('view_orders')) {
                         setActiveTab('finances');
                       }
                     }
@@ -1832,26 +2002,28 @@ export const AdminPanel: React.FC = () => {
                   )}
                 </div>
 
-                {/* Quick Global Search Dropdown Palette */}
+                {/* Quick Global Search Dropdown Palette (Filtered by granular permissions) */}
                 {isSearchFocused && (
                   <div className="absolute left-0 right-0 top-full mt-2 bg-white rounded-2xl shadow-2xl border border-slate-200/90 z-50 p-2 overflow-hidden animate-in fade-in duration-150 max-h-[75vh] overflow-y-auto">
                     {(() => {
                       const q = searchQuery.trim().toLowerCase();
 
-                      // If query is empty: show quick navigation shortcuts
+                      // If query is empty: show quick navigation shortcuts allowed for current role
                       if (!q) {
                         const quickNavs = [
-                          { id: 'orders', title: 'Orders & Fulfillment', desc: 'Manage orders, print slips & tracking', icon: Package, tab: 'finances' },
-                          { id: 'catalog', title: 'Catalog & Products', desc: 'Browse products, sizes & inventory', icon: Layers, tab: 'catalog' },
-                          { id: 'customers', title: 'Customers & CRM', desc: 'Customer profiles, numbers & history', icon: Users, tab: 'customers' },
-                          { id: 'settings', title: 'Store Settings', desc: 'Logistics partners, payments & policies', icon: Settings, tab: 'settings' },
-                          { id: 'marketing', title: 'Marketing & Announcements', desc: 'Top banners & seasonal offers', icon: Megaphone, tab: 'marketing' },
-                        ];
+                          { id: 'orders', title: 'Orders & Fulfillment', desc: 'Manage orders, print slips & tracking', icon: Package, tab: 'finances' as ActiveTab },
+                          { id: 'catalog', title: 'Catalog & Products', desc: 'Browse products, sizes & inventory', icon: Layers, tab: 'catalog' as ActiveTab },
+                          { id: 'inventory', title: 'Inventory & Stock', desc: 'Update size stock & view low-stock items', icon: Boxes, tab: 'inventory' as ActiveTab },
+                          { id: 'categories', title: 'Categories & Banners', desc: 'Manage categories & homepage visuals', icon: Layers, tab: 'categories-banners' as ActiveTab },
+                          { id: 'customers', title: 'Customers & CRM', desc: 'Customer profiles, numbers & history', icon: Users, tab: 'customers' as ActiveTab },
+                          { id: 'settings', title: 'Store Settings', desc: 'Logistics partners, payments & policies', icon: Settings, tab: 'settings' as ActiveTab },
+                          { id: 'marketing', title: 'Marketing & Announcements', desc: 'Top banners & seasonal offers', icon: Megaphone, tab: 'marketing' as ActiveTab },
+                        ].filter((nav) => isTabAllowed(currentAdminUser, nav.tab));
 
                         return (
                           <div className="space-y-1">
                             <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center justify-between">
-                              <span>Quick Shortcuts</span>
+                              <span>Authorized Quick Shortcuts ({currentAdminUser.role})</span>
                               <span className="font-mono text-[9px] text-slate-400 font-normal">Press ESC to close</span>
                             </div>
                             {quickNavs.map((nav) => {
@@ -1881,33 +2053,40 @@ export const AdminPanel: React.FC = () => {
                         );
                       }
 
-                      // When query is typed: live search matching Orders, Products, and Navigation
-                      const matchedOrders = orders.filter((o) => {
-                        const name = (o.customer?.name || o.shippingAddress?.name || '').toLowerCase();
-                        const phone = (o.customer?.phone || o.shippingAddress?.mobile || o.shippingAddress?.phone || '');
-                        const idStr = o.id.toLowerCase();
-                        const awbStr = (o.awb_number || o.shipment?.awb || '').toLowerCase();
-                        return idStr.includes(q) || name.includes(q) || phone.includes(q) || awbStr.includes(q);
-                      }).slice(0, 3);
+                      // When query is typed: live search matching Orders, Products, and Navigation restricted by permissions
+                      const matchedOrders = can('view_orders')
+                        ? orders.filter((o) => {
+                            const name = (o.customer?.name || o.shippingAddress?.name || '').toLowerCase();
+                            const phone = (o.customer?.phone || o.shippingAddress?.mobile || o.shippingAddress?.phone || '');
+                            const idStr = o.id.toLowerCase();
+                            const awbStr = (o.awb_number || o.shipment?.awb || '').toLowerCase();
+                            return idStr.includes(q) || name.includes(q) || phone.includes(q) || awbStr.includes(q);
+                          }).slice(0, 3)
+                        : [];
 
-                      const matchedProducts = products.filter((p) => {
-                        const title = (p.title || '').toLowerCase();
-                        const sku = (p.sku || '').toLowerCase();
-                        const cat = (p.category || '').toLowerCase();
-                        return title.includes(q) || sku.includes(q) || cat.includes(q);
-                      }).slice(0, 3);
+                      const matchedProducts = can('view_products')
+                        ? products.filter((p) => {
+                            const title = (p.title || p.name || '').toLowerCase();
+                            const sku = (p.sku || '').toLowerCase();
+                            const cat = (p.category || '').toLowerCase();
+                            return title.includes(q) || sku.includes(q) || cat.includes(q);
+                          }).slice(0, 3)
+                        : [];
 
                       const navMatches = [
-                        { id: 'home', title: 'Dashboard Overview', desc: 'Performance & revenue charts', tab: 'home' },
-                        { id: 'orders', title: 'Orders & Fulfillment', desc: 'Order queues & Delhivery shipping', tab: 'finances' },
-                        { id: 'catalog', title: 'Product Catalog', desc: 'Product listings & inventory', tab: 'catalog' },
-                        { id: 'categories-banners', title: 'Categories & Banners', desc: 'Hero banners & category tiles', tab: 'categories-banners' },
-                        { id: 'customers', title: 'Customer Hub', desc: 'Customer orders & phone numbers', tab: 'customers' },
-                        { id: 'marketing', title: 'Marketing & Announcements', desc: 'Announcement bars & promos', tab: 'marketing' },
-                        { id: 'analytics', title: 'Store Analytics', desc: 'Conversion & sales breakdown', tab: 'analytics' },
-                        { id: 'settings', title: 'Store Settings', desc: 'Logistics, payments & policies', tab: 'settings' },
-                        { id: 'admin-management', title: 'Admin Staff & Roles', desc: 'Team permissions & credentials', tab: 'admin-management' },
-                      ].filter((n) => n.title.toLowerCase().includes(q) || n.desc.toLowerCase().includes(q) || n.id.includes(q)).slice(0, 2);
+                        { id: 'home', title: 'Dashboard Overview', desc: 'Performance & revenue charts', tab: 'home' as ActiveTab },
+                        { id: 'orders', title: 'Orders & Fulfillment', desc: 'Order queues & Delhivery shipping', tab: 'finances' as ActiveTab },
+                        { id: 'catalog', title: 'Product Catalog', desc: 'Product listings & inventory', tab: 'catalog' as ActiveTab },
+                        { id: 'categories-banners', title: 'Categories & Banners', desc: 'Hero banners & category tiles', tab: 'categories-banners' as ActiveTab },
+                        { id: 'customers', title: 'Customer Hub', desc: 'Customer orders & phone numbers', tab: 'customers' as ActiveTab },
+                        { id: 'marketing', title: 'Marketing & Announcements', desc: 'Announcement bars & promos', tab: 'marketing' as ActiveTab },
+                        { id: 'analytics', title: 'Store Analytics', desc: 'Conversion & sales breakdown', tab: 'analytics' as ActiveTab },
+                        { id: 'settings', title: 'Store Settings', desc: 'Logistics, payments & policies', tab: 'settings' as ActiveTab },
+                        { id: 'admin-management', title: 'Admin Staff & Roles', desc: 'Team permissions & credentials', tab: 'admin-management' as ActiveTab },
+                      ]
+                        .filter((n) => isTabAllowed(currentAdminUser, n.tab))
+                        .filter((n) => n.title.toLowerCase().includes(q) || n.desc.toLowerCase().includes(q) || n.id.includes(q))
+                        .slice(0, 2);
 
                       const hasAnyResults = matchedOrders.length > 0 || matchedProducts.length > 0 || navMatches.length > 0;
 
@@ -2095,9 +2274,9 @@ export const AdminPanel: React.FC = () => {
           {/* Tab Views Content Container with consistent padding */}
           <div className={`flex-1 ${activeTab === 'add-product' ? 'p-0' : 'p-6 md:p-8 lg:p-10'}`}>
 
-          {/* VIEW: HOME (Exact replica of user reference image) */}
+          {/* VIEW: HOME (Guarded by view_dashboard permission) */}
           {activeTab === 'home' && (
-            currentAdminUser.role === 'Super Admin' ? (
+            can('view_dashboard') ? (
               <div className="grid grid-cols-1 xl:grid-cols-12 gap-8">
                 {/* ------------------------------------------------------------ */}
                 {/* LEFT COLUMN: Overview Performance & Revenue Line Chart      */}
@@ -2543,14 +2722,15 @@ export const AdminPanel: React.FC = () => {
               <AccessDeniedNotice
                 role={currentAdminUser.role}
                 section="Live Sales, Revenue & Performance Dashboard"
-                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser.role))}
+                requiredPermission="view_dashboard"
+                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser))}
               />
             )
           )}
 
-          {/* VIEW: CATALOG */}
+          {/* VIEW: CATALOG (Guarded by view_products permission) */}
           {activeTab === 'catalog' && (
-            currentAdminUser.role !== 'Label Admin' ? (
+            can('view_products') ? (
               <div className="space-y-6">
               {/* Header */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -2561,31 +2741,35 @@ export const AdminPanel: React.FC = () => {
                   </p>
                 </div>
                 <div className="flex items-center gap-2 self-start sm:self-auto">
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('categories-banners')}
-                    className="px-4 py-2.5 bg-white border border-slate-300 text-slate-800 text-xs font-semibold rounded-full hover:border-black hover:bg-slate-50 transition flex items-center gap-2 cursor-pointer shadow-2xs"
-                  >
-                    <Layers className="w-4 h-4 text-[#E52229]" />
-                    <span>Categories &amp; Banners</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleOpenAddProduct}
-                    className="px-4 py-2.5 bg-black text-white text-xs font-semibold rounded-full hover:bg-slate-800 transition flex items-center gap-2 cursor-pointer shadow-sm"
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>Add Product</span>
-                  </button>
+                  <PermissionGuard user={currentAdminUser} permission="manage_categories">
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('categories-banners')}
+                      className="px-4 py-2.5 bg-white border border-slate-300 text-slate-800 text-xs font-semibold rounded-full hover:border-black hover:bg-slate-50 transition flex items-center gap-2 cursor-pointer shadow-2xs"
+                    >
+                      <Layers className="w-4 h-4 text-[#E52229]" />
+                      <span>Categories &amp; Banners</span>
+                    </button>
+                  </PermissionGuard>
+                  <PermissionGuard user={currentAdminUser} permission="add_product">
+                    <button
+                      type="button"
+                      onClick={handleOpenAddProduct}
+                      className="px-4 py-2.5 bg-black text-white text-xs font-semibold rounded-full hover:bg-slate-800 transition flex items-center gap-2 cursor-pointer shadow-sm"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Add Product</span>
+                    </button>
+                  </PermissionGuard>
                 </div>
               </div>
 
-              {/* Listing + Label Admin Activity Monitor (Last 5 actions) */}
-              {currentAdminUser.role === 'Listing + Label Admin' && (
+              {/* Listing Admin / Listing + Label Admin Activity Monitor */}
+              {(currentAdminUser.role === 'Listing Admin' || currentAdminUser.role === 'Listing + Label Admin') && (
                 <StaffActivityMonitor
                   mode="role_dashboard"
                   targetRole="Listing + Label Admin"
-                  title="Listing + Label Admin — Activity Monitor"
+                  title={`${currentAdminUser.role} — Catalog Activity Monitor`}
                 />
               )}
 
@@ -2948,8 +3132,8 @@ export const AdminPanel: React.FC = () => {
                               <span>🔥 Best</span>
                             </button>
 
-                            {/* Bulk Delete Button */}
-                            {currentAdminUser.role !== 'Label Admin' && (
+                            {/* Bulk Delete Button (Strictly requires delete_product permission) */}
+                            {can('delete_product') && (
                               <button
                                 type="button"
                                 onClick={handleBulkDelete}
@@ -3270,16 +3454,18 @@ export const AdminPanel: React.FC = () => {
                                   {/* Actions */}
                                   <td className="py-3.5 px-4 text-right">
                                     <div className="flex items-center justify-end gap-1">
-                                      <button
-                                        type="button"
-                                        onClick={() => handleOpenEditProduct(v.product, v.colorIndex)}
-                                        className="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:text-black hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
-                                        title={`Edit ${v.colorName} Variation`}
-                                      >
-                                        <Edit2 className="w-3.5 h-3.5" />
-                                        <span>Edit</span>
-                                      </button>
-                                      {currentAdminUser.role !== "Label Admin" && (
+                                      {can('edit_product') && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleOpenEditProduct(v.product, v.colorIndex)}
+                                          className="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:text-black hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
+                                          title={`Edit ${v.colorName} Variation`}
+                                        >
+                                          <Edit2 className="w-3.5 h-3.5" />
+                                          <span>Edit</span>
+                                        </button>
+                                      )}
+                                      {can('delete_product') && (
                                         <button
                                           type="button"
                                           onClick={() => setProductToDelete(v.product)}
@@ -3461,7 +3647,7 @@ export const AdminPanel: React.FC = () => {
                             <span>🔥 Best</span>
                           </button>
 
-                          {currentAdminUser.role !== 'Label Admin' && (
+                          {can('delete_product') && (
                             <button
                               type="button"
                               onClick={handleBulkDelete}
@@ -3725,16 +3911,18 @@ export const AdminPanel: React.FC = () => {
 
                                 <td className="py-3.5 px-4 text-right">
                                   <div className="flex items-center justify-end gap-1">
-                                    <button
-                                      type="button"
-                                      onClick={() => handleOpenEditProduct(p)}
-                                      className="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:text-black hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
-                                      title="Edit Product Details & Variations"
-                                    >
-                                      <Edit2 className="w-3.5 h-3.5" />
-                                      <span>Edit</span>
-                                    </button>
-                                    {currentAdminUser.role !== "Label Admin" && (
+                                    {can('edit_product') && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenEditProduct(p)}
+                                        className="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:text-black hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
+                                        title="Edit Product Details & Variations"
+                                      >
+                                        <Edit2 className="w-3.5 h-3.5" />
+                                        <span>Edit</span>
+                                      </button>
+                                    )}
+                                    {can('delete_product') && (
                                       <button
                                         type="button"
                                         onClick={() => setProductToDelete(p)}
@@ -3854,14 +4042,15 @@ export const AdminPanel: React.FC = () => {
               <AccessDeniedNotice
                 role={currentAdminUser.role}
                 section="Product Catalog & Listings"
-                onRedirect={() => setActiveTab("finances")}
+                requiredPermission="view_products"
+                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser))}
               />
             )
           )}
 
           {/* VIEW: DEDICATED ADD / EDIT PRODUCT PAGE */}
           {activeTab === 'add-product' && (
-            currentAdminUser.role !== 'Label Admin' ? (
+            (editingProduct ? can('edit_product') : can('add_product')) ? (
             <AddProductPage
               key={editingProduct ? editingProduct.id : 'new-product'}
               initialProduct={editingProduct}
@@ -3883,80 +4072,94 @@ export const AdminPanel: React.FC = () => {
               <AccessDeniedNotice
                 role={currentAdminUser.role}
                 section="Add / Edit Product"
-                onRedirect={() => setActiveTab("finances")}
+                requiredPermission={editingProduct ? 'edit_product' : 'add_product'}
+                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser))}
               />
             )
           )}
 
           {/* VIEW: INVENTORY MANAGEMENT */}
           {activeTab === 'inventory' && (
-            currentAdminUser.role !== 'Label Admin' ? (
+            can('manage_inventory') ? (
               <InventoryView onEditProduct={handleOpenEditProduct} />
             ) : (
               <AccessDeniedNotice
                 role={currentAdminUser.role}
                 section="Inventory & Stock"
-                onRedirect={() => setActiveTab("finances")}
+                requiredPermission="manage_inventory"
+                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser))}
               />
             )
           )}
 
           {/* VIEW: ORDERS & FULFILLMENT (MODERN ERP REDESIGN) */}
           {(activeTab === "finances" || activeTab === "orders") && (
-            <div className="space-y-6">
-              {currentAdminUser.role === 'Label Admin' && (
-                <StaffActivityMonitor
-                  mode="role_dashboard"
-                  targetRole="Label Admin"
-                  title="Label Admin — Activity Monitor"
-                />
-              )}
-              <OrderManagementPanel />
-            </div>
+            can('view_orders') ? (
+              <div className="space-y-6">
+                {currentAdminUser.role === 'Label Admin' && (
+                  <StaffActivityMonitor
+                    mode="role_dashboard"
+                    targetRole="Label Admin"
+                    title="Label Admin — Activity Monitor"
+                  />
+                )}
+                <OrderManagementPanel />
+              </div>
+            ) : (
+              <AccessDeniedNotice
+                role={currentAdminUser.role}
+                section="Orders & Shipping Fulfillment"
+                requiredPermission="view_orders"
+                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser))}
+              />
+            )
           )}
 
           {/* VIEW: CATEGORIES, SUBCATEGORIES & SLIDING BANNERS */}
           {activeTab === 'categories-banners' && (
-            (currentAdminUser.role === 'Super Admin' || currentAdminUser.role === 'Listing + Label Admin') ? (
+            can('manage_categories') ? (
               <CategoriesAndBannersManager onSaveNotification={(msg) => setSettingsSaveSuccess(msg)} />
             ) : (
               <AccessDeniedNotice
                 role={currentAdminUser.role}
                 section="Categories & Visuals Management"
-                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser.role))}
+                requiredPermission="manage_categories"
+                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser))}
               />
             )
           )}
 
           {/* VIEW: CUSTOMERS & WHATSAPP CAMPAIGN HUB */}
           {activeTab === 'customers' && (
-            currentAdminUser.role === 'Super Admin' ? (
+            can('view_customers') ? (
               <WhatsAppCustomerHub orders={orders} />
             ) : (
               <AccessDeniedNotice
                 role={currentAdminUser.role}
                 section="Customer Management"
-                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser.role))}
+                requiredPermission="view_customers"
+                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser))}
               />
             )
           )}
 
           {/* VIEW: MARKETING & TOP RUNNING ANNOUNCEMENTS */}
           {activeTab === 'marketing' && (
-            currentAdminUser.role === 'Super Admin' ? (
+            can('view_marketing') ? (
               <AnnouncementBarManager onSaveNotification={(msg) => setSettingsSaveSuccess(msg)} />
             ) : (
               <AccessDeniedNotice
                 role={currentAdminUser.role}
                 section="Marketing & Announcements"
-                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser.role))}
+                requiredPermission="view_marketing"
+                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser))}
               />
             )
           )}
 
           {/* VIEW: ANALYTICS */}
           {activeTab === 'analytics' && (
-            currentAdminUser.role === 'Super Admin' ? (
+            can('view_analytics') ? (
             <div className="space-y-8">
               {/* Analytics Header with Dynamic Aggregation Controls */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -4257,14 +4460,15 @@ export const AdminPanel: React.FC = () => {
               <AccessDeniedNotice
                 role={currentAdminUser.role}
                 section="Business Analytics"
-                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser.role))}
+                requiredPermission="view_analytics"
+                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser))}
               />
             )
           )}
 
           {/* VIEW: INTEGRATIONS (Dedicated External Service & API Integrations) */}
           {activeTab === 'integrations' && (
-            currentAdminUser.role === 'Super Admin' ? (
+            can('manage_integrations') ? (
             <div className="space-y-4 max-w-5xl">
               {/* Header */}
               <div className="border-b border-slate-200/80 pb-3.5">
@@ -4339,14 +4543,15 @@ export const AdminPanel: React.FC = () => {
               <AccessDeniedNotice
                 role={currentAdminUser.role}
                 section="API & External Service Integrations"
-                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser.role))}
+                requiredPermission="manage_integrations"
+                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser))}
               />
             )
           )}
 
           {/* VIEW: DEDICATED PAYMENT GATEWAY SETTINGS */}
           {activeTab === 'payment-settings' && (
-            currentAdminUser.role === 'Super Admin' ? (
+            can('manage_integrations') ? (
               <div className="space-y-6 max-w-5xl">
                 {/* Header */}
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-200/80 pb-5">
@@ -4395,14 +4600,15 @@ export const AdminPanel: React.FC = () => {
               <AccessDeniedNotice
                 role={currentAdminUser.role}
                 section="Payment Gateway Settings"
-                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser.role))}
+                requiredPermission="manage_integrations"
+                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser))}
               />
             )
           )}
 
           {/* VIEW: ADMIN MANAGEMENT TAB */}
           {activeTab === 'admin-management' && (
-            currentAdminUser.role === 'Super Admin' ? (
+            can('manage_admins') ? (
               <div className="space-y-6">
                 <StaffActivityMonitor mode="super_admin" title="Staff Roles Live Activity Tracker" />
                 <div id="admin-management-section" className="bg-white border border-slate-200/90 rounded-2xl p-5 sm:p-7 md:p-8 space-y-6 shadow-2xs">
@@ -4413,7 +4619,7 @@ export const AdminPanel: React.FC = () => {
                       </div>
                       <div>
                         <div className="flex items-center gap-2 flex-wrap">
-                          <h3 className="text-base sm:text-lg font-bold text-slate-900">Admin Management</h3>
+                          <h3 className="text-base sm:text-lg font-bold text-slate-900">Admin Management &amp; Granular RBAC</h3>
                           <span className="px-2 py-0.5 rounded-full text-[10px] font-normal uppercase tracking-wider bg-red-50 text-red-600 border border-red-200">
                             Super Admin Only
                           </span>
@@ -4422,7 +4628,7 @@ export const AdminPanel: React.FC = () => {
                           </span>
                         </div>
                         <p className="text-xs text-slate-500 mt-1">
-                          Manage administrative team members, assign operational staff roles (Label Admin, Listing + Label Admin), and control account access.
+                          Manage administrative team members, assign operational staff roles (Listing Admin, Label Admin, Listing + Label Admin), and customize granular UI permissions.
                         </p>
                       </div>
                     </div>
@@ -4437,6 +4643,53 @@ export const AdminPanel: React.FC = () => {
                       <Plus className="w-4 h-4" />
                       <span>Add Admin</span>
                     </button>
+                  </div>
+
+                  {/* Role Permission Presets Overview Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                    {(
+                      [
+                        {
+                          role: 'Super Admin' as const,
+                          badge: 'bg-red-50 text-red-600 border-red-200',
+                          title: 'Super Admin',
+                          summary: 'Full unrestricted access to Dashboard, Revenue, Catalog, Orders, Settings & Staff RBAC.',
+                        },
+                        {
+                          role: 'Listing Admin' as const,
+                          badge: 'bg-violet-50 text-violet-700 border-violet-200',
+                          title: 'Listing Admin',
+                          summary: 'Catalog, Add/Edit Products, Variants, Inventory & Categories. No Orders or Revenue access.',
+                        },
+                        {
+                          role: 'Label Admin' as const,
+                          badge: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+                          title: 'Label Admin',
+                          summary: 'Orders Desk, AWB Generation, Thermal Shipping Labels & Manifests. No Catalog or Revenue access.',
+                        },
+                        {
+                          role: 'Listing + Label Admin' as const,
+                          badge: 'bg-blue-50 text-blue-700 border-blue-200',
+                          title: 'Listing + Label Admin',
+                          summary: 'Combined Product Listing & Inventory + Order Label & Dispatch operations.',
+                        },
+                      ]
+                    ).map((r) => (
+                      <div
+                        key={r.role}
+                        className="p-3.5 rounded-xl border border-slate-200/80 bg-slate-50/50 space-y-1.5"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] border ${r.badge}`}>
+                            {r.title}
+                          </span>
+                          <span className="text-[10px] font-bold text-slate-500">
+                            {getDefaultPermissionsForRole(r.role).length} Perms
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-600 leading-relaxed">{r.summary}</p>
+                      </div>
+                    ))}
                   </div>
 
                   {/* Feedback Notification */}
@@ -4458,212 +4711,250 @@ export const AdminPanel: React.FC = () => {
 
                   {/* RESPONSIVE TABLE FOR DESKTOP & TABLETS */}
                   <div className="hidden md:block overflow-x-auto rounded-xl border border-slate-200">
-                    <table className="w-full text-left text-xs min-w-[650px]">
+                    <table className="w-full text-left text-xs min-w-[720px]">
                       <thead className="bg-slate-50 text-slate-500 uppercase font-semibold text-[10px] tracking-wider border-b border-slate-200">
                         <tr>
                           <th className="px-4 py-3">Administrator</th>
-                          <th className="px-4 py-3">Assigned Role</th>
+                          <th className="px-4 py-3">Assigned Role &amp; Scope</th>
                           <th className="px-4 py-3">Status</th>
                           <th className="px-4 py-3">Contact</th>
                           <th className="px-4 py-3 text-right">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 font-medium">
-                        {localAdminUsers.map((admin) => (
-                          <tr key={admin.id} className="hover:bg-slate-50/70 transition">
-                            <td className="px-4 py-3.5">
-                              <div className="flex items-center gap-3">
-                                <div className="w-9 h-9 rounded-full bg-slate-900 text-white font-bold text-xs flex items-center justify-center shrink-0 shadow-2xs">
-                                  {admin.name.charAt(0).toUpperCase()}
-                                </div>
-                                <div>
-                                  <div className="font-bold text-slate-900 flex items-center gap-1.5">
-                                    <span>{admin.name}</span>
-                                    {admin.id === currentAdminUser.id && (
-                                      <span className="text-[10px] text-slate-700 bg-slate-100 px-1.5 py-0.2 rounded font-normal border border-slate-200">
-                                        You (Active)
-                                      </span>
-                                    )}
+                        {localAdminUsers.map((admin) => {
+                          const userPerms = getEffectivePermissions(admin);
+                          const badgeInfo = getRoleBadgeInfo(admin.role);
+                          return (
+                            <tr key={admin.id} className="hover:bg-slate-50/70 transition">
+                              <td className="px-4 py-3.5">
+                                <div className="flex items-center gap-3">
+                                  <div className="w-9 h-9 rounded-full bg-slate-900 text-white font-bold text-xs flex items-center justify-center shrink-0 shadow-2xs">
+                                    {admin.name.charAt(0).toUpperCase()}
                                   </div>
-                                  <div className="text-[11px] text-slate-400 font-normal">{admin.email}</div>
+                                  <div>
+                                    <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                                      <span>{admin.name}</span>
+                                      {admin.id === currentAdminUser.id && (
+                                        <span className="text-[10px] text-slate-700 bg-slate-100 px-1.5 py-0.2 rounded font-normal border border-slate-200">
+                                          You (Active)
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-[11px] text-slate-400 font-normal">{admin.email}</div>
+                                  </div>
                                 </div>
-                              </div>
-                            </td>
-                            <td className="px-4 py-3.5">
-                              <span
-                                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] border ${
-                                  admin.role === 'Super Admin'
-                                    ? 'bg-red-50 text-red-600 border-red-200 font-normal'
-                                    : admin.role === 'Listing + Label Admin'
-                                    ? 'bg-blue-50 text-blue-700 border-blue-200 font-medium'
-                                    : 'bg-emerald-50 text-emerald-700 border-emerald-200 font-medium'
-                                }`}
-                              >
-                                <span
-                                  className={`w-1.5 h-1.5 rounded-full ${
-                                    admin.role === 'Super Admin'
-                                      ? 'bg-red-500'
-                                      : admin.role === 'Listing + Label Admin'
-                                      ? 'bg-blue-600'
-                                      : 'bg-emerald-600'
-                                  }`}
-                                />
-                                <span>{admin.role}</span>
-                              </span>
-                            </td>
-                            <td className="px-4 py-3.5">
-                              <span
-                                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
-                                  admin.status === 'active'
-                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                    : 'bg-slate-100 text-slate-500 border border-slate-200'
-                                }`}
-                              >
-                                <span
-                                  className={`w-1.5 h-1.5 rounded-full ${
-                                    admin.status === 'active' ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'
-                                  }`}
-                                />
-                                <span className="capitalize">{admin.status}</span>
-                              </span>
-                            </td>
-                            <td className="px-4 py-3.5 text-slate-600 text-[11px]">
-                              {admin.mobile ? (
-                                <div className="flex items-center gap-1.5">
-                                  <Phone className="w-3 h-3 text-slate-400" />
-                                  <span>{admin.mobile}</span>
-                                </div>
-                              ) : (
-                                <span className="text-slate-400">—</span>
-                              )}
-                            </td>
-                            <td className="px-4 py-3.5 text-right">
-                              <div className="flex items-center justify-end gap-1.5">
-                                {admin.role !== 'Super Admin' ? (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleToggleAdminStatus(admin.id)}
-                                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition cursor-pointer ${
-                                        admin.status === 'active'
-                                          ? 'bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200'
-                                          : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200'
-                                      }`}
-                                      title={admin.status === 'active' ? 'Disable account' : 'Enable account'}
-                                    >
-                                      {admin.status === 'active' ? 'Disable' : 'Enable'}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleDeleteAdminUser(admin.id, admin.name)}
-                                      className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
-                                      title="Delete staff account"
-                                    >
-                                      <Trash2 className="w-3.5 h-3.5" />
-                                    </button>
-                                  </>
-                                ) : (
-                                  <span className="text-[10px] text-slate-400 font-semibold px-2 py-0.5 bg-slate-50 rounded border border-slate-100">
-                                    Owner
+                              </td>
+                              <td className="px-4 py-3.5">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span
+                                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] border ${badgeInfo.colorClass}`}
+                                  >
+                                    <span className={`w-1.5 h-1.5 rounded-full ${badgeInfo.dotClass}`} />
+                                    <span>{admin.role}</span>
                                   </span>
+                                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200 font-semibold">
+                                    {userPerms.length} Permissions
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="px-4 py-3.5">
+                                <span
+                                  className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                                    admin.status === 'active'
+                                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                      : 'bg-slate-100 text-slate-500 border border-slate-200'
+                                  }`}
+                                >
+                                  <span
+                                    className={`w-1.5 h-1.5 rounded-full ${
+                                      admin.status === 'active' ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'
+                                    }`}
+                                  />
+                                  <span className="capitalize">{admin.status}</span>
+                                </span>
+                              </td>
+                              <td className="px-4 py-3.5 text-slate-600 text-[11px]">
+                                {admin.mobile ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <Phone className="w-3 h-3 text-slate-400" />
+                                    <span>{admin.mobile}</span>
+                                  </div>
+                                ) : (
+                                  <span className="text-slate-400">—</span>
                                 )}
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
+                              </td>
+                              <td className="px-4 py-3.5 text-right">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  {admin.status === 'active' && admin.id !== currentAdminUser.id && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        switchAdminUser(admin);
+                                        setActiveTab(getDefaultTabForRole(admin));
+                                      }}
+                                      className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-slate-100 hover:bg-slate-900 hover:text-white text-slate-700 border border-slate-200 transition cursor-pointer"
+                                      title={`Preview dashboard as ${admin.name} (${admin.role})`}
+                                    >
+                                      Preview Role
+                                    </button>
+                                  )}
+                                  {admin.role !== 'Super Admin' ? (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenPermissionEditor(admin)}
+                                        className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-white hover:bg-slate-50 text-slate-800 border border-slate-200 transition cursor-pointer"
+                                        title="Customize role & granular UI permissions"
+                                      >
+                                        Permissions
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleToggleAdminStatus(admin.id)}
+                                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition cursor-pointer ${
+                                          admin.status === 'active'
+                                            ? 'bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200'
+                                            : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200'
+                                        }`}
+                                        title={admin.status === 'active' ? 'Disable account' : 'Enable account'}
+                                      >
+                                        {admin.status === 'active' ? 'Disable' : 'Enable'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDeleteAdminUser(admin.id, admin.name)}
+                                        className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                                        title="Delete staff account"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <span className="text-[10px] text-slate-400 font-semibold px-2 py-0.5 bg-slate-50 rounded border border-slate-100">
+                                      Owner
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
 
                   {/* RESPONSIVE MOBILE CARDS (< 768px) */}
                   <div className="block md:hidden space-y-3">
-                    {localAdminUsers.map((admin) => (
-                      <div
-                        key={admin.id}
-                        className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 space-y-3"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex items-center gap-2.5">
-                            <div className="w-9 h-9 rounded-full bg-slate-900 text-white font-bold text-xs flex items-center justify-center shrink-0">
-                              {admin.name.charAt(0).toUpperCase()}
-                            </div>
-                            <div>
-                              <div className="font-bold text-xs text-slate-900 flex items-center gap-1.5">
-                                <span>{admin.name}</span>
-                                {admin.id === currentAdminUser.id && (
-                                  <span className="text-[9px] text-slate-700 bg-slate-100 px-1.5 py-0.2 rounded font-normal border border-slate-200">
-                                    You
-                                  </span>
-                                )}
+                    {localAdminUsers.map((admin) => {
+                      const badgeInfo = getRoleBadgeInfo(admin.role);
+                      const userPerms = getEffectivePermissions(admin);
+                      return (
+                        <div
+                          key={admin.id}
+                          className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 space-y-3"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex items-center gap-2.5">
+                              <div className="w-9 h-9 rounded-full bg-slate-900 text-white font-bold text-xs flex items-center justify-center shrink-0">
+                                {admin.name.charAt(0).toUpperCase()}
                               </div>
-                              <div className="text-[11px] text-slate-500">{admin.email}</div>
+                              <div>
+                                <div className="font-bold text-xs text-slate-900 flex items-center gap-1.5">
+                                  <span>{admin.name}</span>
+                                  {admin.id === currentAdminUser.id && (
+                                    <span className="text-[9px] text-slate-700 bg-slate-100 px-1.5 py-0.2 rounded font-normal border border-slate-200">
+                                      You
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-slate-500">{admin.email}</div>
+                              </div>
                             </div>
+
+                            <span
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                admin.status === 'active'
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : 'bg-slate-100 text-slate-500 border border-slate-200'
+                              }`}
+                            >
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full ${
+                                  admin.status === 'active' ? 'bg-emerald-500' : 'bg-slate-400'
+                                }`}
+                              />
+                              <span className="capitalize">{admin.status}</span>
+                            </span>
                           </div>
 
-                          <span
-                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                              admin.status === 'active'
-                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                : 'bg-slate-100 text-slate-500 border border-slate-200'
-                            }`}
-                          >
-                            <span
-                              className={`w-1.5 h-1.5 rounded-full ${
-                                admin.status === 'active' ? 'bg-emerald-500' : 'bg-slate-400'
-                              }`}
-                            />
-                            <span className="capitalize">{admin.status}</span>
-                          </span>
-                        </div>
+                          <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-200/60">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span
+                                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] border ${badgeInfo.colorClass}`}
+                              >
+                                <span>{admin.role}</span>
+                              </span>
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-white text-slate-600 border border-slate-200 font-semibold">
+                                {userPerms.length} Perms
+                              </span>
+                            </div>
 
-                        <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-200/60">
-                          <span
-                            className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] border ${
-                              admin.role === 'Super Admin'
-                                ? 'bg-red-50 text-red-600 border-red-200 font-normal'
-                                : admin.role === 'Listing + Label Admin'
-                                ? 'bg-blue-50 text-blue-700 border-blue-200 font-medium'
-                                : 'bg-emerald-50 text-emerald-700 border-emerald-200 font-medium'
-                            }`}
-                          >
-                            <span>{admin.role}</span>
-                          </span>
+                            {admin.mobile && (
+                              <span className="text-[11px] text-slate-500 flex items-center gap-1">
+                                <Phone className="w-3 h-3 text-slate-400" />
+                                {admin.mobile}
+                              </span>
+                            )}
+                          </div>
 
-                          {admin.mobile && (
-                            <span className="text-[11px] text-slate-500 flex items-center gap-1">
-                              <Phone className="w-3 h-3 text-slate-400" />
-                              {admin.mobile}
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200/60">
-                          {admin.role !== 'Super Admin' ? (
-                            <>
+                          <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200/60 flex-wrap">
+                            {admin.status === 'active' && admin.id !== currentAdminUser.id && (
                               <button
                                 type="button"
-                                onClick={() => handleToggleAdminStatus(admin.id)}
-                                className="px-3 py-1 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition cursor-pointer"
+                                onClick={() => {
+                                  switchAdminUser(admin);
+                                  setActiveTab(getDefaultTabForRole(admin));
+                                }}
+                                className="px-3 py-1 bg-slate-900 text-white rounded-lg text-xs font-semibold transition cursor-pointer"
                               >
-                                {admin.status === 'active' ? 'Disable' : 'Enable'}
+                                Preview Role
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteAdminUser(admin.id, admin.name)}
-                                className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
-                                title="Delete staff account"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            </>
-                          ) : (
-                            <span className="text-[10px] text-slate-400 font-semibold px-2 py-0.5 bg-slate-100 rounded">
-                              Owner
-                            </span>
-                          )}
+                            )}
+                            {admin.role !== 'Super Admin' ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenPermissionEditor(admin)}
+                                  className="px-3 py-1 bg-white hover:bg-slate-100 border border-slate-200 text-slate-800 rounded-lg text-xs font-semibold transition cursor-pointer"
+                                >
+                                  Permissions
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleAdminStatus(admin.id)}
+                                  className="px-3 py-1 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition cursor-pointer"
+                                >
+                                  {admin.status === 'active' ? 'Disable' : 'Enable'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteAdminUser(admin.id, admin.name)}
+                                  className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                                  title="Delete staff account"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </>
+                            ) : (
+                              <span className="text-[10px] text-slate-400 font-semibold px-2 py-0.5 bg-slate-100 rounded">
+                                Owner
+                              </span>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               </div>
@@ -4671,15 +4962,15 @@ export const AdminPanel: React.FC = () => {
               <AccessDeniedNotice
                 role={currentAdminUser.role}
                 section="Admin Management"
-                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser.role))}
+                requiredPermission="manage_admins"
+                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser))}
               />
             )
           )}
 
-          {/* VIEW: MAIN ADMIN SETTINGS (Profile, Security, Notifications, Store, Admin Prefs, Privacy) */}
           {/* VIEW: MAIN ADMIN SETTINGS (Profile, Security, Notifications, Store Preferences) */}
           {activeTab === 'settings' && (
-            currentAdminUser.role === 'Super Admin' ? (
+            can('view_settings') ? (
               <div className="space-y-8">
                 <AdminSettingsView
                   settings={settings}
@@ -4691,14 +4982,15 @@ export const AdminPanel: React.FC = () => {
               <AccessDeniedNotice
                 role={currentAdminUser.role}
                 section="Store Settings"
-                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser.role))}
+                requiredPermission="view_settings"
+                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser))}
               />
             )
           )}
 
           {/* VIEW: DEDICATED DOMAIN & CUSTOM DNS MANAGER */}
           {activeTab === 'domain-dns' && (
-            currentAdminUser.role === 'Super Admin' ? (
+            can('manage_domain_dns') ? (
               <div className="space-y-8 max-w-5xl">
                 <CustomDomainManager
                   settings={settings}
@@ -4710,7 +5002,8 @@ export const AdminPanel: React.FC = () => {
               <AccessDeniedNotice
                 role={currentAdminUser.role}
                 section="Domain & DNS Management"
-                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser.role))}
+                requiredPermission="manage_domain_dns"
+                onRedirect={() => setActiveTab(getDefaultTabForRole(currentAdminUser))}
               />
             )
           )}
@@ -4880,7 +5173,7 @@ export const AdminPanel: React.FC = () => {
       {/* ============================================================ */}
       {/* ADD ADMIN MODAL (Conditionally rendered for Super Admin)     */}
       {/* ============================================================ */}
-      {isAddAdminModalOpen && currentAdminUser.role === 'Super Admin' && (
+      {isAddAdminModalOpen && can('manage_admins') && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/65 backdrop-blur-xs overscroll-contain animate-in fade-in"
           onClick={(e) => {
@@ -4899,7 +5192,7 @@ export const AdminPanel: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="text-sm sm:text-base font-bold text-slate-900 leading-tight">Add New Admin</h3>
-                  <p className="text-[11px] text-slate-500">Create staff account with role-based access</p>
+                  <p className="text-[11px] text-slate-500">Create staff account with role &amp; granular permissions</p>
                 </div>
               </div>
               <button
@@ -4929,7 +5222,7 @@ export const AdminPanel: React.FC = () => {
                   <input
                     id="add-admin-name"
                     type="text"
-                    placeholder="e.g. Rahul Sharma"
+                    placeholder="e.g. Priya Nair"
                     value={newAdminName}
                     onChange={(e) => {
                       setNewAdminName(e.target.value);
@@ -5056,6 +5349,26 @@ export const AdminPanel: React.FC = () => {
                     aria-invalid={!!formErrors.role}
                     aria-describedby={formErrors.role ? 'add-admin-role-error' : undefined}
                   >
+                    <label className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition ${newAdminRole === 'Listing Admin' ? 'border-slate-900 bg-slate-50' : 'border-slate-200 hover:bg-slate-50'}`}>
+                      <input
+                        type="radio"
+                        name="adminRole"
+                        value="Listing Admin"
+                        checked={newAdminRole === 'Listing Admin'}
+                        onChange={() => {
+                          setNewAdminRole('Listing Admin');
+                          setNewAdminPermissions(getDefaultPermissionsForRole('Listing Admin'));
+                          if (formErrors.role) setFormErrors((prev) => ({ ...prev, role: undefined }));
+                          if (adminMgmtError) setAdminMgmtError(null);
+                        }}
+                        className="mt-0.5 text-slate-900 focus:ring-slate-900"
+                      />
+                      <div>
+                        <div className="text-xs font-bold text-slate-900">Listing Admin</div>
+                        <div className="text-[11px] text-slate-500">Access to Product Catalog, Add/Edit Listings, Color Variants, Inventory &amp; Categories. Strictly NO access to Orders, Labels, Revenue, or Settings.</div>
+                      </div>
+                    </label>
+
                     <label className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition ${newAdminRole === 'Label Admin' ? 'border-slate-900 bg-slate-50' : 'border-slate-200 hover:bg-slate-50'}`}>
                       <input
                         type="radio"
@@ -5064,6 +5377,7 @@ export const AdminPanel: React.FC = () => {
                         checked={newAdminRole === 'Label Admin'}
                         onChange={() => {
                           setNewAdminRole('Label Admin');
+                          setNewAdminPermissions(getDefaultPermissionsForRole('Label Admin'));
                           if (formErrors.role) setFormErrors((prev) => ({ ...prev, role: undefined }));
                           if (adminMgmtError) setAdminMgmtError(null);
                         }}
@@ -5071,7 +5385,7 @@ export const AdminPanel: React.FC = () => {
                       />
                       <div>
                         <div className="text-xs font-bold text-slate-900">Label Admin</div>
-                        <div className="text-[11px] text-slate-500">Access to Orders, Shipping Labels, AWB generation, manifests & shipment tracking. Strictly NO access to Live Sales, Revenue or Analytics dashboard.</div>
+                        <div className="text-[11px] text-slate-500">Access to Orders, Shipping Labels, AWB generation, manifests &amp; shipment tracking. Strictly NO access to Catalog, Revenue, or Analytics.</div>
                       </div>
                     </label>
 
@@ -5083,6 +5397,7 @@ export const AdminPanel: React.FC = () => {
                         checked={newAdminRole === 'Listing + Label Admin'}
                         onChange={() => {
                           setNewAdminRole('Listing + Label Admin');
+                          setNewAdminPermissions(getDefaultPermissionsForRole('Listing + Label Admin'));
                           if (formErrors.role) setFormErrors((prev) => ({ ...prev, role: undefined }));
                           if (adminMgmtError) setAdminMgmtError(null);
                         }}
@@ -5090,7 +5405,7 @@ export const AdminPanel: React.FC = () => {
                       />
                       <div>
                         <div className="text-xs font-bold text-slate-900">Listing + Label Admin</div>
-                        <div className="text-[11px] text-slate-500">Manage products, listings & inventory PLUS complete order label & shipping capabilities.</div>
+                        <div className="text-[11px] text-slate-500">Manage products, listings &amp; inventory PLUS complete order label &amp; shipping capabilities.</div>
                       </div>
                     </label>
                   </div>
@@ -5100,6 +5415,63 @@ export const AdminPanel: React.FC = () => {
                       <span>{formErrors.role}</span>
                     </p>
                   )}
+                </div>
+
+                {/* Granular Permission Checkboxes */}
+                <div className="border border-slate-200 rounded-xl p-3.5 bg-slate-50/60 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-800">
+                      Granular UI Permissions ({newAdminPermissions.length} active)
+                    </span>
+                    {newAdminRole && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setNewAdminPermissions(
+                            getDefaultPermissionsForRole(
+                              newAdminRole as 'Listing Admin' | 'Label Admin' | 'Listing + Label Admin'
+                            )
+                          )
+                        }
+                        className="text-[10px] font-semibold text-slate-600 hover:text-slate-900 underline cursor-pointer"
+                      >
+                        Reset to Role Default
+                      </button>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-44 overflow-y-auto pr-1">
+                    {PERMISSION_CATALOG.filter((p) => !p.superAdminOnly).map((perm) => {
+                      const checked = newAdminPermissions.includes(perm.key);
+                      return (
+                        <label
+                          key={perm.key}
+                          className={`flex items-start gap-2 p-2 rounded-lg border text-[11px] cursor-pointer transition ${
+                            checked
+                              ? 'bg-white border-slate-300 text-slate-900 font-semibold'
+                              : 'bg-transparent border-slate-200/70 text-slate-500'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setNewAdminPermissions((prev) =>
+                                  Array.from(new Set([...prev, perm.key]))
+                                );
+                              } else {
+                                setNewAdminPermissions((prev) =>
+                                  prev.filter((k) => k !== perm.key)
+                                );
+                              }
+                            }}
+                            className="mt-0.5 rounded text-slate-900 focus:ring-slate-900"
+                          />
+                          <span className="leading-tight">{perm.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
 
@@ -5120,6 +5492,166 @@ export const AdminPanel: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* GRANULAR PERMISSION EDITOR MODAL (Super Admin Only)          */}
+      {/* ============================================================ */}
+      {permissionEditorUser && can('manage_admins') && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/65 backdrop-blur-xs overscroll-contain animate-in fade-in"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setPermissionEditorUser(null);
+          }}
+        >
+          <div
+            className="relative bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] shadow-2xl border border-slate-200 flex flex-col overflow-hidden animate-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 px-5 sm:px-6 py-4 bg-white shrink-0">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  Granular Permissions — {permissionEditorUser.name}
+                </h3>
+                <p className="text-xs text-slate-500">
+                  {permissionEditorUser.email} • Customize role preset and individual UI capabilities
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPermissionEditorUser(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-900 hover:bg-slate-100 transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-5 sm:px-6 py-4 space-y-5">
+              {/* Role Preset Switcher */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-slate-800">Assigned Staff Role Preset</label>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPermissionEditorDraft(getDefaultPermissionsForRole(permissionEditorRoleDraft))
+                    }
+                    className="text-xs font-semibold text-red-600 hover:text-red-700 cursor-pointer"
+                  >
+                    Reset to {permissionEditorRoleDraft} Defaults
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {(['Listing Admin', 'Label Admin', 'Listing + Label Admin'] as const).map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      onClick={() => {
+                        setPermissionEditorRoleDraft(r);
+                        setPermissionEditorDraft(getDefaultPermissionsForRole(r));
+                      }}
+                      className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${
+                        permissionEditorRoleDraft === r
+                          ? 'border-slate-900 bg-slate-900 text-white'
+                          : 'border-slate-200 bg-slate-50 hover:bg-white text-slate-800'
+                      }`}
+                    >
+                      <div className="text-xs font-bold">{r}</div>
+                      <div
+                        className={`text-[10px] mt-0.5 ${
+                          permissionEditorRoleDraft === r ? 'text-slate-300' : 'text-slate-500'
+                        }`}
+                      >
+                        {getDefaultPermissionsForRole(r).length} default permissions
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Categorized Permission Checkboxes */}
+              {(
+                [
+                  'Catalog & Listings',
+                  'Orders & Label Dispatch',
+                  'Overview & Analytics',
+                  'Customers & Growth',
+                ] as PermissionCategory[]
+              ).map((cat) => {
+                const catPerms = PERMISSION_CATALOG.filter(
+                  (p) => p.category === cat && !p.superAdminOnly
+                );
+                return (
+                  <div key={cat} className="space-y-2">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100 pb-1">
+                      {cat}
+                    </h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {catPerms.map((perm) => {
+                        const isChecked = permissionEditorDraft.includes(perm.key);
+                        return (
+                          <label
+                            key={perm.key}
+                            className={`flex items-start gap-2.5 p-2.5 rounded-xl border cursor-pointer transition ${
+                              isChecked
+                                ? 'bg-slate-50 border-slate-900/80'
+                                : 'bg-white border-slate-200 hover:bg-slate-50/50'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setPermissionEditorDraft((prev) =>
+                                    Array.from(new Set([...prev, perm.key]))
+                                  );
+                                } else {
+                                  setPermissionEditorDraft((prev) =>
+                                    prev.filter((k) => k !== perm.key)
+                                  );
+                                }
+                              }}
+                              className="mt-0.5 rounded text-slate-900 focus:ring-slate-900"
+                            />
+                            <div>
+                              <div className="text-xs font-bold text-slate-900">{perm.label}</div>
+                              <div className="text-[10px] text-slate-500 leading-snug mt-0.5">
+                                {perm.description}
+                              </div>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center justify-between px-5 sm:px-6 py-3.5 bg-slate-50 border-t border-slate-100 shrink-0">
+              <span className="text-xs font-semibold text-slate-600">
+                {permissionEditorDraft.length} permissions enabled
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPermissionEditorUser(null)}
+                  className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-bold text-slate-700 hover:bg-white transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSavePermissionEditor}
+                  className="px-5 py-2 rounded-xl bg-slate-900 hover:bg-black text-white text-xs font-bold transition cursor-pointer"
+                >
+                  Save Permissions
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

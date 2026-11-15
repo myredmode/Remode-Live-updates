@@ -416,13 +416,12 @@ export const ProductDetail: React.FC = () => {
     }
   }, [product?.id, selectedProductColor, isFreeSize]);
 
-  // Dynamic SEO Page Title
+  // Sync active color variant with StoreContext so centralized SeoManager updates title, canonical URL & OpenGraph metadata
   useEffect(() => {
-    if (product?.name) {
-      const colorSuffix = selectedColor ? ` - ${selectedColor}` : '';
-      document.title = `${product.name}${colorSuffix} | REDMODE`;
+    if (setSelectedProductColor && selectedColor !== selectedProductColor) {
+      setSelectedProductColor(selectedColor || null);
     }
-  }, [product?.name, selectedColor]);
+  }, [selectedColor, selectedProductColor, setSelectedProductColor]);
 
   const handleSelectColor = (newColor: string) => {
     setSelectedColor(newColor);

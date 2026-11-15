@@ -10,23 +10,34 @@ export const SeoManager: React.FC = () => {
     selectedCategorySlug,
     selectedSubcategorySlug,
     selectedBlogId,
+    isLoginOpen,
+    searchQuery,
     products,
     categories,
     blogs,
+    settings,
   } = useStore();
 
   // Find active product if on PDP
   const activeProduct = useMemo(() => {
     if (activeView !== 'product-detail' || !selectedProductId) return null;
-    return products.find((p) => p.id === selectedProductId) || null;
+    return (
+      products.find(
+        (p) =>
+          p.id.toLowerCase() === selectedProductId.toLowerCase() ||
+          p.slug.toLowerCase() === selectedProductId.toLowerCase()
+      ) || null
+    );
   }, [activeView, selectedProductId, products]);
 
   // Find active category if on Catalogue
   const activeCategory = useMemo(() => {
     if (!selectedCategorySlug) return null;
-    return categories.find(
-      (c) => c.slug.toLowerCase() === selectedCategorySlug.toLowerCase()
-    ) || null;
+    return (
+      categories.find(
+        (c) => c.slug.toLowerCase() === selectedCategorySlug.toLowerCase()
+      ) || null
+    );
   }, [selectedCategorySlug, categories]);
 
   // Find active subcategory if on Catalogue
@@ -41,11 +52,11 @@ export const SeoManager: React.FC = () => {
 
   // Find active blog if on Blog view
   const activeBlog = useMemo(() => {
-    if (activeView !== 'blogs' || !selectedBlogId) return null;
+    if ((activeView !== 'blogs' && activeView !== 'blog-detail') || !selectedBlogId) return null;
     return blogs.find((b) => b.id === selectedBlogId) || null;
   }, [activeView, selectedBlogId, blogs]);
 
-  // Update DOM head tags on any view / product / category change
+  // Dynamically update document title, canonical URL, OpenGraph, Twitter Card, and Schema.org tags
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
@@ -57,11 +68,24 @@ export const SeoManager: React.FC = () => {
       subcategory: activeSubcategory,
       blog: activeBlog,
       selectedColor: selectedProductColor,
+      isLoginOpen,
+      searchQuery,
+      settings,
       origin,
     });
 
     updateHeadTags(meta);
-  }, [activeView, activeProduct, activeCategory, activeSubcategory, activeBlog, selectedProductColor]);
+  }, [
+    activeView,
+    activeProduct,
+    activeCategory,
+    activeSubcategory,
+    activeBlog,
+    selectedProductColor,
+    isLoginOpen,
+    searchQuery,
+    settings,
+  ]);
 
   return null;
 };
