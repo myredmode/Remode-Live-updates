@@ -6354,26 +6354,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             <title>REDMODE Dispatch Manifest</title>
             <style>
               body { font-family: sans-serif; padding: 24px; color: #0f172a; }
-              .hdr { display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid #0f172a; padding-bottom: 12px; margin-bottom: 16px; }
-              .logo-crop { width: 175px; height: 42px; overflow: hidden; display: flex; align-items: center; justify-content: flex-start; }
-              .logo-img { width: 220px; height: 220px; object-fit: cover; margin-left: -18px; mix-blend-mode: multiply; }
               table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 12px; }
               th { background: #f1f5f9; padding: 8px; border: 1px solid #cbd5e1; text-align: left; }
             </style>
           </head>
           <body>
-            <div class="hdr">
-              <div>
-                <div class="logo-crop">
-                  <img src="/assets/aistudio/2_cc1df8cf.jpg" alt="REDMODE" class="logo-img" />
-                </div>
-                <div style="font-size: 11px; font-weight: 700; color: #475569; margin-top: 2px;">COURIER DISPATCH MANIFEST &bull; WOMEN'S FASHION &amp; GARMENTS</div>
-              </div>
-              <div style="text-align: right; font-size: 12px;">
-                <strong>Date:</strong> ${new Date().toLocaleDateString('en-IN')}<br/>
-                <strong>Total Consignments:</strong> ${validAwbs.length}
-              </div>
-            </div>
+            <h2>REDMODE COURIER DISPATCH MANIFEST</h2>
+            <p>Date: ${new Date().toLocaleDateString('en-IN')} &bull; Total Consignments: ${validAwbs.length}</p>
             <table>
               <thead>
                 <tr>
@@ -6387,7 +6374,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 ${rows}
               </tbody>
             </table>
-            <script>window.onload = function() { setTimeout(function() { window.print(); }, 350); };</script>
+            <script>window.print();</script>
           </body>
           </html>
         `);

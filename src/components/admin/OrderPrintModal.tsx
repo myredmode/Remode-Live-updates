@@ -76,10 +76,9 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
   const activeOrders = orders && orders.length > 0 ? orders : (order ? [order] : []);
   if (!isOpen || activeOrders.length === 0) return null;
   const targetOrder = activeOrders[0];
-  const isSampleOrder = targetOrder.id === 'SAMPLE-ORDER-RM2026' || String(targetOrder.id).startsWith('SAMPLE-');
 
   const handlePrint = () => {
-    if (!isSampleOrder && (activeTab === 'label' || activeTab === 'both')) {
+    if (activeTab === 'label' || activeTab === 'both') {
       activeOrders.forEach((o) => onLabelDownloaded?.(o.id));
       setHasDispatchedTracking(true);
     }
@@ -87,10 +86,8 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
   };
 
   const handleDownloadLabelFile = () => {
-    if (!isSampleOrder) {
-      activeOrders.forEach((o) => onLabelDownloaded?.(o.id));
-      setHasDispatchedTracking(true);
-    }
+    activeOrders.forEach((o) => onLabelDownloaded?.(o.id));
+    setHasDispatchedTracking(true);
     const origin = window.location.origin;
     const logoIconUrl = `${origin}/assets/aistudio/1_fdd0186c.jpg`;
     const logoFullUrl = `${origin}/assets/aistudio/2_cc1df8cf.jpg`;
@@ -425,11 +422,10 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    const fileSuffix = isSampleOrder
-      ? 'SAMPLE'
-      : activeOrders.length > 1
-      ? `BULK-${activeOrders.length}-ORDERS`
-      : targetOrder.id.replace(/[^a-zA-Z0-9]/g, '').slice(-8).toUpperCase();
+    const fileSuffix =
+      activeOrders.length > 1
+        ? `BULK-${activeOrders.length}-ORDERS`
+        : targetOrder.id.replace(/[^a-zA-Z0-9]/g, '').slice(-8).toUpperCase();
     a.download = `REDMODE-Shipping-Label-${fileSuffix}.html`;
     document.body.appendChild(a);
     a.click();
@@ -506,33 +502,23 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
     return (
       <div key={ord.id || orderIndex} className="space-y-8 print:break-after-page">
         {/* ============================================================ */}
-        {/* DOCUMENT 1: TAX INVOICE                                      */}
+        {/* DOCUMENT 1: TAX INVOICE (Original Clean Text Branding)       */}
         {/* ============================================================ */}
         {(activeTab === 'invoice' || activeTab === 'both') && (
           <div
             id={`printable-tax-invoice-${orderIndex}`}
             className="bg-white p-6 sm:p-8 rounded-xl border border-slate-300/80 shadow-sm print:border-none print:shadow-none print:p-4 text-slate-900 font-sans text-xs leading-relaxed"
           >
-            {/* Invoice Header with Official REDMODE Logo */}
+            {/* Invoice Header */}
             <div className="border-b-2 border-slate-900 pb-4 mb-4">
               <div className="flex justify-between items-start">
                 <div>
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-48 h-11 overflow-hidden flex items-center justify-start bg-white">
-                      <img
-                        src="/assets/aistudio/2_cc1df8cf.jpg"
-                        alt="REDMODE Official Logo"
-                        className="w-60 h-60 max-w-none object-cover -ml-4 mix-blend-multiply"
-                      />
-                    </div>
-                    {isSampleOrder && (
-                      <span className="px-2 py-0.5 bg-amber-100 text-amber-800 border border-amber-300 rounded text-[10px] font-black uppercase tracking-wider">
-                        SAMPLE
-                      </span>
-                    )}
+                  <div className="flex items-baseline gap-1 font-black text-2xl tracking-tight">
+                    <span className="text-[#E52229]">RED</span>
+                    <span className="text-slate-900">MODE</span>
                   </div>
                   <p className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mt-0.5">
-                    Premium Women&apos;s Fashion &amp; Garment Brand
+                    Lifestyle &amp; Streetwear Co.
                   </p>
                 </div>
 
@@ -711,15 +697,8 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
               </div>
 
               <div className="text-right flex flex-col justify-between items-end">
-                <div className="flex items-center gap-1.5">
-                  <div className="w-7 h-6 overflow-hidden flex items-center justify-center">
-                    <img
-                      src="/assets/aistudio/1_fdd0186c.jpg"
-                      alt="REDMODE"
-                      className="w-11 h-11 max-w-none object-cover mix-blend-multiply"
-                    />
-                  </div>
-                  <p className="font-bold text-slate-800">For RedMode</p>
+                <div>
+                  <p className="font-bold text-slate-700">For RedMode</p>
                 </div>
                 <div className="mt-6 border-t border-slate-300 pt-1 w-44 text-center">
                   <p className="font-bold text-slate-800 text-[10px]">Authorized Signatory</p>
@@ -764,13 +743,6 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
                 <div>{orderDate}</div>
               </div>
             </div>
-
-            {/* Sample Label Watermark Pill if Sample */}
-            {isSampleOrder && (
-              <div className="mb-2 px-2.5 py-1 bg-amber-50 border border-amber-300 rounded text-center text-[10px] font-black text-amber-900 uppercase tracking-wider">
-                ★ Official REDMODE Sample Shipping Label Preview ★
-              </div>
-            )}
 
             {/* Routing Barcode */}
             <div className="text-center my-2 p-2 bg-slate-50 border border-slate-300 rounded">
@@ -868,11 +840,10 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
     );
   };
 
-  const headerOrderBadge = isSampleOrder
-    ? 'SAMPLE LABEL'
-    : activeOrders.length > 1
-    ? `${activeOrders.length} ORDERS BATCH`
-    : `#${targetOrder.id.replace(/-/g, '').slice(-8).toUpperCase()}`;
+  const headerOrderBadge =
+    activeOrders.length > 1
+      ? `${activeOrders.length} ORDERS BATCH`
+      : `#${targetOrder.id.replace(/-/g, '').slice(-8).toUpperCase()}`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-2 sm:p-4 overflow-y-auto print:p-0 print:bg-white print:static print:inset-auto">
@@ -882,26 +853,18 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
         {/* Top Header Controls (Hidden during Print) */}
         <div className="p-4 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-3 shrink-0 print:hidden">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-white flex items-center justify-center overflow-hidden shrink-0">
-              <img
-                src="/assets/aistudio/1_fdd0186c.jpg"
-                alt="REDMODE"
-                className="w-14 h-14 max-w-none object-cover"
-              />
+            <div className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center text-rose-400">
+              <Printer className="w-5 h-5" />
             </div>
             <div>
               <h2 className="font-bold text-sm tracking-tight text-white flex items-center gap-2">
-                <span>
-                  {isSampleOrder
-                    ? 'REDMODE Sample Shipping Label & Invoice'
-                    : 'Print / Download Invoice & Shipping Label'}
-                </span>
+                <span>Print Invoice &amp; Shipping Label</span>
                 <span className="text-xs px-2 py-0.5 rounded-full bg-white/10 font-mono text-slate-300">
                   {headerOrderBadge}
                 </span>
               </h2>
               <p className="text-[11px] text-slate-400">
-                Official REDMODE branded 4x6 thermal label &amp; GST compliant invoice
+                1-Click thermal label and official GST compliant invoice
               </p>
             </div>
           </div>
@@ -941,22 +904,24 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
 
           {/* Action Download, Print & Close */}
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleDownloadLabelFile}
-              className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer active:scale-95"
-              title="Download standalone REDMODE shipping label file with logo"
-            >
-              <ArrowDownToLine className="w-3.5 h-3.5" />
-              <span>Download Label</span>
-            </button>
+            {(activeTab === 'label' || activeTab === 'both') && (
+              <button
+                type="button"
+                onClick={handleDownloadLabelFile}
+                className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer active:scale-95"
+                title="Download 4x6 thermal shipping label with REDMODE logo"
+              >
+                <ArrowDownToLine className="w-3.5 h-3.5" />
+                <span>Download Label</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={handlePrint}
               className="px-4 py-2 bg-[#E52229] hover:bg-red-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-2 shadow-sm cursor-pointer active:scale-95"
             >
               <Printer className="w-3.5 h-3.5" />
-              <span>Print / Save PDF</span>
+              <span>Print Now</span>
             </button>
             <button
               type="button"
@@ -979,16 +944,12 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
         <div className="p-3 bg-white border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-500 shrink-0 print:hidden">
           <div className="flex items-center gap-2">
             <span className={`inline-block w-2 h-2 rounded-full ${hasDispatchedTracking || targetOrder.labelDownloaded ? 'bg-blue-600' : 'bg-emerald-500'}`}></span>
-            {isSampleOrder ? (
-              <span className="font-semibold text-slate-700">
-                ✓ Official REDMODE Sample 4x6 Thermal Label with Brand Logo (Admin Preview Only)
-              </span>
-            ) : hasDispatchedTracking || targetOrder.labelDownloaded ? (
+            {hasDispatchedTracking || targetOrder.labelDownloaded ? (
               <span className="font-semibold text-blue-700">
                 ✓ Label printed &amp; Delhivery tracking update dispatched to customer (₹0 inside 24h window)
               </span>
             ) : (
-              <span>Ready to download or print REDMODE branded 4x6 thermal label</span>
+              <span>Ready to print 4x6 thermal label or standard invoice</span>
             )}
           </div>
           <div className="flex items-center gap-2 self-end sm:self-auto">
@@ -999,14 +960,16 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
             >
               Close
             </button>
-            <button
-              type="button"
-              onClick={handleDownloadLabelFile}
-              className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
-            >
-              <ArrowDownToLine className="w-3.5 h-3.5" />
-              <span>Download Label</span>
-            </button>
+            {(activeTab === 'label' || activeTab === 'both') && (
+              <button
+                type="button"
+                onClick={handleDownloadLabelFile}
+                className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+              >
+                <ArrowDownToLine className="w-3.5 h-3.5" />
+                <span>Download Label</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={handlePrint}
