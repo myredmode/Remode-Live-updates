@@ -687,7 +687,13 @@ export const ProductDetail: React.FC = () => {
               <button
                 type="button"
                 id="pdp-floating-search-btn"
-                onClick={() => setIsSearchOpen(true)}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setActiveView('search');
+                  setIsSearchOpen(true);
+                  window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+                }}
                 className="p-2 bg-transparent text-black hover:opacity-75 transition active:scale-90 cursor-pointer flex items-center justify-center"
                 title="Search Products"
                 aria-label="Search"

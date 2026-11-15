@@ -1410,7 +1410,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       prev.selectedSubcategorySlug === selectedSubcategorySlug;
 
     if (!isSame) {
-      if (prev.activeView !== 'admin' && activeView !== 'admin') {
+      // Do not push a new history entry if only selectedProductColor changed on the same product-detail view
+      const isOnlySameProductColorSync =
+        prev.activeView === 'product-detail' &&
+        activeView === 'product-detail' &&
+        prev.selectedProductId === selectedProductId;
+
+      if (!isOnlySameProductColorSync && prev.activeView !== 'admin' && activeView !== 'admin') {
         navHistoryRef.current.push({ ...prev });
         if (navHistoryRef.current.length > 50) {
           navHistoryRef.current.shift();
@@ -1428,14 +1434,38 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const goBack = useCallback(() => {
     isNavigatingBackRef.current = true;
+    setIsSearchOpen(false);
 
-    if (navHistoryRef.current.length > 0) {
-      const prev = navHistoryRef.current.pop()!;
-      setSelectedProductId(prev.selectedProductId);
-      setSelectedProductColor(prev.selectedProductColor);
-      setSelectedCategorySlug(prev.selectedCategorySlug);
-      setSelectedSubcategorySlug(prev.selectedSubcategorySlug);
-      setActiveView(prev.activeView);
+    // Pop past any duplicate history entries that point to the exact same current view/product
+    let targetPrev: {
+      activeView: ActiveView;
+      selectedProductId: string | null;
+      selectedProductColor: string | null;
+      selectedCategorySlug: string | null;
+      selectedSubcategorySlug: string | null;
+    } | null = null;
+
+    while (navHistoryRef.current.length > 0) {
+      const candidate = navHistoryRef.current.pop()!;
+      const isDuplicateOfCurrent =
+        candidate.activeView === activeView &&
+        (activeView !== 'product-detail' || candidate.selectedProductId === selectedProductId) &&
+        (activeView !== 'catalogue' ||
+          (candidate.selectedCategorySlug === selectedCategorySlug &&
+            candidate.selectedSubcategorySlug === selectedSubcategorySlug));
+
+      if (!isDuplicateOfCurrent) {
+        targetPrev = candidate;
+        break;
+      }
+    }
+
+    if (targetPrev) {
+      setSelectedProductId(targetPrev.selectedProductId);
+      setSelectedProductColor(targetPrev.selectedProductColor);
+      setSelectedCategorySlug(targetPrev.selectedCategorySlug);
+      setSelectedSubcategorySlug(targetPrev.selectedSubcategorySlug);
+      setActiveView(targetPrev.activeView);
     } else {
       // Intelligent fallback 1-step hierarchy if history stack is empty:
       if (activeView === 'product-detail') {
@@ -1462,7 +1492,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
 
     window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
-  }, [activeView, selectedCategorySlug, selectedSubcategorySlug]);
+  }, [activeView, selectedProductId, selectedCategorySlug, selectedSubcategorySlug]);
 
   // Safe Normalization Helper to populate missing fields on stored products without resurrecting deleted items
   const normalizeProductsWithInitial = (rawList: Partial<Product>[], blacklist: string[] = []): Product[] => {

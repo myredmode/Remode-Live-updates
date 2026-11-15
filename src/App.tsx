@@ -684,7 +684,6 @@ const StoreContent: React.FC = () => {
 
       {/* Global Modals & Drawers */}
       <CartDrawer />
-      {activeView !== 'search' && <SearchModal />}
       <LoginModal />
       <AdminSessionExpiredModal />
 

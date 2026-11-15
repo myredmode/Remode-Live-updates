@@ -97,6 +97,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, asPag
     setCartDrawerView,
     userProfile,
     setIsLoginOpen,
+    goBack,
   } = useStore();
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -116,10 +117,20 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, asPag
     } else {
       setIsSearchOpen(false);
       if (activeView === 'search') {
-        setActiveView('home');
+        goBack();
       }
     }
   };
+
+  // Auto-focus search input when search opens
+  useEffect(() => {
+    if (show) {
+      const timer = setTimeout(() => {
+        inputRef.current?.focus();
+      }, 60);
+      return () => clearTimeout(timer);
+    }
+  }, [show]);
 
   // When activeView changes away from search (e.g. user clicked Footer link), close search
   useEffect(() => {
