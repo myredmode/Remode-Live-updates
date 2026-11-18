@@ -9,6 +9,8 @@ import {
   X,
   ExternalLink,
   ShieldCheck,
+  Trash2,
+  AlertTriangle,
 } from 'lucide-react';
 import { useStore } from '../../context/StoreContext';
 import { WhatsAppSettings } from '../../types';
@@ -17,7 +19,29 @@ interface WhatsAppIntegrationPanelProps {
   onSaveNotification?: (msg: string) => void;
 }
 
-const sanitizeWhatsAppSettings = (raw?: WhatsAppSettings, fallbackPhone?: string): WhatsAppSettings => {
+const sanitizeWhatsAppSettings = (
+  raw?: WhatsAppSettings,
+  fallbackPhone?: string,
+  isDeleted?: boolean
+): WhatsAppSettings => {
+  if (isDeleted) {
+    return {
+      enabled: false,
+      provider: 'meta_cloud_api',
+      phoneNumber: raw?.phoneNumber || '',
+      phoneNumberId: raw?.phoneNumberId || '',
+      wabaId: raw?.wabaId || '',
+      accessToken: '',
+      webhookVerifyToken: raw?.webhookVerifyToken || '',
+      orderConfirmationEnabled: raw?.orderConfirmationEnabled ?? false,
+      orderDispatchTrackingEnabled: raw?.orderDispatchTrackingEnabled ?? false,
+      reminder23hEnabled: raw?.reminder23hEnabled ?? false,
+      codVerificationOtpEnabled: raw?.codVerificationOtpEnabled ?? false,
+      deliveredReviewEnabled: raw?.deliveredReviewEnabled ?? false,
+      apiEndpoint: raw?.apiEndpoint || 'https://graph.facebook.com/v21.0',
+    };
+  }
+
   const pid =
     raw?.phoneNumberId && raw.phoneNumberId !== '109845729104823'
       ? raw.phoneNumberId
@@ -51,17 +75,27 @@ const sanitizeWhatsAppSettings = (raw?: WhatsAppSettings, fallbackPhone?: string
 export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> = ({
   onSaveNotification,
 }) => {
-  const { settings, updateWhatsAppSettings, currentAdminUser } = useStore();
+  const { settings, updateWhatsAppSettings } = useStore();
 
   const [formData, setFormData] = useState<WhatsAppSettings>(() =>
-    sanitizeWhatsAppSettings(settings.whatsappSettings, settings.whatsappNumber)
+    sanitizeWhatsAppSettings(
+      settings.whatsappSettings,
+      settings.whatsappNumber,
+      settings.whatsappIntegrationDeleted
+    )
   );
 
   useEffect(() => {
-    if (settings.whatsappSettings) {
-      setFormData(sanitizeWhatsAppSettings(settings.whatsappSettings, settings.whatsappNumber));
+    if (settings.whatsappSettings || settings.whatsappIntegrationDeleted) {
+      setFormData(
+        sanitizeWhatsAppSettings(
+          settings.whatsappSettings,
+          settings.whatsappNumber,
+          settings.whatsappIntegrationDeleted
+        )
+      );
     }
-  }, [settings.whatsappSettings, settings.whatsappNumber]);
+  }, [settings.whatsappSettings, settings.whatsappNumber, settings.whatsappIntegrationDeleted]);
 
   const [showToken, setShowToken] = useState<boolean>(false);
   const [webhookCopied, setWebhookCopied] = useState<boolean>(false);
@@ -73,6 +107,7 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
   const [isSendingMessage, setIsSendingMessage] = useState<boolean>(false);
   const [messageFeedback, setMessageFeedback] = useState<{ success: boolean; message: string } | null>(null);
   const [saveNotification, setSaveNotification] = useState<string | null>(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState<boolean>(false);
 
   const webhookUrl = typeof window !== 'undefined'
     ? `${window.location.origin}/api/whatsapp/webhook`
@@ -82,12 +117,69 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
     setFormData((prev) => ({ ...prev, [field]: value }));
   };
 
-  const handleSaveChanges = () => {
-    updateWhatsAppSettings({
+  const handleToggleActive = () => {
+    const nextEnabled = !formData.enabled;
+    const updatedData: WhatsAppSettings = {
       ...formData,
+      accessToken: (formData.accessToken || '').trim(),
+      phoneNumberId: (formData.phoneNumberId || '').trim(),
+      wabaId: (formData.wabaId || '').trim(),
+      phoneNumber: (formData.phoneNumber || '').trim(),
+      apiEndpoint: (formData.apiEndpoint || 'https://graph.facebook.com/v21.0').trim(),
+      webhookVerifyToken: (formData.webhookVerifyToken || 'redmode_wa_verify_2026').trim(),
       provider: 'meta_cloud_api',
-      enabled: true,
-    });
+      enabled: nextEnabled,
+    };
+    setFormData(updatedData);
+    updateWhatsAppSettings(updatedData);
+    const msg = nextEnabled
+      ? 'Meta WhatsApp Cloud API activated.'
+      : 'Meta WhatsApp Cloud API deactivated. Automated messages are paused.';
+    setSaveNotification(msg);
+    if (onSaveNotification) {
+      onSaveNotification(msg);
+    }
+    setTimeout(() => setSaveNotification(null), 3500);
+  };
+
+  const handleConfirmDelete = () => {
+    const cleared: WhatsAppSettings = {
+      ...formData,
+      enabled: false,
+      provider: 'meta_cloud_api',
+      accessToken: '',
+      phoneNumberId: '',
+      wabaId: '',
+      phoneNumber: '',
+      webhookVerifyToken: '',
+    };
+    setFormData(cleared);
+    updateWhatsAppSettings({ __delete: true } as any);
+    setIsDeleteModalOpen(false);
+    setTestConnectionResult(null);
+    setMessageFeedback(null);
+    const msg = 'Meta WhatsApp integration deleted permanently.';
+    setSaveNotification(msg);
+    if (onSaveNotification) {
+      onSaveNotification(msg);
+    }
+    setTimeout(() => setSaveNotification(null), 3500);
+  };
+
+  const handleSaveChanges = () => {
+    const cleanedData: WhatsAppSettings = {
+      ...formData,
+      accessToken: (formData.accessToken || '').trim(),
+      phoneNumberId: (formData.phoneNumberId || '').trim(),
+      wabaId: (formData.wabaId || '').trim(),
+      phoneNumber: (formData.phoneNumber || '').trim(),
+      apiEndpoint: (formData.apiEndpoint || 'https://graph.facebook.com/v21.0').trim(),
+      webhookVerifyToken: (formData.webhookVerifyToken || 'redmode_wa_verify_2026').trim(),
+      provider: 'meta_cloud_api',
+      enabled: formData.enabled,
+    };
+    setFormData(cleanedData);
+    updateWhatsAppSettings(cleanedData);
     setSaveNotification('Meta WhatsApp settings saved successfully.');
     if (onSaveNotification) {
       onSaveNotification('Meta WhatsApp settings saved successfully.');
@@ -256,13 +348,23 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
               <MessageSquare className="w-4 h-4" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="text-base font-semibold text-slate-900">
                   Official WhatsApp Business API (Meta)
                 </h3>
-                <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                  ACTIVE
-                </span>
+                {!formData.enabled ? (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-rose-50 text-rose-700 border border-rose-200">
+                    DEACTIVATED
+                  </span>
+                ) : formData.accessToken && formData.phoneNumberId ? (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    ACTIVE
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+                    NEEDS TOKEN
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
                 Direct official Meta Cloud API integration for automated order confirmations, live AWB tracking alerts, and customer notifications.
@@ -270,7 +372,24 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
             </div>
           </div>
 
-          <div className="flex items-center gap-2 self-start sm:self-auto">
+          <div className="flex items-center flex-wrap gap-2 self-start sm:self-auto">
+            {formData.enabled ? (
+              <button
+                type="button"
+                onClick={handleToggleActive}
+                className="px-3 py-2 border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-medium rounded-lg transition cursor-pointer"
+              >
+                Deactivate
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleToggleActive}
+                className="px-3 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-medium rounded-lg transition cursor-pointer"
+              >
+                Activate
+              </button>
+            )}
             <button
               type="button"
               onClick={handleTestConnection}
@@ -286,6 +405,14 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
             >
               <Check className="w-3.5 h-3.5" />
               <span>Save Changes</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsDeleteModalOpen(true)}
+              className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer border border-transparent hover:border-rose-200"
+              title="Delete WhatsApp Integration"
+            >
+              <Trash2 className="w-4 h-4" />
             </button>
           </div>
         </div>
@@ -513,14 +640,23 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
 
         {/* Action Buttons Footer */}
         <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <button
-            type="button"
-            onClick={handleTestConnection}
-            disabled={isTestingConnection}
-            className="px-3.5 py-2 border border-slate-300 hover:border-slate-400 bg-white text-slate-800 text-xs font-medium rounded-lg transition cursor-pointer self-start sm:self-auto disabled:opacity-50"
-          >
-            {isTestingConnection ? 'Testing...' : 'Test Connection'}
-          </button>
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+            <button
+              type="button"
+              onClick={handleTestConnection}
+              disabled={isTestingConnection}
+              className="px-3.5 py-2 border border-slate-300 hover:border-slate-400 bg-white text-slate-800 text-xs font-medium rounded-lg transition cursor-pointer disabled:opacity-50"
+            >
+              {isTestingConnection ? 'Testing...' : 'Test Connection'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsDeleteModalOpen(true)}
+              className="px-3 py-2 text-rose-600 hover:text-rose-700 text-xs font-medium transition cursor-pointer"
+            >
+              Delete Integration
+            </button>
+          </div>
 
           <button
             type="button"
@@ -663,6 +799,59 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
           </div>
         </div>
       </div>
+
+      {/* DELETE CONFIRMATION MODAL */}
+      {isDeleteModalOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/65 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto overscroll-contain animate-in fade-in duration-150"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsDeleteModalOpen(false);
+          }}
+        >
+          <div
+            className="relative bg-white rounded-2xl max-w-sm w-full p-5 border border-slate-200 shadow-2xl space-y-4 overflow-hidden animate-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between">
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-full bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-900">Delete WhatsApp integration?</h3>
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                    This will permanently clear your saved Meta WhatsApp Cloud credentials and deactivate automated alerts.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsDeleteModalOpen(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="pt-2 flex items-center justify-end gap-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setIsDeleteModalOpen(false)}
+                className="px-3.5 py-1.5 border border-slate-200 text-slate-700 hover:bg-slate-50 text-xs font-medium rounded-xl transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDelete}
+                className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-medium rounded-xl transition cursor-pointer shadow-xs"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

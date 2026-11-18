@@ -131,6 +131,48 @@ export const Checkout: React.FC = () => {
   const codEligibility = getCustomerCodEligibility(effectiveMobile);
   const previousRtoReason = getCustomerPreviousRtoReason(effectiveMobile);
 
+  // Resolve active domestic & international payment gateways (respecting Admin Activate/Deactivate & Delete)
+  const hasExplicitGateways = Array.isArray(settings.paymentGateways);
+  const activeDomesticGateway = React.useMemo(() => {
+    if (hasExplicitGateways) {
+      const list = settings.paymentGateways!;
+      if (settings.activePaymentGatewayId === '') return undefined;
+      if (settings.activePaymentGatewayId) {
+        return list.find(
+          (g) => g.id === settings.activePaymentGatewayId && g.provider !== 'paypal' && g.enabled !== false
+        );
+      }
+      return list.find((g) => g.provider !== 'paypal' && g.enabled !== false);
+    }
+    if (settings.deletedPaymentGatewayIds?.includes('razorpay')) return undefined;
+    if (settings.razorpaySettings?.enabled === false) return undefined;
+    return {
+      id: 'razorpay',
+      name: 'Razorpay (UPI / Cards / Net Banking)',
+      provider: 'razorpay' as const,
+      enabled: true,
+      mode: settings.razorpaySettings?.mode || 'live',
+      apiKey: settings.razorpaySettings?.keyId || '',
+      apiSecret: settings.razorpaySettings?.keySecret || '',
+      merchantName: settings.razorpaySettings?.merchantName || 'REDMODE',
+      themeColor: settings.razorpaySettings?.themeColor || '#111827',
+    };
+  }, [hasExplicitGateways, settings.paymentGateways, settings.activePaymentGatewayId, settings.razorpaySettings, settings.deletedPaymentGatewayIds]);
+
+  const activeInternationalGateway = React.useMemo(() => {
+    if (hasExplicitGateways) {
+      const list = settings.paymentGateways!;
+      if (settings.activeInternationalGatewayId === '') return undefined;
+      if (settings.activeInternationalGatewayId) {
+        return list.find(
+          (g) => g.id === settings.activeInternationalGatewayId && g.enabled !== false
+        );
+      }
+      return list.find((g) => (g.provider === 'paypal' || g.provider === 'stripe') && g.enabled !== false);
+    }
+    return undefined;
+  }, [hasExplicitGateways, settings.paymentGateways, settings.activeInternationalGatewayId]);
+
   // Force Prepaid & PayPal for International Export orders
   useEffect(() => {
     if (isInternational) {
@@ -138,15 +180,24 @@ export const Checkout: React.FC = () => {
       if (paymentMode === 'COD') {
         setPaymentMode('Prepaid');
       }
+    } else {
+      setSelectedPaymentProvider('razorpay');
     }
   }, [isInternational, paymentMode]);
 
-  // If COD is not available, automatically keep payment mode on Prepaid
+  // If domestic online gateway is deactivated/deleted, auto-switch to COD when available
   useEffect(() => {
-    if (!codEligibility.codAvailable && paymentMode === 'COD') {
+    if (!isInternational && !activeDomesticGateway && codEligibility.codAvailable && paymentMode === 'Prepaid') {
+      setPaymentMode('COD');
+    }
+  }, [isInternational, activeDomesticGateway, codEligibility.codAvailable, paymentMode]);
+
+  // If COD is not available and domestic online gateway IS active, keep payment mode on Prepaid
+  useEffect(() => {
+    if (!codEligibility.codAvailable && paymentMode === 'COD' && activeDomesticGateway) {
       setPaymentMode('Prepaid');
     }
-  }, [codEligibility.codAvailable, paymentMode]);
+  }, [codEligibility.codAvailable, paymentMode, activeDomesticGateway]);
 
   // If cart is empty and no confirmed order, show redirect
   if (cart.length === 0 && !confirmedOrder) {
@@ -319,12 +370,14 @@ export const Checkout: React.FC = () => {
     e.preventDefault();
     if (!validateAddress()) return;
 
+    const activePaypal = activeInternationalGateway;
+    if (!activePaypal) {
+      setFormError('International online payment gateway (PayPal) is currently deactivated or not configured.');
+      return;
+    }
+
     setIsProcessingPayment(true);
     setFormError(null);
-
-    const activePaypal =
-      settings.paymentGateways?.find((g) => g.id === settings.activeInternationalGatewayId) ||
-      settings.paymentGateways?.find((g) => g.provider === 'paypal');
 
     try {
       const origin = typeof window !== 'undefined' ? window.location.origin : 'https://www.redmode.in';
@@ -385,17 +438,20 @@ export const Checkout: React.FC = () => {
     e.preventDefault();
     if (!validateAddress()) return;
 
+    const activeDomesticGw = activeDomesticGateway;
+    if (!activeDomesticGw) {
+      setFormError('Online payment gateway is currently deactivated or unavailable. Please use Cash on Delivery (COD).');
+      return;
+    }
+
     setIsProcessingPayment(true);
     setFormError(null);
 
-    const activeDomesticGw =
-      settings.paymentGateways?.find((g) => g.id === settings.activePaymentGatewayId) ||
-      settings.paymentGateways?.find((g) => g.provider === 'razorpay' && g.enabled);
     const rzpSettings = settings.razorpaySettings;
-    const keyId = ((activeDomesticGw?.provider === 'razorpay' ? activeDomesticGw.apiKey : '') || rzpSettings?.keyId || '').trim();
-    const keySecret = ((activeDomesticGw?.provider === 'razorpay' ? activeDomesticGw.apiSecret : '') || rzpSettings?.keySecret || '').trim();
-    const merchantDisplayName = activeDomesticGw?.merchantName || rzpSettings?.merchantName || 'REDMODE';
-    const themeHex = activeDomesticGw?.themeColor || rzpSettings?.themeColor || '#111827';
+    const keyId = ((activeDomesticGw.provider === 'razorpay' ? activeDomesticGw.apiKey : '') || rzpSettings?.keyId || '').trim();
+    const keySecret = ((activeDomesticGw.provider === 'razorpay' ? activeDomesticGw.apiSecret : '') || rzpSettings?.keySecret || '').trim();
+    const merchantDisplayName = activeDomesticGw.merchantName || rzpSettings?.merchantName || 'REDMODE';
+    const themeHex = activeDomesticGw.themeColor || rzpSettings?.themeColor || '#111827';
 
     try {
       const res = await fetch('/api/payment/razorpay/create-order', {
@@ -1011,42 +1067,54 @@ export const Checkout: React.FC = () => {
                 {/* 1. International Export ONLY: PayPal Express */}
                 {isInternational ? (
                   <div className="space-y-3">
-                    <label
-                      className="flex items-start gap-4 p-4 border-2 border-[#003087] bg-blue-50/40 cursor-pointer transition shadow-xs"
-                    >
-                      <input
-                        type="radio"
-                        name="paymentMode"
-                        checked={true}
-                        readOnly
-                        className="mt-1 accent-[#003087] cursor-pointer"
-                      />
-                      <div className="flex-1">
-                        <div className="flex items-center justify-between flex-wrap gap-2">
-                          <div className="flex items-center gap-2">
-                            <span className="font-bold text-zinc-900 text-sm">
-                              PayPal Express (International Export)
-                            </span>
-                            <span className="text-[10px] uppercase font-bold text-blue-800 bg-blue-100 px-2 py-0.5">
-                              USD (${approxUsdAmount})
-                            </span>
+                    {activeInternationalGateway ? (
+                      <label
+                        className="flex items-start gap-4 p-4 border-2 border-[#003087] bg-blue-50/40 cursor-pointer transition shadow-xs"
+                      >
+                        <input
+                          type="radio"
+                          name="paymentMode"
+                          checked={true}
+                          readOnly
+                          className="mt-1 accent-[#003087] cursor-pointer"
+                        />
+                        <div className="flex-1">
+                          <div className="flex items-center justify-between flex-wrap gap-2">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-zinc-900 text-sm">
+                                {activeInternationalGateway.name || 'PayPal Express (International Export)'}
+                              </span>
+                              <span className="text-[10px] uppercase font-bold text-blue-800 bg-blue-100 px-2 py-0.5">
+                                USD (${approxUsdAmount})
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[10px] font-bold text-blue-900 bg-blue-100 px-2 py-0.5 rounded">PayPal Account</span>
+                            </div>
                           </div>
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-[10px] font-bold text-blue-900 bg-blue-100 px-2 py-0.5 rounded">PayPal Account</span>
+                          <p className="text-xs text-zinc-600 mt-1.5 leading-relaxed">
+                            Cross-border order to <strong>{address.country}</strong>. Pay securely in USD directly via your PayPal account.
+                          </p>
+
+                          <div className="mt-3 pt-3 border-t border-blue-200/60 flex items-center justify-between text-xs">
+                            <span className="text-zinc-600">Total Billed: <strong className="text-zinc-950 font-bold">USD ${approxUsdAmount}</strong> <span className="text-zinc-400">(Approx. ₹{cartTotalAmount} INR)</span></span>
+                            <span className="text-[11px] font-bold text-emerald-700 flex items-center gap-1">
+                              <ShieldCheck className="w-3.5 h-3.5" /> Buyer Protection Included
+                            </span>
                           </div>
                         </div>
-                        <p className="text-xs text-zinc-600 mt-1.5 leading-relaxed">
-                          Cross-border order to <strong>{address.country}</strong>. Pay securely in USD directly via your PayPal account.
-                        </p>
-
-                        <div className="mt-3 pt-3 border-t border-blue-200/60 flex items-center justify-between text-xs">
-                          <span className="text-zinc-600">Total Billed: <strong className="text-zinc-950 font-bold">USD ${approxUsdAmount}</strong> <span className="text-zinc-400">(Approx. ₹{cartTotalAmount} INR)</span></span>
-                          <span className="text-[11px] font-bold text-emerald-700 flex items-center gap-1">
-                            <ShieldCheck className="w-3.5 h-3.5" /> Buyer Protection Included
+                      </label>
+                    ) : (
+                      <div className="p-4 bg-rose-50 border border-rose-200 text-xs text-rose-900 flex items-start gap-2.5">
+                        <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="font-bold block">International Online Payment Temporarily Unavailable</span>
+                          <span className="text-rose-800 text-[11px] leading-relaxed">
+                            PayPal / international export checkout is currently deactivated by the store administrator. Please select India as the destination country or try again later.
                           </span>
                         </div>
                       </div>
-                    </label>
+                    )}
 
                     {/* Strict COD Notice for Foreign / Export Orders */}
                     <div className="p-3 bg-amber-50 border border-amber-200 rounded-none text-xs text-amber-900 flex items-start gap-2.5">
@@ -1061,56 +1129,68 @@ export const Checkout: React.FC = () => {
                   </div>
                 ) : (
                   <>
-                    {/* Domestic Option A: Razorpay UPI / Cards */}
-                    <label
-                      onClick={() => {
-                        setPaymentMode('Prepaid');
-                        setSelectedPaymentProvider('razorpay');
-                      }}
-                      className={`flex items-start gap-4 p-4 border cursor-pointer transition ${
-                        paymentMode === 'Prepaid' && selectedPaymentProvider === 'razorpay'
-                          ? 'border-zinc-950 bg-zinc-50'
-                          : 'border-zinc-200 hover:border-zinc-400'
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="paymentMode"
-                        value="Prepaid_Razorpay"
-                        checked={paymentMode === 'Prepaid' && selectedPaymentProvider === 'razorpay'}
-                        onChange={() => {
+                    {/* Domestic Option A: Active Online Payment Gateway */}
+                    {activeDomesticGateway ? (
+                      <label
+                        onClick={() => {
                           setPaymentMode('Prepaid');
                           setSelectedPaymentProvider('razorpay');
                         }}
-                        className="mt-1 accent-zinc-950 cursor-pointer"
-                      />
-                      <div className="flex-1">
-                        <div className="flex items-center justify-between">
-                          <span className="font-bold text-zinc-900 text-sm">
-                            Prepaid (UPI / Cards / Net Banking)
-                          </span>
-                          <span className="text-[10px] uppercase font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5">
-                            Instant Verification
+                        className={`flex items-start gap-4 p-4 border cursor-pointer transition ${
+                          paymentMode === 'Prepaid' && selectedPaymentProvider === 'razorpay'
+                            ? 'border-zinc-950 bg-zinc-50'
+                            : 'border-zinc-200 hover:border-zinc-400'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="paymentMode"
+                          value="Prepaid_Razorpay"
+                          checked={paymentMode === 'Prepaid' && selectedPaymentProvider === 'razorpay'}
+                          onChange={() => {
+                            setPaymentMode('Prepaid');
+                            setSelectedPaymentProvider('razorpay');
+                          }}
+                          className="mt-1 accent-zinc-950 cursor-pointer"
+                        />
+                        <div className="flex-1">
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-zinc-900 text-sm">
+                              {activeDomesticGateway.name || 'Prepaid (UPI / Cards / Net Banking)'}
+                            </span>
+                            <span className="text-[10px] uppercase font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5">
+                              Instant Verification
+                            </span>
+                          </div>
+                          <p className="text-xs text-zinc-500 mt-1">
+                            Pay securely via Google Pay, PhonePe, Paytm, BHIM, Cards, or Net Banking.
+                          </p>
+
+                          {paymentMode === 'Prepaid' && selectedPaymentProvider === 'razorpay' && (
+                            <div className="mt-3 pt-3 border-t border-zinc-200 flex flex-wrap gap-2 text-xs">
+                              {['UPI / QR', 'RuPay & Cards', 'Net Banking'].map((m) => (
+                                <span
+                                  key={m}
+                                  className="px-2.5 py-1 bg-white border border-zinc-300 font-medium text-zinc-700 rounded"
+                                >
+                                  {m}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </label>
+                    ) : (
+                      <div className="p-3.5 bg-zinc-50 border border-zinc-200 text-xs text-zinc-700 flex items-start gap-2.5">
+                        <AlertCircle className="w-4 h-4 text-zinc-500 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="font-bold text-zinc-900 block">Online Prepaid Checkout Currently Deactivated</span>
+                          <span className="text-[11px] text-zinc-600">
+                            Online payment gateway is currently disabled by the store administrator. Please complete your order using Cash on Delivery (COD) below.
                           </span>
                         </div>
-                        <p className="text-xs text-zinc-500 mt-1">
-                          Pay securely via Google Pay, PhonePe, Paytm, BHIM, Cards, or Net Banking.
-                        </p>
-
-                        {paymentMode === 'Prepaid' && selectedPaymentProvider === 'razorpay' && (
-                          <div className="mt-3 pt-3 border-t border-zinc-200 flex flex-wrap gap-2 text-xs">
-                            {['UPI / QR', 'RuPay & Cards', 'Net Banking'].map((m) => (
-                              <span
-                                key={m}
-                                className="px-2.5 py-1 bg-white border border-zinc-300 font-medium text-zinc-700 rounded"
-                              >
-                                {m}
-                              </span>
-                            ))}
-                          </div>
-                        )}
                       </div>
-                    </label>
+                    )}
 
                     {/* Domestic Option B: Cash on Delivery (COD) */}
                     <div
@@ -1199,15 +1279,17 @@ export const Checkout: React.FC = () => {
                 ) : isInternational || selectedPaymentProvider === 'paypal' ? (
                   <button
                     id="checkout-pay-paypal-btn"
-                    disabled={isProcessingPayment}
+                    disabled={isProcessingPayment || !activeInternationalGateway}
                     onClick={handleInitiatePayPal}
-                    className="w-full py-4 bg-[#003087] hover:bg-[#002266] text-white text-xs sm:text-sm font-bold tracking-widest uppercase transition flex items-center justify-center gap-2.5 shadow-lg cursor-pointer disabled:opacity-50"
+                    className="w-full py-4 bg-[#003087] hover:bg-[#002266] text-white text-xs sm:text-sm font-bold tracking-widest uppercase transition flex items-center justify-center gap-2.5 shadow-lg cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <svg className="w-4 h-4 fill-white" viewBox="0 0 24 24">
                       <path d="M7.076 21.337H2.47a.641.641 0 0 1-.633-.74L4.944 2.82A.802.802 0 0 1 5.736 2.2h7.027c3.553 0 5.86 1.83 5.418 5.485-.386 3.195-2.52 5.093-5.69 5.093h-2.31a.801.801 0 0 0-.792.682l-1.313 7.877z"/>
                     </svg>
                     <span>
-                      {isProcessingPayment
+                      {!activeInternationalGateway
+                        ? 'PayPal International Payment Unavailable'
+                        : isProcessingPayment
                         ? 'Connecting to PayPal...'
                         : `PAY WITH PAYPAL (USD $${approxUsdAmount})`}
                     </span>
@@ -1216,8 +1298,9 @@ export const Checkout: React.FC = () => {
                 ) : paymentMode === 'COD' ? (
                   <button
                     id="checkout-place-order-cod-btn"
+                    disabled={!codEligibility.codAvailable || isProcessingPayment}
                     onClick={handlePlaceOrderCOD}
-                    className="w-full py-4 bg-zinc-950 hover:bg-zinc-800 text-white text-xs sm:text-sm font-bold tracking-widest uppercase transition flex items-center justify-center gap-2 shadow-lg cursor-pointer"
+                    className="w-full py-4 bg-zinc-950 hover:bg-zinc-800 text-white text-xs sm:text-sm font-bold tracking-widest uppercase transition flex items-center justify-center gap-2 shadow-lg cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <span>Place COD Order (₹{cartTotalAmount})</span>
                     <ArrowRight className="w-4 h-4" />
@@ -1225,11 +1308,16 @@ export const Checkout: React.FC = () => {
                 ) : (
                   <button
                     id="checkout-pay-prepaid-btn"
+                    disabled={!activeDomesticGateway || isProcessingPayment}
                     onClick={handleInitiatePrepaid}
-                    className="w-full py-4 bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-bold tracking-widest uppercase transition flex items-center justify-center gap-2 shadow-lg cursor-pointer"
+                    className="w-full py-4 bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-bold tracking-widest uppercase transition flex items-center justify-center gap-2 shadow-lg cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Lock className="w-4 h-4" />
-                    <span>Proceed to Pay Online (₹{cartTotalAmount})</span>
+                    <span>
+                      {!activeDomesticGateway
+                        ? 'Online Payment Currently Deactivated'
+                        : `Proceed to Pay Online (₹${cartTotalAmount})`}
+                    </span>
                   </button>
                 )}
               </div>

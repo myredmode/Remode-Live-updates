@@ -574,6 +574,345 @@ async function startServer() {
     }
   };
 
+  // Private Server-Side Integration Credentials Store (/data/integrations-config.json)
+  const integrationsDbPath = path.join(dataDir, 'integrations-config.json');
+
+  const isPlaceholderCred = (val?: string): boolean => {
+    if (!val || typeof val !== 'string') return true;
+    const trimmed = val.trim();
+    if (!trimmed) return true;
+    const lower = trimmed.toLowerCase();
+    return (
+      lower.includes('paypal_sandbox_export') ||
+      trimmed.includes('EAAG9xxxxxxx') ||
+      trimmed === 'de52f7425345a44f9e6f89fc01e86d942554a302' ||
+      trimmed === 'Asrb0WLHUFBi3iEU3FK1DfiN'
+    );
+  };
+
+  const cleanCred = (val?: string): string => {
+    if (!val || typeof val !== 'string') return '';
+    return isPlaceholderCred(val) ? '' : val.trim();
+  };
+
+  const readServerIntegrations = (): any => {
+    try {
+      if (fs.existsSync(integrationsDbPath)) {
+        const parsed = JSON.parse(fs.readFileSync(integrationsDbPath, 'utf-8'));
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    } catch {}
+    return {};
+  };
+
+  const writeServerIntegrations = (cfg: any) => {
+    try {
+      fs.writeFileSync(integrationsDbPath, JSON.stringify(cfg, null, 2), 'utf-8');
+    } catch (e) {
+      console.error('Failed writing integrations-config.json:', e);
+    }
+  };
+
+  const mergeIntegrationsConfigPreservingSecrets = (existing: any, incoming: any): any => {
+    const prev = existing && typeof existing === 'object' ? existing : {};
+    const next = incoming && typeof incoming === 'object' ? incoming : {};
+    const merged: any = { ...prev, ...next };
+
+    const deletedPaymentIds: string[] = Array.isArray(next.deletedPaymentGatewayIds)
+      ? Array.from(new Set(next.deletedPaymentGatewayIds.map(String)))
+      : Array.isArray(prev.deletedPaymentGatewayIds)
+      ? prev.deletedPaymentGatewayIds
+      : [];
+    merged.deletedPaymentGatewayIds = deletedPaymentIds;
+
+    const deletedShippingIds: string[] = Array.isArray(next.deletedShippingChannelIds)
+      ? Array.from(new Set(next.deletedShippingChannelIds.map(String)))
+      : Array.isArray(prev.deletedShippingChannelIds)
+      ? prev.deletedShippingChannelIds
+      : [];
+    merged.deletedShippingChannelIds = deletedShippingIds;
+
+    const deletedSmsIds: string[] = Array.isArray(next.deletedSmsGatewayIds)
+      ? Array.from(new Set(next.deletedSmsGatewayIds.map(String)))
+      : Array.isArray(prev.deletedSmsGatewayIds)
+      ? prev.deletedSmsGatewayIds
+      : [];
+    merged.deletedSmsGatewayIds = deletedSmsIds;
+
+    if (Array.isArray(next.paymentGateways)) {
+      const prevList = Array.isArray(prev.paymentGateways) ? prev.paymentGateways : [];
+      merged.paymentGateways = next.paymentGateways
+        .filter((g: any) => !deletedPaymentIds.includes(g.id))
+        .map((g: any) => {
+          const old = prevList.find((p: any) => p.id === g.id) || prevList.find((p: any) => p.provider === g.provider);
+          return {
+            ...g,
+            apiKey: cleanCred(g.apiKey) || cleanCred(old?.apiKey),
+            apiSecret: cleanCred(g.apiSecret) || cleanCred(old?.apiSecret),
+            webhookSecret: cleanCred(g.webhookSecret) || cleanCred(old?.webhookSecret),
+          };
+        });
+    } else if (Array.isArray(prev.paymentGateways)) {
+      merged.paymentGateways = prev.paymentGateways.filter((g: any) => !deletedPaymentIds.includes(g.id));
+    }
+
+    const razorpayDeleted =
+      deletedPaymentIds.includes('razorpay') ||
+      (Array.isArray(merged.paymentGateways) && !merged.paymentGateways.some((g: any) => g.provider === 'razorpay' || g.id === 'razorpay'));
+
+    if (razorpayDeleted) {
+      merged.razorpaySettings = {
+        enabled: false,
+        mode: 'live',
+        keyId: '',
+        keySecret: '',
+        merchantName: 'REDMODE',
+        themeColor: '#111827',
+      };
+    } else if (next.razorpaySettings || prev.razorpaySettings) {
+      merged.razorpaySettings = {
+        ...(prev.razorpaySettings || {}),
+        ...(next.razorpaySettings || {}),
+        keyId: cleanCred(next.razorpaySettings?.keyId) || cleanCred(prev.razorpaySettings?.keyId),
+        keySecret: cleanCred(next.razorpaySettings?.keySecret) || cleanCred(prev.razorpaySettings?.keySecret),
+      };
+    }
+
+    if (Array.isArray(next.shippingChannels)) {
+      const prevChs = Array.isArray(prev.shippingChannels) ? prev.shippingChannels : [];
+      merged.shippingChannels = next.shippingChannels
+        .filter((c: any) => !deletedShippingIds.includes(c.id))
+        .map((c: any) => {
+          const old = prevChs.find((p: any) => p.id === c.id) || prevChs.find((p: any) => p.provider === c.provider);
+          return {
+            ...c,
+            apiKey: cleanCred(c.apiKey) || cleanCred(old?.apiKey),
+            apiSecret: cleanCred(c.apiSecret) || cleanCred(old?.apiSecret),
+          };
+        });
+    } else if (Array.isArray(prev.shippingChannels)) {
+      merged.shippingChannels = prev.shippingChannels.filter((c: any) => !deletedShippingIds.includes(c.id));
+    }
+
+    const delhiveryDeleted =
+      deletedShippingIds.includes('delhivery') ||
+      (Array.isArray(merged.shippingChannels) && !merged.shippingChannels.some((c: any) => c.provider === 'delhivery' || c.id === 'delhivery'));
+
+    if (delhiveryDeleted) {
+      merged.delhiverySettings = {
+        ...(prev.delhiverySettings || {}),
+        ...(next.delhiverySettings || {}),
+        enabled: false,
+        apiToken: '',
+      };
+    } else if (next.delhiverySettings || prev.delhiverySettings) {
+      merged.delhiverySettings = {
+        ...(prev.delhiverySettings || {}),
+        ...(next.delhiverySettings || {}),
+        apiToken: cleanCred(next.delhiverySettings?.apiToken) || cleanCred(prev.delhiverySettings?.apiToken),
+      };
+    }
+
+    if (next.whatsappIntegrationDeleted === true) {
+      merged.whatsappIntegrationDeleted = true;
+      merged.whatsappSettings = {
+        enabled: false,
+        provider: 'meta_cloud_api',
+        phoneNumber: '',
+        phoneNumberId: '',
+        wabaId: '',
+        accessToken: '',
+        webhookVerifyToken: '',
+        apiEndpoint: 'https://graph.facebook.com/v21.0',
+      };
+    } else {
+      if (next.whatsappIntegrationDeleted === false) {
+        merged.whatsappIntegrationDeleted = false;
+      }
+      if (merged.whatsappIntegrationDeleted) {
+        merged.whatsappSettings = {
+          enabled: false,
+          provider: 'meta_cloud_api',
+          phoneNumber: '',
+          phoneNumberId: '',
+          wabaId: '',
+          accessToken: '',
+          webhookVerifyToken: '',
+          apiEndpoint: 'https://graph.facebook.com/v21.0',
+        };
+      } else if (next.whatsappSettings || prev.whatsappSettings) {
+        merged.whatsappSettings = {
+          ...(prev.whatsappSettings || {}),
+          ...(next.whatsappSettings || {}),
+          accessToken:
+            cleanCred(next.whatsappSettings?.accessToken) ||
+            (prev.whatsappIntegrationDeleted ? '' : cleanCred(prev.whatsappSettings?.accessToken)),
+        };
+      }
+    }
+
+    if (next.smsSettings && Array.isArray(next.smsSettings.gateways)) {
+      const prevGws = Array.isArray(prev.smsSettings?.gateways) ? prev.smsSettings.gateways : [];
+      merged.smsSettings = {
+        ...(prev.smsSettings || {}),
+        ...next.smsSettings,
+        activeProviderId:
+          next.smsSettings.activeProviderId !== undefined
+            ? next.smsSettings.activeProviderId
+            : prev.smsSettings?.activeProviderId ?? '',
+        gateways: next.smsSettings.gateways
+          .filter((g: any) => !deletedSmsIds.includes(g.id))
+          .map((g: any) => {
+            const old = prevGws.find((p: any) => p.id === g.id || p.provider === g.provider);
+            return {
+              ...g,
+              apiKey: cleanCred(g.apiKey) || cleanCred(old?.apiKey),
+              accessToken: cleanCred(g.accessToken) || cleanCred(old?.accessToken),
+            };
+          }),
+      };
+    } else if (prev.smsSettings && Array.isArray(prev.smsSettings.gateways) && deletedSmsIds.length > 0) {
+      merged.smsSettings = {
+        ...prev.smsSettings,
+        gateways: prev.smsSettings.gateways.filter((g: any) => !deletedSmsIds.includes(g.id)),
+      };
+    }
+
+    return merged;
+  };
+
+  const getEffectiveRazorpayCreds = (
+    keyIdOverride?: string,
+    keySecretOverride?: string,
+    allowInactiveForAdminTest = false
+  ) => {
+    const cfg = readServerIntegrations();
+    const deletedIds = Array.isArray(cfg.deletedPaymentGatewayIds) ? cfg.deletedPaymentGatewayIds : [];
+    const hasExplicitGateways = Array.isArray(cfg.paymentGateways);
+    const rzpGw = hasExplicitGateways
+      ? cfg.activePaymentGatewayId
+        ? cfg.paymentGateways.find((g: any) => g.id === cfg.activePaymentGatewayId && g.provider === 'razorpay')
+        : cfg.paymentGateways.find((g: any) => g.provider === 'razorpay')
+      : null;
+
+    if (!allowInactiveForAdminTest) {
+      if (deletedIds.includes('razorpay')) {
+        return { keyId: '', keySecret: '', active: false };
+      }
+      if (hasExplicitGateways) {
+        if (cfg.activePaymentGatewayId === '' || !rzpGw || rzpGw.enabled === false) {
+          return { keyId: '', keySecret: '', active: false };
+        }
+      } else if (cfg.razorpaySettings?.enabled === false) {
+        return { keyId: '', keySecret: '', active: false };
+      }
+    }
+
+    const keyId =
+      cleanCred(keyIdOverride) ||
+      cleanCred(rzpGw?.apiKey) ||
+      cleanCred(cfg.razorpaySettings?.keyId) ||
+      cleanCred(process.env.RAZORPAY_KEY_ID);
+    const keySecret =
+      cleanCred(keySecretOverride) ||
+      cleanCred(rzpGw?.apiSecret) ||
+      cleanCred(cfg.razorpaySettings?.keySecret) ||
+      cleanCred(process.env.RAZORPAY_KEY_SECRET);
+    return { keyId, keySecret, active: Boolean(keyId && keySecret) };
+  };
+
+  const getEffectivePaypalCreds = (
+    clientIdOverride?: string,
+    clientSecretOverride?: string,
+    modeOverride?: string,
+    allowInactiveForAdminTest = false
+  ) => {
+    const cfg = readServerIntegrations();
+    const deletedIds = Array.isArray(cfg.deletedPaymentGatewayIds) ? cfg.deletedPaymentGatewayIds : [];
+    const hasExplicitGateways = Array.isArray(cfg.paymentGateways);
+    const ppGw = hasExplicitGateways
+      ? cfg.activeInternationalGatewayId
+        ? cfg.paymentGateways.find((g: any) => g.id === cfg.activeInternationalGatewayId && g.provider === 'paypal')
+        : cfg.paymentGateways.find((g: any) => g.provider === 'paypal')
+      : null;
+
+    if (!allowInactiveForAdminTest) {
+      if (deletedIds.includes('paypal')) {
+        return { clientId: '', clientSecret: '', isLive: true, active: false };
+      }
+      if (hasExplicitGateways) {
+        if (cfg.activeInternationalGatewayId === '' || !ppGw || ppGw.enabled === false) {
+          return { clientId: '', clientSecret: '', isLive: true, active: false };
+        }
+      }
+    }
+
+    const fallbackPpGw =
+      ppGw ||
+      (hasExplicitGateways ? cfg.paymentGateways.find((g: any) => g.provider === 'paypal') : null);
+    const clientId =
+      cleanCred(clientIdOverride) || cleanCred(fallbackPpGw?.apiKey) || cleanCred(process.env.PAYPAL_CLIENT_ID);
+    const clientSecret =
+      cleanCred(clientSecretOverride) || cleanCred(fallbackPpGw?.apiSecret) || cleanCred(process.env.PAYPAL_CLIENT_SECRET);
+    const resolvedMode = (modeOverride || fallbackPpGw?.mode || process.env.PAYPAL_MODE || 'live').trim().toLowerCase();
+    return { clientId, clientSecret, isLive: resolvedMode === 'live', active: Boolean(clientId && clientSecret) };
+  };
+
+  const getEffectiveDelhiveryToken = (tokenOverride?: string, allowInactiveForAdminTest = false): string => {
+    const cfg = readServerIntegrations();
+    const deletedIds = Array.isArray(cfg.deletedShippingChannelIds) ? cfg.deletedShippingChannelIds : [];
+    const hasExplicitChannels = Array.isArray(cfg.shippingChannels);
+    const delCh = hasExplicitChannels
+      ? cfg.activeShippingChannelId
+        ? cfg.shippingChannels.find((c: any) => c.id === cfg.activeShippingChannelId && c.provider === 'delhivery')
+        : cfg.shippingChannels.find((c: any) => c.provider === 'delhivery')
+      : null;
+
+    if (!allowInactiveForAdminTest) {
+      if (deletedIds.includes('delhivery')) return '';
+      if (hasExplicitChannels) {
+        if (cfg.activeShippingChannelId === '' || !delCh || delCh.enabled === false) {
+          return '';
+        }
+      } else if (cfg.delhiverySettings?.enabled === false) {
+        return '';
+      }
+    }
+
+    const fallbackCh =
+      delCh || (hasExplicitChannels ? cfg.shippingChannels.find((c: any) => c.provider === 'delhivery') : null);
+    return (
+      cleanCred(tokenOverride) ||
+      cleanCred(fallbackCh?.apiKey) ||
+      cleanCred(cfg.delhiverySettings?.apiToken) ||
+      cleanCred(process.env.DELHIVERY_API_TOKEN)
+    );
+  };
+
+  const getEffectiveWhatsAppCreds = (
+    tokenOverride?: string,
+    phoneIdOverride?: string,
+    wabaIdOverride?: string,
+    allowInactiveForAdminTest = false
+  ) => {
+    const cfg = readServerIntegrations();
+    const waCfg = cfg.whatsappSettings || {};
+    const isDeletedOrDisabled = cfg.whatsappIntegrationDeleted === true || waCfg.enabled === false;
+    if (!allowInactiveForAdminTest && isDeletedOrDisabled) {
+      return { token: '', phoneNumberId: '', wabaId: '', active: false };
+    }
+    const token =
+      cleanCred(tokenOverride) || cleanCred(waCfg.accessToken) || cleanCred(process.env.WHATSAPP_CLOUD_TOKEN);
+    const phoneNumberId = (
+      phoneIdOverride ||
+      waCfg.phoneNumberId ||
+      process.env.WHATSAPP_PHONE_NUMBER_ID ||
+      '1375149605673144'
+    ).trim();
+    const wabaId = (wabaIdOverride || waCfg.wabaId || process.env.WHATSAPP_WABA_ID || '2745819689145292').trim();
+    return { token, phoneNumberId, wabaId, active: Boolean(token && phoneNumberId) };
+  };
+
   // Permanent Product CRUD API Endpoints
   app.get('/api/products', (_req: Request, res: Response) => {
     return res.json({ success: true, products: readServerProducts() });
@@ -717,12 +1056,38 @@ async function startServer() {
     next();
   };
 
+  // Persistent Integration Credentials Endpoints (Super Admin Only)
+  app.get('/api/admin/integrations-config', requireSuperAdmin, (_req: Request, res: Response) => {
+    return res.json({
+      success: true,
+      config: readServerIntegrations(),
+    });
+  });
+
+  app.post('/api/admin/integrations-config', requireSuperAdmin, (req: Request, res: Response) => {
+    try {
+      const existing = readServerIntegrations();
+      const merged = mergeIntegrationsConfigPreservingSecrets(existing, req.body || {});
+      writeServerIntegrations(merged);
+      if (merged.smsSettings) {
+        dynamicSmsConfig = merged.smsSettings;
+        try {
+          const dir = path.dirname(smsConfigFile);
+          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        } catch {}
+      }
+      return res.json({ success: true, config: merged });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, message: e?.message || 'Failed saving integrations config.' });
+    }
+  });
+
   // Guarded Backend Endpoints
   app.all('/api/admin/settings*', requireSuperAdmin, (req: Request, res: Response) => {
     res.json({ success: true, message: 'Super Admin settings access authorized.' });
   });
 
-  app.all('/api/admin/integrations*', requireSuperAdmin, (req: Request, res: Response) => {
+  app.all('/api/admin/integrations', requireSuperAdmin, (req: Request, res: Response) => {
     res.json({ success: true, message: 'Super Admin integrations access authorized.' });
   });
 
@@ -740,11 +1105,12 @@ async function startServer() {
 
   // 1. Public Gateway Configuration (Key ID only, never secret)
   app.get('/api/payment/razorpay/config', (_req: Request, res: Response) => {
-    const keyId = (process.env.RAZORPAY_KEY_ID || '').trim();
+    const { keyId, active } = getEffectiveRazorpayCreds();
     const mode = process.env.RAZORPAY_MODE || (keyId.startsWith('rzp_live') ? 'live' : 'test');
     res.json({
-      configured: Boolean(keyId),
-      keyId,
+      configured: Boolean(keyId && active),
+      active: Boolean(keyId && active),
+      keyId: active ? keyId : '',
       merchantName: 'REDMODE',
       themeColor: '#E11D48',
       mode,
@@ -754,8 +1120,7 @@ async function startServer() {
   // 2. Create Razorpay Order (Strict — Never Simulate)
   app.post('/api/payment/razorpay/create-order', async (req: Request, res: Response) => {
     const { amount, receipt, notes, keyIdOverride, keySecretOverride } = req.body || {};
-    const keyId = (process.env.RAZORPAY_KEY_ID || keyIdOverride || '').trim();
-    const keySecret = (process.env.RAZORPAY_KEY_SECRET || keySecretOverride || '').trim();
+    const { keyId, keySecret } = getEffectiveRazorpayCreds(keyIdOverride, keySecretOverride);
 
     const numericAmount = Number(amount);
     if (!numericAmount || numericAmount <= 0) {
@@ -825,8 +1190,7 @@ async function startServer() {
       keyIdOverride,
       keySecretOverride,
     } = req.body || {};
-    const keyId = (process.env.RAZORPAY_KEY_ID || keyIdOverride || '').trim();
-    const keySecret = (process.env.RAZORPAY_KEY_SECRET || keySecretOverride || '').trim();
+    const { keyId, keySecret } = getEffectiveRazorpayCreds(keyIdOverride, keySecretOverride);
 
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
       return res.status(400).json({
@@ -982,9 +1346,22 @@ async function startServer() {
   // 5. Test PayPal Credentials (Super Admin)
   app.post('/api/payment/paypal/test-keys', requireSuperAdmin, async (req: Request, res: Response) => {
     const { clientId, clientSecret, mode } = req.body || {};
-    const finalClientId = (clientId || process.env.PAYPAL_CLIENT_ID || '').trim();
-    const finalClientSecret = (clientSecret || process.env.PAYPAL_CLIENT_SECRET || '').trim();
-    const isLive = (mode || process.env.PAYPAL_MODE || 'live') === 'live';
+    if (
+      String(clientId || '').toLowerCase().includes('paypal_sandbox_export') ||
+      String(clientSecret || '').toLowerCase().includes('paypal_sandbox_export')
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Placeholder PayPal credentials detected. Please enter your actual PayPal REST App Client ID and Client Secret.',
+      });
+    }
+
+    const { clientId: finalClientId, clientSecret: finalClientSecret, isLive } = getEffectivePaypalCreds(
+      clientId,
+      clientSecret,
+      mode,
+      true
+    );
 
     if (!finalClientId || !finalClientSecret) {
       return res.status(400).json({
@@ -1010,6 +1387,30 @@ async function startServer() {
 
       if (!tokenRes.ok) {
         const errJson: any = await tokenRes.json().catch(() => ({}));
+        // Check if credentials actually belong to the opposite PayPal environment (Sandbox vs Live)
+        if (tokenRes.status === 401) {
+          const altUrl = isLive
+            ? 'https://api-m.sandbox.paypal.com/v1/oauth2/token'
+            : 'https://api-m.paypal.com/v1/oauth2/token';
+          const altRes = await fetch(altUrl, {
+            method: 'POST',
+            headers: {
+              Authorization: authHeader,
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'grant_type=client_credentials',
+          }).catch(() => null);
+          if (altRes?.ok) {
+            return res.status(400).json({
+              success: false,
+              environmentMismatch: true,
+              suggestedMode: isLive ? 'test' : 'live',
+              message: isLive
+                ? `Client Authentication failed in Production Live mode — these credentials belong to PayPal SANDBOX! Please change Environment Mode to "Test / Sandbox Mode", click Save Changes, and test again.`
+                : `Client Authentication failed in Test / Sandbox mode — these credentials belong to PayPal LIVE! Please change Environment Mode to "Production Live", click Save Changes, and test again.`,
+            });
+          }
+        }
         return res.status(tokenRes.status).json({
           success: false,
           message:
@@ -1055,16 +1456,18 @@ async function startServer() {
     }
     const approxUsd = Number(amountUsd) > 0 ? Number(amountUsd) : Math.max(1, Math.round((numericInr / 84) * 100) / 100);
 
-    const clientId = (process.env.PAYPAL_CLIENT_ID || clientIdOverride || '').trim();
-    const clientSecret = (process.env.PAYPAL_CLIENT_SECRET || clientSecretOverride || '').trim();
-    const isLive = (mode || process.env.PAYPAL_MODE || 'live') === 'live';
+    const { clientId, clientSecret, isLive } = getEffectivePaypalCreds(
+      clientIdOverride,
+      clientSecretOverride,
+      mode
+    );
 
-    if (!clientId || !clientSecret || clientId.includes('sandbox_export')) {
+    if (!clientId || !clientSecret) {
       return res.status(503).json({
         success: false,
         configured: false,
         message:
-          'PayPal International payment gateway is not configured yet. Please configure PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET in Environment Variables.',
+          'PayPal International payment gateway is not configured yet. Please configure PayPal Client ID and Client Secret in Admin Integrations or Environment Variables.',
       });
     }
 
@@ -1160,9 +1563,11 @@ async function startServer() {
       });
     }
 
-    const clientId = (process.env.PAYPAL_CLIENT_ID || clientIdOverride || '').trim();
-    const clientSecret = (process.env.PAYPAL_CLIENT_SECRET || clientSecretOverride || '').trim();
-    const isLive = (mode || process.env.PAYPAL_MODE || 'live') === 'live';
+    const { clientId, clientSecret, isLive } = getEffectivePaypalCreds(
+      clientIdOverride,
+      clientSecretOverride,
+      mode
+    );
 
     if (!clientId || !clientSecret) {
       return res.status(503).json({
@@ -1285,12 +1690,24 @@ async function startServer() {
     }
 
     if (provider === 'paypal') {
+      if (isPlaceholderCred(key) || isPlaceholderCred(secret)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Placeholder PayPal credentials detected. Please enter your actual PayPal REST App Client ID and Client Secret.',
+        });
+      }
+      if (!secret) {
+        return res.status(400).json({
+          success: false,
+          message: 'PayPal Client Secret is required.',
+        });
+      }
+      const isLive = (mode || 'live').toLowerCase() === 'live';
       try {
         const authHeader = 'Basic ' + Buffer.from(`${key}:${secret}`).toString('base64');
-        const url =
-          mode === 'live'
-            ? 'https://api-m.paypal.com/v1/oauth2/token'
-            : 'https://api-m.sandbox.paypal.com/v1/oauth2/token';
+        const url = isLive
+          ? 'https://api-m.paypal.com/v1/oauth2/token'
+          : 'https://api-m.sandbox.paypal.com/v1/oauth2/token';
         const resTok = await fetch(url, {
           method: 'POST',
           headers: { Authorization: authHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -1299,18 +1716,99 @@ async function startServer() {
         if (resTok.ok) {
           return res.json({
             success: true,
-            mode: mode === 'live' ? 'Live' : 'Sandbox',
-            message: `PayPal International credentials verified! Ready for global export checkout.`,
-          });
-        } else {
-          return res.status(400).json({
-            success: false,
-            message: 'PayPal authentication failed. Please check Client ID and Secret.',
+            mode: isLive ? 'Live' : 'Sandbox',
+            message: `PayPal International credentials verified in ${isLive ? 'LIVE' : 'SANDBOX'} mode! Ready for global export checkout.`,
           });
         }
+        const errJson: any = await resTok.json().catch(() => ({}));
+        if (resTok.status === 401) {
+          const altUrl = isLive
+            ? 'https://api-m.sandbox.paypal.com/v1/oauth2/token'
+            : 'https://api-m.paypal.com/v1/oauth2/token';
+          const altRes = await fetch(altUrl, {
+            method: 'POST',
+            headers: { Authorization: authHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'grant_type=client_credentials',
+          }).catch(() => null);
+          if (altRes?.ok) {
+            return res.status(400).json({
+              success: false,
+              environmentMismatch: true,
+              suggestedMode: isLive ? 'test' : 'live',
+              message: isLive
+                ? 'Client Authentication failed in Live mode — these credentials belong to PayPal SANDBOX! Switch mode to "Test / Sandbox Mode", click Save Changes, and test again.'
+                : 'Client Authentication failed in Sandbox mode — these credentials belong to PayPal LIVE! Switch mode to "Production Live", click Save Changes, and test again.',
+            });
+          }
+        }
+        return res.status(resTok.status || 400).json({
+          success: false,
+          message: errJson?.error_description || 'PayPal authentication failed. Please check Client ID and Secret.',
+        });
       } catch (e: any) {
         return res.status(500).json({ success: false, message: e.message });
       }
+    }
+
+    if (provider === 'stripe') {
+      if (!secret) {
+        return res.status(400).json({ success: false, message: 'Stripe Secret Key (sk_...) is required.' });
+      }
+      try {
+        const stripeRes = await fetch('https://api.stripe.com/v1/balance', {
+          headers: { Authorization: `Bearer ${secret}` },
+        });
+        if (stripeRes.ok) {
+          return res.json({
+            success: true,
+            mode: secret.startsWith('sk_live') ? 'Live' : 'Test Mode',
+            message: `Stripe Global gateway authenticated successfully! (${secret.startsWith('sk_live') ? 'Live' : 'Test Mode'})`,
+          });
+        }
+        const stripeErr: any = await stripeRes.json().catch(() => ({}));
+        return res.status(stripeRes.status).json({
+          success: false,
+          message: stripeErr?.error?.message || 'Stripe authentication failed. Check Publishable & Secret Keys.',
+        });
+      } catch (e: any) {
+        return res.status(500).json({ success: false, message: `Stripe test error: ${e.message}` });
+      }
+    }
+
+    if (provider === 'upi_qr') {
+      const vpaRegex = /^[\w.\-_]{2,}@[a-zA-Z]{2,}$/;
+      if (!vpaRegex.test(key)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please enter a valid UPI VPA ID (e.g. redmode@okicici or merchant@upi).',
+        });
+      }
+      return res.json({
+        success: true,
+        mode: 'UPI Direct',
+        message: `Direct Business UPI VPA "${key}" verified and ready for QR checkout.`,
+      });
+    }
+
+    if (provider === 'phonepe' || provider === 'cashfree') {
+      if (!secret) {
+        return res.status(400).json({
+          success: false,
+          message: `Both Merchant/App ID and ${provider === 'phonepe' ? 'Salt Key' : 'Secret Key'} are required.`,
+        });
+      }
+      return res.json({
+        success: true,
+        mode: mode === 'live' ? 'Live' : 'Sandbox',
+        message: `${provider === 'phonepe' ? 'PhonePe PG' : 'Cashfree PG'} credentials format validated (${mode === 'live' ? 'Live' : 'Sandbox'}).`,
+      });
+    }
+
+    if (!secret) {
+      return res.status(400).json({
+        success: false,
+        message: `Both API Key and API Secret are required for ${provider || 'custom gateway'}.`,
+      });
     }
 
     return res.json({
@@ -1322,13 +1820,13 @@ async function startServer() {
 
   // Delhivery API Connection Verification (Restricted to Super Admin)
   app.get('/api/delhivery/test', requireSuperAdmin, async (req: Request, res: Response) => {
-    const token = ((req.query.token as string) || process.env.DELHIVERY_API_TOKEN || '').trim();
+    const token = getEffectiveDelhiveryToken(req.query.token as string, true);
     const pincode = (req.query.pincode as string) || '250002';
 
     if (!token) {
       return res.status(400).json({
         success: false,
-        message: 'Delhivery API Token is not configured. Set DELHIVERY_API_TOKEN in Environment Variables.',
+        message: 'Delhivery API Token is not configured. Enter your token in Couriers & Logistics or set DELHIVERY_API_TOKEN.',
       });
     }
 
@@ -1378,7 +1876,7 @@ async function startServer() {
 
   // Delhivery Live Waybill Allocator
   app.post('/api/delhivery/fetch-waybill', async (req: Request, res: Response) => {
-    const token = (req.body?.token || process.env.DELHIVERY_API_TOKEN || '').trim();
+    const token = getEffectiveDelhiveryToken(req.body?.token);
     const client = req.body?.client || 'Redmode';
 
     if (!token) {
@@ -1566,7 +2064,7 @@ async function startServer() {
 
     try {
       // 1. Try Delhivery Pincode serviceability API if token is configured
-      const token = (process.env.DELHIVERY_API_TOKEN || '').trim();
+      const token = getEffectiveDelhiveryToken();
       const delhiveryRes = token
         ? await fetch(`https://track.delhivery.com/c/api/pin-codes/json/?filter_codes=${pincode}`, {
             headers: {
@@ -1703,9 +2201,12 @@ async function startServer() {
   // Official Meta WhatsApp Cloud API Connectivity Test Endpoint (Restricted to Super Admin)
   const handleWhatsAppTest = async (req: Request, res: Response) => {
     const body = req.body || {};
-    const token = (body.accessToken || process.env.WHATSAPP_CLOUD_TOKEN || '').trim();
-    const phoneNumberId = (body.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID || '1375149605673144').trim();
-    const wabaId = (body.wabaId || process.env.WHATSAPP_WABA_ID || '2745819689145292').trim();
+    const { token, phoneNumberId, wabaId } = getEffectiveWhatsAppCreds(
+      body.accessToken,
+      body.phoneNumberId,
+      body.wabaId,
+      true
+    );
 
     if (!token || !phoneNumberId) {
       return res.status(400).json({
@@ -1762,8 +2263,17 @@ async function startServer() {
   app.post('/api/whatsapp/send', async (req: Request, res: Response) => {
     const { to, templateName, components, textMessage, accessToken: bodyToken, phoneNumberId: bodyPhoneId, languageCode } = req.body || {};
 
-    const token = (bodyToken || process.env.WHATSAPP_CLOUD_TOKEN || '').trim();
-    const phoneNumberId = (bodyPhoneId || process.env.WHATSAPP_PHONE_NUMBER_ID || '1375149605673144').trim();
+    const cfg = readServerIntegrations();
+    if (cfg.whatsappIntegrationDeleted === true || cfg.whatsappSettings?.enabled === false) {
+      return res.status(503).json({
+        success: false,
+        configured: false,
+        deactivated: true,
+        error: 'Meta WhatsApp Cloud API is deactivated or deleted. Activate it in Admin Integrations before sending messages.',
+      });
+    }
+
+    const { token, phoneNumberId } = getEffectiveWhatsAppCreds(bodyToken, bodyPhoneId);
 
     // Strict requirement: Never show message sent unless actual Cloud API succeeds
     if (!token || !phoneNumberId) {
@@ -1795,7 +2305,7 @@ async function startServer() {
         payload.type = 'template';
         payload.template = {
           name: templateName,
-          language: { code: 'en' },
+          language: { code: (languageCode || 'en').trim() },
           components: components || [],
         };
       } else if (textMessage) {
@@ -1939,21 +2449,27 @@ async function startServer() {
     }
   }, 5 * 60 * 1000);
 
-  // Dynamic SMS & OTP Gateway Configuration Cache
+  // Dynamic SMS & OTP Gateway Configuration Cache (Initialized from private data/integrations-config.json)
   const smsConfigFile = path.join(__dirname, 'public', 'sms-config.json');
-  let dynamicSmsConfig: any = null;
-  try {
-    if (fs.existsSync(smsConfigFile)) {
-      dynamicSmsConfig = JSON.parse(fs.readFileSync(smsConfigFile, 'utf-8'));
-    }
-  } catch (e) {}
+  let dynamicSmsConfig: any = readServerIntegrations().smsSettings || null;
+  if (!dynamicSmsConfig) {
+    try {
+      if (fs.existsSync(smsConfigFile)) {
+        dynamicSmsConfig = JSON.parse(fs.readFileSync(smsConfigFile, 'utf-8'));
+      }
+    } catch {}
+  }
 
   // 1. Get Saved SMS & OTP Settings + Environment Connection Status
   app.get('/api/admin/sms-settings', requireSuperAdmin, async (_req: Request, res: Response) => {
+    const fullCfg = readServerIntegrations();
+    const activeSmsCfg = fullCfg.smsSettings || dynamicSmsConfig;
+    const hasExplicitGws = Array.isArray(activeSmsCfg?.gateways);
     let twoFactorBalance: string | null = null;
     try {
-      const gw = dynamicSmsConfig?.gateways?.find((g: any) => g.provider === 'twofactor');
-      const tfKey = (gw?.apiKey || DEFAULT_TWOFACTOR_KEY).trim();
+      const gw = activeSmsCfg?.gateways?.find((g: any) => g.provider === 'twofactor');
+      const tfAllowed = !hasExplicitGws || Boolean(gw && gw.enabled !== false);
+      const tfKey = tfAllowed ? (cleanCred(gw?.apiKey) || DEFAULT_TWOFACTOR_KEY) : '';
       if (tfKey) {
         const bRes = await fetch(`https://2factor.in/API/V1/${tfKey}/BAL/SMS`);
         const bData: any = await bRes.json().catch(() => ({}));
@@ -1963,11 +2479,11 @@ async function startServer() {
       }
     } catch {}
 
-    const safeSettings = dynamicSmsConfig
+    const safeSettings = activeSmsCfg
       ? {
-          ...dynamicSmsConfig,
-          gateways: Array.isArray(dynamicSmsConfig.gateways)
-            ? dynamicSmsConfig.gateways.map((g: any) => ({
+          ...activeSmsCfg,
+          gateways: Array.isArray(activeSmsCfg.gateways)
+            ? activeSmsCfg.gateways.map((g: any) => ({
                 ...g,
                 apiKey: '',
                 accessToken: '',
@@ -2012,15 +2528,13 @@ async function startServer() {
     }
   });
 
-  // 2. Save SMS & OTP Settings from Admin Panel
+  // 2. Save SMS & OTP Settings from Admin Panel (preserve secrets if omitted/blank in partial sync)
   app.post('/api/admin/sms-settings', requireSuperAdmin, (req: Request, res: Response) => {
     try {
-      dynamicSmsConfig = req.body;
-      const dir = path.dirname(smsConfigFile);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      fs.writeFileSync(smsConfigFile, JSON.stringify(dynamicSmsConfig, null, 2));
+      const existingServerCfg = readServerIntegrations();
+      const mergedCfg = mergeIntegrationsConfigPreservingSecrets(existingServerCfg, { smsSettings: req.body });
+      dynamicSmsConfig = mergedCfg.smsSettings;
+      writeServerIntegrations(mergedCfg);
       return res.json({ success: true, message: 'SMS and OTP Gateway settings saved successfully.' });
     } catch (e: any) {
       return res.status(500).json({ success: false, message: e.message });
@@ -2356,19 +2870,26 @@ async function startServer() {
       return res.status(400).json({ success: false, message: 'Mobile number is required.' });
     }
 
-    // Sync dynamicSmsConfig if frontend passed latest smsSettings from Firestore/Admin
+    // Merge incoming smsSettings safely while strictly preserving server-stored secrets (never write secrets to public/)
+    const serverCfg = readServerIntegrations();
+    const baseSms = serverCfg.smsSettings || dynamicSmsConfig;
     if (smsSettings && typeof smsSettings === 'object' && Array.isArray(smsSettings.gateways)) {
-      dynamicSmsConfig = smsSettings;
-      try {
-        const dir = path.dirname(smsConfigFile);
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(smsConfigFile, JSON.stringify(dynamicSmsConfig, null, 2));
-      } catch {}
+      const merged = mergeIntegrationsConfigPreservingSecrets({ smsSettings: baseSms }, { smsSettings });
+      dynamicSmsConfig = merged.smsSettings;
+    } else if (baseSms) {
+      dynamicSmsConfig = baseSms;
     }
 
     const cleanMobile = String(mobile).replace(/\D/g, '').slice(-10);
     if (cleanMobile.length !== 10) {
       return res.status(400).json({ success: false, message: 'Please enter a valid 10-digit Indian mobile number.' });
+    }
+
+    if (dynamicSmsConfig?.enabled === false) {
+      return res.status(503).json({
+        success: false,
+        message: 'OTP authentication service is currently deactivated in Admin Settings.',
+      });
     }
 
     const expiryMinutes = Number(dynamicSmsConfig?.otpExpiryMinutes) || 10;
@@ -2384,10 +2905,12 @@ async function startServer() {
     let deliveredVia = 'sandbox';
     let deliverySuccess = false;
     const providerDiagnostics: string[] = [];
+    const hasExplicitGateways = Array.isArray(dynamicSmsConfig?.gateways);
 
     // Helper functions for providers
     const tryMetaWhatsApp = async () => {
       const waGw = dynamicSmsConfig?.gateways?.find((g: any) => g.provider === 'meta_whatsapp');
+      if (hasExplicitGateways && (!waGw || waGw.enabled === false)) return false;
       if (waGw && waGw.enabled === false) return false;
       const waToken = (
         !isPlaceholderCredential(waGw?.accessToken)
@@ -2498,8 +3021,9 @@ async function startServer() {
 
     const tryTwoFactor = async () => {
       const tfGw = dynamicSmsConfig?.gateways?.find((g: any) => g.provider === 'twofactor');
+      if (hasExplicitGateways && (!tfGw || tfGw.enabled === false)) return false;
+      if (tfGw && tfGw.enabled === false) return false;
       const twoFactorKey = (tfGw?.apiKey || DEFAULT_TWOFACTOR_KEY).trim();
-      if (!twoFactorKey && tfGw && tfGw.enabled === false) return false;
       if (twoFactorKey && twoFactorKey.length >= 8) {
         try {
           // Use AUTOGEN2 first so 2Factor uses its pre-approved OTP template and returns the exact 6-digit OTP in tfData.OTP
@@ -2530,8 +3054,9 @@ async function startServer() {
 
     const tryFast2Sms = async () => {
       const fastGw = dynamicSmsConfig?.gateways?.find((g: any) => g.provider === 'fast2sms');
+      if (hasExplicitGateways && (!fastGw || fastGw.enabled === false)) return false;
+      if (fastGw && fastGw.enabled === false) return false;
       const fast2SmsKey = (fastGw?.apiKey || process.env.FAST2SMS_API_KEY || '').trim();
-      if (!fast2SmsKey && fastGw && fastGw.enabled === false) return false;
       if (fast2SmsKey && fast2SmsKey.length >= 8) {
         try {
           let fastRes = await fetch('https://www.fast2sms.com/dev/bulkV2', {
@@ -2580,6 +3105,7 @@ async function startServer() {
 
     const tryMsg91 = async () => {
       const msgGw = dynamicSmsConfig?.gateways?.find((g: any) => g.provider === 'msg91');
+      if (hasExplicitGateways && (!msgGw || msgGw.enabled === false)) return false;
       if (msgGw && msgGw.enabled === false) return false;
       const msgKey = (msgGw?.apiKey || process.env.MSG91_AUTH_KEY || '').trim();
       const templateId = (msgGw?.templateId || '').trim();
@@ -2608,17 +3134,33 @@ async function startServer() {
       return false;
     };
 
-    // Dispatch via active gateway + backup channel so customer receives OTP reliably
-    const activeProv = dynamicSmsConfig?.activeProviderId || 'twofactor';
-    if (activeProv === 'twofactor') {
-      await tryTwoFactor();
-      await tryMetaWhatsApp();
-    } else if (activeProv === 'meta_whatsapp') {
-      await tryMetaWhatsApp();
-      await tryTwoFactor();
-    } else {
-      await tryTwoFactor();
-      await tryMetaWhatsApp();
+    const runProvider = async (id: string) => {
+      if (id === 'twofactor') return tryTwoFactor();
+      if (id === 'meta_whatsapp') return tryMetaWhatsApp();
+      if (id === 'fast2sms') return tryFast2Sms();
+      if (id === 'msg91') return tryMsg91();
+      return false;
+    };
+
+    // Dispatch via active gateway + configured fallback channel
+    const activeProv =
+      dynamicSmsConfig?.activeProviderId !== undefined
+        ? dynamicSmsConfig.activeProviderId
+        : 'twofactor';
+    const fallbackProv =
+      dynamicSmsConfig?.fallbackProviderId !== undefined
+        ? dynamicSmsConfig.fallbackProviderId
+        : activeProv === 'twofactor'
+        ? 'meta_whatsapp'
+        : activeProv === 'meta_whatsapp'
+        ? 'twofactor'
+        : 'none';
+
+    if (activeProv) {
+      const primaryOk = await runProvider(activeProv);
+      if (!primaryOk && fallbackProv && fallbackProv !== 'none' && fallbackProv !== activeProv) {
+        await runProvider(fallbackProv);
+      }
     }
 
     if (!deliverySuccess) {
@@ -2627,7 +3169,7 @@ async function startServer() {
         success: false,
         diagnostics: providerDiagnostics.length > 0 ? providerDiagnostics : undefined,
         message:
-          'Unable to dispatch OTP at the moment. Please verify that the SMS or WhatsApp OTP gateway credentials are configured in Admin Settings or Environment Variables.',
+          'Unable to dispatch OTP at the moment. Please verify that at least one active SMS or WhatsApp OTP gateway is enabled and configured in Admin Settings.',
       });
     }
 
@@ -2830,23 +3372,69 @@ async function startServer() {
       }
 
       if (provider === 'amazon') {
+        if (!clientId || !apiKey) {
+          return res.status(400).json({
+            success: false,
+            message: 'Amazon Seller/Merchant ID and LWA Access Token are required.',
+          });
+        }
         return res.json({
           success: true,
-          message: `Connected to Amazon Shipping / ATS Logistics API successfully! Client ID & Seller Credentials validated for PAN India pickup.`,
+          message: `Amazon Shipping / ATS Logistics credentials validated for Seller ID "${clientId}".`,
         });
       }
 
       if (provider === 'shiprocket') {
-        return res.json({
-          success: true,
-          message: `Connected to Shiprocket Multi-Carrier API successfully! API credentials verified for automated dispatch.`,
+        const cleanToken = (apiKey || '').trim();
+        if (cleanToken.split('.').length === 3) {
+          const srRes = await fetch('https://apiv2.shiprocket.in/v1/external/settings/company/pickup', {
+            headers: { Authorization: `Bearer ${cleanToken}` },
+          });
+          if (!srRes.ok) {
+            return res.status(srRes.status).json({
+              success: false,
+              message: `Shiprocket API returned HTTP ${srRes.status}. Verify your JWT token or regenerate it.`,
+            });
+          }
+          return res.json({
+            success: true,
+            message: 'Connected to Shiprocket Multi-Carrier API successfully! Token verified.',
+          });
+        }
+        if (clientId && apiSecret) {
+          const authRes = await fetch('https://apiv2.shiprocket.in/v1/external/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: clientId, password: apiSecret }),
+          });
+          const authData: any = await authRes.json().catch(() => ({}));
+          if (!authRes.ok || !authData?.token) {
+            return res.status(authRes.status || 401).json({
+              success: false,
+              message: authData?.message || 'Shiprocket authentication failed. Check Registered Email and API Password.',
+            });
+          }
+          return res.json({
+            success: true,
+            message: 'Connected to Shiprocket Multi-Carrier API successfully!',
+          });
+        }
+        return res.status(400).json({
+          success: false,
+          message: 'Enter a valid Shiprocket JWT API Token or Registered Email + Password to test connection.',
         });
       }
 
       if (provider === 'bluedart') {
+        if (!clientId || !apiKey) {
+          return res.status(400).json({
+            success: false,
+            message: 'Blue Dart Customer Account Code and License Key are required.',
+          });
+        }
         return res.json({
           success: true,
-          message: `Connected to Blue Dart Apex Gateway successfully! Customer License & Secret Key validated.`,
+          message: `Blue Dart Apex Gateway credentials validated for Account "${clientId}".`,
         });
       }
 
@@ -2918,7 +3506,7 @@ async function startServer() {
       return res.status(400).json({ success: false, message: 'Order payload is required.' });
     }
 
-    const token = (bodyToken || process.env.DELHIVERY_API_TOKEN || '').trim();
+    const token = getEffectiveDelhiveryToken(bodyToken);
     if (!token) {
       return res.status(200).json({
         success: true,
@@ -3018,7 +3606,7 @@ async function startServer() {
   // Delhivery Official Tracking & NDR API (No Fabricated Multi-City Scans)
   app.get('/api/delhivery/track/:awb', async (req: Request, res: Response) => {
     const awb = req.params.awb || '';
-    const token = ((req.query.token as string) || process.env.DELHIVERY_API_TOKEN || '').trim();
+    const token = getEffectiveDelhiveryToken(req.query.token as string);
 
     if (!awb) {
       return res.status(400).json({ success: false, message: 'AWB number is required.' });

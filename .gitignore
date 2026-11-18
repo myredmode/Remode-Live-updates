@@ -9,4 +9,5 @@ coverage/
 .aistudio/
 .netlify/
 tmp/
+data/integrations-config.json
 *.zip

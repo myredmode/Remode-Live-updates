@@ -118,6 +118,21 @@ const PROVIDER_PRESETS: Record<PaymentGatewayProvider, ProviderPresetMeta> = {
   },
 };
 
+const cleanPaymentCredential = (val?: string): string => {
+  if (!val || typeof val !== 'string') return '';
+  const trimmed = val.trim();
+  if (!trimmed || trimmed.toLowerCase().includes('paypal_sandbox_export')) return '';
+  return trimmed;
+};
+
+const cleanGatewayList = (list: PaymentGatewayConfig[]): PaymentGatewayConfig[] =>
+  list.map((g) => ({
+    ...g,
+    apiKey: cleanPaymentCredential(g.apiKey),
+    apiSecret: cleanPaymentCredential(g.apiSecret),
+    webhookSecret: cleanPaymentCredential(g.webhookSecret),
+  }));
+
 export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
   onSaveNotification,
 }) => {
@@ -125,8 +140,8 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
 
   // Load Gateways list
   const [gateways, setGateways] = useState<PaymentGatewayConfig[]>(() => {
-    if (settings.paymentGateways && settings.paymentGateways.length > 0) {
-      return settings.paymentGateways;
+    if (Array.isArray(settings.paymentGateways)) {
+      return cleanGatewayList(settings.paymentGateways);
     }
     return [
       {
@@ -136,8 +151,8 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
         enabled: true,
         isPrimary: true,
         targetMarket: 'domestic',
-        apiKey: settings.razorpaySettings?.keyId || '',
-        apiSecret: settings.razorpaySettings?.keySecret || '',
+        apiKey: cleanPaymentCredential(settings.razorpaySettings?.keyId),
+        apiSecret: cleanPaymentCredential(settings.razorpaySettings?.keySecret),
         merchantName: settings.razorpaySettings?.merchantName || 'REDMODE',
         currency: 'INR',
         mode: settings.razorpaySettings?.mode || 'live',
@@ -161,15 +176,22 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
   });
 
   const [activeDomesticId, setActiveDomesticId] = useState<string>(() => {
-    return settings.activePaymentGatewayId || 'razorpay_domestic';
+    return settings.activePaymentGatewayId !== undefined
+      ? settings.activePaymentGatewayId
+      : 'razorpay_domestic';
   });
 
   const [activeInternationalId, setActiveInternationalId] = useState<string>(() => {
-    return settings.activeInternationalGatewayId || 'paypal_export';
+    return settings.activeInternationalGatewayId !== undefined
+      ? settings.activeInternationalGatewayId
+      : 'paypal_export';
   });
 
   const [selectedGatewayId, setSelectedGatewayId] = useState<string>(() => {
-    return settings.activePaymentGatewayId || 'razorpay_domestic';
+    if (settings.activePaymentGatewayId) return settings.activePaymentGatewayId;
+    if (settings.activeInternationalGatewayId) return settings.activeInternationalGatewayId;
+    if (Array.isArray(settings.paymentGateways)) return settings.paymentGateways[0]?.id || '';
+    return 'razorpay_domestic';
   });
 
   // UI States
@@ -181,15 +203,21 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
   const [notification, setNotification] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
   const [webhookCopied, setWebhookCopied] = useState<boolean>(false);
 
-  // Sync state if settings change externally
+  // Sync state if settings change externally (preserving empty arrays & explicit deactivated IDs)
   useEffect(() => {
-    if (settings.paymentGateways && settings.paymentGateways.length > 0) {
-      setGateways(settings.paymentGateways);
+    if (Array.isArray(settings.paymentGateways)) {
+      const cleaned = cleanGatewayList(settings.paymentGateways);
+      setGateways(cleaned);
+      if (selectedGatewayId && !cleaned.some((g) => g.id === selectedGatewayId)) {
+        setSelectedGatewayId(cleaned[0]?.id || '');
+      } else if (!selectedGatewayId && cleaned.length > 0) {
+        setSelectedGatewayId(cleaned[0].id);
+      }
     }
-    if (settings.activePaymentGatewayId) {
+    if (settings.activePaymentGatewayId !== undefined) {
       setActiveDomesticId(settings.activePaymentGatewayId);
     }
-    if (settings.activeInternationalGatewayId) {
+    if (settings.activeInternationalGatewayId !== undefined) {
       setActiveInternationalId(settings.activeInternationalGatewayId);
     }
   }, [settings.paymentGateways, settings.activePaymentGatewayId, settings.activeInternationalGatewayId]);
@@ -201,6 +229,9 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
   const currentMeta = currentGateway
     ? PROVIDER_PRESETS[currentGateway.provider] || PROVIDER_PRESETS.custom
     : PROVIDER_PRESETS.razorpay;
+
+  const isGatewayActive = (g: PaymentGatewayConfig): boolean =>
+    (g.id === activeDomesticId || g.id === activeInternationalId) && g.enabled !== false;
 
   // Field change handler
   const handleFieldChange = (field: keyof PaymentGatewayConfig, value: any) => {
@@ -215,24 +246,30 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
     );
   };
 
-  // Switch active gateway
+  // Activate gateway
   const handleMakeActive = (gateway: PaymentGatewayConfig) => {
     let nextDomestic = activeDomesticId;
     let nextInternational = activeInternationalId;
 
     if (gateway.targetMarket === 'international') {
       nextInternational = gateway.id;
-      setActiveInternationalId(gateway.id);
+      if (nextDomestic === gateway.id) nextDomestic = '';
+    } else if (gateway.targetMarket === 'both') {
+      nextDomestic = gateway.id;
+      nextInternational = gateway.id;
     } else {
       nextDomestic = gateway.id;
-      setActiveDomesticId(gateway.id);
+      if (nextInternational === gateway.id) nextInternational = '';
     }
+
+    setActiveDomesticId(nextDomestic);
+    setActiveInternationalId(nextInternational);
 
     const updated = gateways.map((g) => {
       if (g.id === gateway.id) {
-        return { ...g, enabled: true, isPrimary: true };
+        return { ...g, enabled: true, isPrimary: g.id === nextDomestic };
       }
-      return g;
+      return { ...g, isPrimary: g.id === nextDomestic };
     });
 
     setGateways(updated);
@@ -240,12 +277,41 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
 
     setNotification({
       type: 'success',
-      text: `"${gateway.name}" is now the active gateway for ${
-        gateway.targetMarket === 'international' ? 'international export orders' : 'domestic orders'
+      text: `"${gateway.name}" is now active for ${
+        gateway.targetMarket === 'international'
+          ? 'international export orders'
+          : gateway.targetMarket === 'both'
+          ? 'domestic & international orders'
+          : 'domestic orders'
       }.`,
     });
     if (onSaveNotification) {
-      onSaveNotification(`Active Gateway: ${gateway.name}`);
+      onSaveNotification(`Activated Gateway: ${gateway.name}`);
+    }
+    setTimeout(() => setNotification(null), 4000);
+  };
+
+  // Deactivate gateway
+  const handleDeactivate = (gateway: PaymentGatewayConfig) => {
+    const nextDomestic = activeDomesticId === gateway.id ? '' : activeDomesticId;
+    const nextInternational = activeInternationalId === gateway.id ? '' : activeInternationalId;
+
+    setActiveDomesticId(nextDomestic);
+    setActiveInternationalId(nextInternational);
+
+    const updated = gateways.map((g) =>
+      g.id === gateway.id ? { ...g, enabled: false, isPrimary: false } : g
+    );
+
+    setGateways(updated);
+    updatePaymentGateways(updated, nextDomestic, nextInternational);
+
+    setNotification({
+      type: 'info',
+      text: `"${gateway.name}" has been deactivated and hidden from checkout.`,
+    });
+    if (onSaveNotification) {
+      onSaveNotification(`Deactivated Gateway: ${gateway.name}`);
     }
     setTimeout(() => setNotification(null), 4000);
   };
@@ -281,17 +347,9 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
     setTimeout(() => setNotification(null), 4000);
   };
 
-  // Confirm delete handler
+  // Confirm delete handler (permanent removal)
   const handleConfirmDelete = () => {
     if (!gatewayToDelete) return;
-    if (gateways.length <= 1) {
-      setNotification({
-        type: 'error',
-        text: 'At least one payment gateway must remain configured.',
-      });
-      setGatewayToDelete(null);
-      return;
-    }
 
     const remaining = gateways.filter((g) => g.id !== gatewayToDelete.id);
     if (selectedGatewayId === gatewayToDelete.id) {
@@ -301,12 +359,12 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
     let nextDomestic = activeDomesticId;
     let nextInternational = activeInternationalId;
     if (gatewayToDelete.id === activeDomesticId) {
-      nextDomestic = remaining.find((g) => g.targetMarket !== 'international')?.id || remaining[0].id;
-      setActiveDomesticId(nextDomestic);
+      nextDomestic = '';
+      setActiveDomesticId('');
     }
     if (gatewayToDelete.id === activeInternationalId) {
-      nextInternational = remaining.find((g) => g.targetMarket === 'international')?.id || remaining[0].id;
-      setActiveInternationalId(nextInternational);
+      nextInternational = '';
+      setActiveInternationalId('');
     }
 
     setGateways(remaining);
@@ -314,17 +372,30 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
 
     const deletedName = gatewayToDelete.name;
     setGatewayToDelete(null);
+    setTestResult(null);
 
     setNotification({
       type: 'success',
-      text: `Payment gateway "${deletedName}" was deleted successfully.`,
+      text: `Payment gateway "${deletedName}" was permanently deleted.`,
     });
+    if (onSaveNotification) {
+      onSaveNotification(`Deleted Gateway: ${deletedName}`);
+    }
     setTimeout(() => setNotification(null), 4000);
   };
 
   // Save changes
   const handleSaveChanges = () => {
-    updatePaymentGateways(gateways, activeDomesticId, activeInternationalId);
+    const cleaned = gateways.map((g) => ({
+      ...g,
+      name: (g.name || '').trim() || g.name,
+      apiKey: cleanPaymentCredential(g.apiKey),
+      apiSecret: cleanPaymentCredential(g.apiSecret),
+      webhookSecret: cleanPaymentCredential(g.webhookSecret),
+      merchantName: (g.merchantName || 'REDMODE').trim(),
+    }));
+    setGateways(cleaned);
+    updatePaymentGateways(cleaned, activeDomesticId, activeInternationalId);
     setNotification({
       type: 'success',
       text: 'Payment gateway settings saved successfully.',
@@ -338,6 +409,26 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
   // Test connection
   const handleTestConnection = async () => {
     if (!currentGateway) return;
+
+    const cleanKey = cleanPaymentCredential(currentGateway.apiKey);
+    const cleanSecret = cleanPaymentCredential(currentGateway.apiSecret);
+
+    if (!cleanKey) {
+      setTestResult({
+        success: false,
+        message: `Please enter your ${currentMeta.apiKeyLabel} before testing connection.`,
+      });
+      return;
+    }
+
+    if (currentGateway.provider !== 'upi_qr' && !cleanSecret) {
+      setTestResult({
+        success: false,
+        message: `Please enter your ${currentMeta.apiSecretLabel} before testing connection.`,
+      });
+      return;
+    }
+
     setIsTesting(true);
     setTestResult(null);
 
@@ -365,9 +456,10 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
         const res = await fetch('/api/payment/razorpay/test-keys', {
           method: 'POST',
           headers,
+          credentials: 'include',
           body: JSON.stringify({
-            keyId: currentGateway.apiKey,
-            keySecret: currentGateway.apiSecret,
+            keyId: cleanKey,
+            keySecret: cleanSecret,
           }),
         });
         const data = await parseSafeJson(res);
@@ -382,9 +474,10 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
         const res = await fetch('/api/payment/paypal/test-keys', {
           method: 'POST',
           headers,
+          credentials: 'include',
           body: JSON.stringify({
-            clientId: currentGateway.apiKey,
-            clientSecret: currentGateway.apiSecret,
+            clientId: cleanKey,
+            clientSecret: cleanSecret,
             mode: currentGateway.mode,
           }),
         });
@@ -400,10 +493,11 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
         const res = await fetch('/api/payment/gateway/test', {
           method: 'POST',
           headers,
+          credentials: 'include',
           body: JSON.stringify({
             provider: currentGateway.provider,
-            apiKey: currentGateway.apiKey,
-            apiSecret: currentGateway.apiSecret,
+            apiKey: cleanKey,
+            apiSecret: cleanSecret,
             mode: currentGateway.mode,
           }),
         });
@@ -504,89 +598,120 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
         </div>
 
         {/* Compact Gateway Cards Grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {gateways.map((g) => {
-            const isDomesticActive = g.id === activeDomesticId;
-            const isExportActive = g.id === activeInternationalId;
-            const isActive = isDomesticActive || isExportActive;
-            const isSelected = g.id === selectedGatewayId;
-            const isConfigured = Boolean(g.apiKey && g.apiKey.trim().length > 0);
+        {gateways.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-slate-300 p-6 text-center space-y-2.5 bg-slate-50/50">
+            <p className="text-xs font-medium text-slate-600">
+              No payment gateways configured. Add a gateway partner to enable online payments at checkout.
+            </p>
+            <button
+              type="button"
+              onClick={() => setIsAddGatewayOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Add Gateway</span>
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {gateways.map((g) => {
+              const isActive = isGatewayActive(g);
+              const isSelected = g.id === selectedGatewayId;
+              const isConfigured = Boolean(g.apiKey && g.apiKey.trim().length > 0);
 
-            return (
-              <div
-                key={g.id}
-                onClick={() => setSelectedGatewayId(g.id)}
-                className={`p-3.5 rounded-lg border transition cursor-pointer flex flex-col justify-between ${
-                  isSelected
-                    ? 'border-slate-900 bg-slate-50/60 ring-1 ring-slate-900'
-                    : 'border-slate-200 hover:border-slate-300 bg-white'
-                }`}
-              >
-                <div>
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <div className="w-7 h-7 rounded bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
-                        {g.provider === 'paypal' ? (
-                          <span className="font-black text-xs text-[#003087]">PP</span>
-                        ) : g.provider === 'razorpay' ? (
-                          <span className="font-mono font-bold text-[10px] text-[#0c2340]">rzp</span>
-                        ) : (
-                          <CreditCard className="w-3.5 h-3.5" />
-                        )}
+              return (
+                <div
+                  key={g.id}
+                  onClick={() => {
+                    setSelectedGatewayId(g.id);
+                    setTestResult(null);
+                  }}
+                  className={`p-3.5 rounded-lg border transition cursor-pointer flex flex-col justify-between ${
+                    isSelected
+                      ? 'border-slate-900 bg-slate-50/60 ring-1 ring-slate-900'
+                      : 'border-slate-200 hover:border-slate-300 bg-white'
+                  }`}
+                >
+                  <div>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <div className="w-7 h-7 rounded bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
+                          {g.provider === 'paypal' ? (
+                            <span className="font-black text-xs text-[#003087]">PP</span>
+                          ) : g.provider === 'razorpay' ? (
+                            <span className="font-mono font-bold text-[10px] text-[#0c2340]">rzp</span>
+                          ) : (
+                            <CreditCard className="w-3.5 h-3.5" />
+                          )}
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-semibold text-slate-900 line-clamp-1">{g.name}</h4>
+                          <p className="text-[11px] text-slate-400 capitalize">
+                            {g.targetMarket === 'international' ? 'PayPal • Export (Global)' : `${g.provider} • Domestic (India)`}
+                          </p>
+                        </div>
                       </div>
-                      <div>
-                        <h4 className="text-sm font-semibold text-slate-900 line-clamp-1">{g.name}</h4>
-                        <p className="text-[11px] text-slate-400 capitalize">
-                          {g.targetMarket === 'international' ? 'PayPal • Export (Global)' : `${g.provider} • Domestic (India)`}
-                        </p>
-                      </div>
+
+                      {/* Status Badge */}
+                      {isActive ? (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 shrink-0">
+                          ACTIVE
+                        </span>
+                      ) : g.enabled === false ? (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-rose-50 text-rose-700 border border-rose-200 shrink-0">
+                          DEACTIVATED
+                        </span>
+                      ) : !isConfigured ? (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-200 shrink-0">
+                          NEEDS SETUP
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-medium text-slate-500 bg-slate-100 shrink-0">
+                          INACTIVE
+                        </span>
+                      )}
                     </div>
-
-                    {/* Status Badge */}
-                    {isActive ? (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 shrink-0">
-                        ACTIVE
-                      </span>
-                    ) : !isConfigured ? (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-200 shrink-0">
-                        NEEDS SETUP
-                      </span>
-                    ) : (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-medium text-slate-500 bg-slate-100 shrink-0">
-                        INACTIVE
-                      </span>
-                    )}
                   </div>
-                </div>
 
-                {/* Card Actions */}
-                <div className="pt-3 mt-3 border-t border-slate-100 flex items-center justify-between text-xs">
-                  <div className="flex items-center gap-3">
-                    {!isActive && (
+                  {/* Card Actions */}
+                  <div className="pt-3 mt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-3">
+                      {isActive ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeactivate(g);
+                          }}
+                          className="text-amber-700 hover:text-amber-900 font-semibold cursor-pointer"
+                        >
+                          Deactivate
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleMakeActive(g);
+                          }}
+                          className="text-emerald-700 hover:text-emerald-900 font-semibold cursor-pointer"
+                        >
+                          Activate
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleMakeActive(g);
+                          setSelectedGatewayId(g.id);
+                          setTestResult(null);
                         }}
-                        className="text-slate-800 hover:text-black font-semibold cursor-pointer"
+                        className="text-slate-600 hover:text-slate-900 cursor-pointer"
                       >
-                        Make Active
+                        Edit
                       </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedGatewayId(g.id);
-                      }}
-                      className="text-slate-600 hover:text-slate-900 cursor-pointer"
-                    >
-                      Edit
-                    </button>
-                  </div>
+                    </div>
 
-                  {gateways.length > 1 && (
                     <button
                       type="button"
                       onClick={(e) => {
@@ -598,12 +723,12 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
-                  )}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* 2. GATEWAY CONFIGURATION SECTION (Exact match to Courier Configuration) */}
@@ -613,9 +738,13 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-4 border-b border-slate-100">
             <div className="flex items-center gap-2.5">
               <h3 className="text-base font-semibold text-slate-900">{currentGateway.name}</h3>
-              {currentGateway.id === activeDomesticId || currentGateway.id === activeInternationalId ? (
+              {isGatewayActive(currentGateway) ? (
                 <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
                   ACTIVE
+                </span>
+              ) : currentGateway.enabled === false ? (
+                <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-rose-50 text-rose-700 border border-rose-200">
+                  DEACTIVATED
                 </span>
               ) : (
                 <span className="px-2 py-0.5 rounded text-[11px] font-medium text-slate-500 bg-slate-100">
@@ -624,15 +753,25 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
               )}
             </div>
 
-            {currentGateway.id !== activeDomesticId && currentGateway.id !== activeInternationalId && (
-              <button
-                type="button"
-                onClick={() => handleMakeActive(currentGateway)}
-                className="px-3 py-1.5 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer self-start sm:self-auto"
-              >
-                Make Active
-              </button>
-            )}
+            <div className="flex items-center gap-2 self-start sm:self-auto">
+              {isGatewayActive(currentGateway) ? (
+                <button
+                  type="button"
+                  onClick={() => handleDeactivate(currentGateway)}
+                  className="px-3 py-1.5 border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-medium rounded-lg transition cursor-pointer"
+                >
+                  Deactivate
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => handleMakeActive(currentGateway)}
+                  className="px-3 py-1.5 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer"
+                >
+                  Activate
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Test connection feedback banner */}
@@ -783,17 +922,13 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
                 {isTesting ? 'Testing...' : 'Test Connection'}
               </button>
 
-              {currentGateway.id !== activeDomesticId &&
-                currentGateway.id !== activeInternationalId &&
-                gateways.length > 1 && (
-                  <button
-                    type="button"
-                    onClick={() => setGatewayToDelete(currentGateway)}
-                    className="px-3 py-2 text-rose-600 hover:text-rose-700 text-xs font-medium transition cursor-pointer"
-                  >
-                    Delete Gateway
-                  </button>
-                )}
+              <button
+                type="button"
+                onClick={() => setGatewayToDelete(currentGateway)}
+                className="px-3 py-2 text-rose-600 hover:text-rose-700 text-xs font-medium transition cursor-pointer"
+              >
+                Delete Gateway
+              </button>
             </div>
 
             <button

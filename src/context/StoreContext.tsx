@@ -51,6 +51,7 @@ import {
   getDocs,
   setDoc,
   deleteDoc,
+  deleteField,
   onSnapshot,
   arrayUnion,
   arrayRemove,
@@ -73,6 +74,255 @@ function cleanForFirestore(obj: any): any {
   return obj;
 }
 
+function isPlaceholderIntegrationCredential(val?: string): boolean {
+  if (!val || typeof val !== 'string') return false;
+  const trimmed = val.trim();
+  if (!trimmed) return false;
+  const lower = trimmed.toLowerCase();
+  return (
+    lower.includes('paypal_sandbox_export') ||
+    trimmed.includes('EAAG9xxxxxxx') ||
+    trimmed === 'de52f7425345a44f9e6f89fc01e86d942554a302' ||
+    trimmed === 'Asrb0WLHUFBi3iEU3FK1DfiN'
+  );
+}
+
+function cleanIntegrationCredential(val?: string): string {
+  if (!val || typeof val !== 'string') return '';
+  if (isPlaceholderIntegrationCredential(val)) return '';
+  return val.trim();
+}
+
+function mergeIntegrationSettingsPreservingSecrets(
+  prev: StoreSettings,
+  incoming: Partial<StoreSettings>
+): StoreSettings {
+  const merged: StoreSettings = {
+    ...prev,
+    ...incoming,
+  } as StoreSettings;
+
+  // Deletion lists (authoritative when supplied)
+  const deletedPaymentIds: string[] = Array.isArray(incoming.deletedPaymentGatewayIds)
+    ? incoming.deletedPaymentGatewayIds
+    : Array.isArray(prev.deletedPaymentGatewayIds)
+    ? prev.deletedPaymentGatewayIds
+    : [];
+  const deletedShippingIds: string[] = Array.isArray(incoming.deletedShippingChannelIds)
+    ? incoming.deletedShippingChannelIds
+    : Array.isArray(prev.deletedShippingChannelIds)
+    ? prev.deletedShippingChannelIds
+    : [];
+  const deletedSmsIds: string[] = Array.isArray(incoming.deletedSmsGatewayIds)
+    ? incoming.deletedSmsGatewayIds
+    : Array.isArray(prev.deletedSmsGatewayIds)
+    ? prev.deletedSmsGatewayIds
+    : [];
+
+  merged.deletedPaymentGatewayIds = deletedPaymentIds;
+  merged.deletedShippingChannelIds = deletedShippingIds;
+  merged.deletedSmsGatewayIds = deletedSmsIds;
+
+  // Preserve explicit empty active IDs (deactivated / deleted state)
+  if (incoming.activePaymentGatewayId !== undefined) {
+    merged.activePaymentGatewayId = incoming.activePaymentGatewayId;
+  }
+  if (incoming.activeInternationalGatewayId !== undefined) {
+    merged.activeInternationalGatewayId = incoming.activeInternationalGatewayId;
+  }
+  if (incoming.activeShippingChannelId !== undefined) {
+    merged.activeShippingChannelId = incoming.activeShippingChannelId;
+  }
+
+  // 1. Preserve Razorpay secrets & scrub placeholders
+  if (incoming.razorpaySettings || prev.razorpaySettings) {
+    const incRzp = incoming.razorpaySettings;
+    const prevRzp = prev.razorpaySettings;
+    const nextKeyId = cleanIntegrationCredential(incRzp?.keyId) || cleanIntegrationCredential(prevRzp?.keyId);
+    const nextKeySecret = cleanIntegrationCredential(incRzp?.keySecret) || cleanIntegrationCredential(prevRzp?.keySecret);
+    merged.razorpaySettings = {
+      ...(prevRzp || { enabled: true, keyId: '', keySecret: '', merchantName: 'REDMODE', themeColor: '#111827', mode: 'live' }),
+      ...(incRzp || {}),
+      keyId: nextKeyId,
+      keySecret: nextKeySecret,
+    };
+  }
+
+  // 2. Preserve Payment Gateways secrets & respect deletions (including deleting down to [])
+  if (Array.isArray(incoming.paymentGateways)) {
+    const prevList = Array.isArray(prev.paymentGateways) ? prev.paymentGateways : [];
+    merged.paymentGateways = incoming.paymentGateways
+      .filter((incGw) => incGw && !deletedPaymentIds.includes(incGw.id))
+      .map((incGw) => {
+        const prevGw = prevList.find((g) => g.id === incGw.id) || prevList.find((g) => g.provider === incGw.provider);
+        const cleanIncKey = cleanIntegrationCredential(incGw.apiKey);
+        const cleanPrevKey = cleanIntegrationCredential(prevGw?.apiKey);
+        const cleanIncSecret = cleanIntegrationCredential(incGw.apiSecret);
+        const cleanPrevSecret = cleanIntegrationCredential(prevGw?.apiSecret);
+        const cleanIncWebhook = cleanIntegrationCredential(incGw.webhookSecret);
+        const cleanPrevWebhook = cleanIntegrationCredential(prevGw?.webhookSecret);
+
+        return {
+          ...incGw,
+          apiKey: cleanIncKey || cleanPrevKey,
+          apiSecret: cleanIncSecret || cleanPrevSecret,
+          webhookSecret: cleanIncWebhook || cleanPrevWebhook,
+        };
+      });
+    const hasRazorpay = merged.paymentGateways.some((g) => g.provider === 'razorpay');
+    if (!hasRazorpay && merged.razorpaySettings) {
+      merged.razorpaySettings = { ...merged.razorpaySettings, enabled: false, keyId: '', keySecret: '' };
+    }
+  } else if (Array.isArray(prev.paymentGateways)) {
+    merged.paymentGateways = prev.paymentGateways
+      .filter((g) => g && !deletedPaymentIds.includes(g.id))
+      .map((g) => ({
+        ...g,
+        apiKey: cleanIntegrationCredential(g.apiKey),
+        apiSecret: cleanIntegrationCredential(g.apiSecret),
+        webhookSecret: cleanIntegrationCredential(g.webhookSecret),
+      }));
+  }
+
+  // 3. Preserve Delhivery API token & scrub placeholders
+  if (incoming.delhiverySettings || prev.delhiverySettings) {
+    const incDel = incoming.delhiverySettings;
+    const prevDel = prev.delhiverySettings;
+    const nextToken = cleanIntegrationCredential(incDel?.apiToken) || cleanIntegrationCredential(prevDel?.apiToken);
+    merged.delhiverySettings = {
+      ...(prevDel || {
+        enabled: true,
+        apiToken: '',
+        clientName: 'Redmode',
+        warehouseName: 'REDMODE B2C',
+        pickupPincode: '250002',
+        pickupAddress: '1807 Zakir Hussain Colony, Meerut, Uttar Pradesh, 250002, India',
+        pickupPhone: '7302797464',
+        environment: 'production',
+        defaultShippingMode: 'Surface',
+        autoGenerateLabel: true,
+        codRemittanceCycle: 'T+2',
+      }),
+      ...(incDel || {}),
+      apiToken: nextToken,
+    };
+  }
+
+  // 4. Preserve Shipping Channels secrets & respect deletions (including deleting down to [])
+  if (Array.isArray(incoming.shippingChannels)) {
+    const prevChannels = Array.isArray(prev.shippingChannels) ? prev.shippingChannels : [];
+    merged.shippingChannels = incoming.shippingChannels
+      .filter((incCh) => incCh && !deletedShippingIds.includes(incCh.id))
+      .map((incCh) => {
+        const prevCh = prevChannels.find((c) => c.id === incCh.id) || prevChannels.find((c) => c.provider === incCh.provider);
+        const nextKey = cleanIntegrationCredential(incCh.apiKey) || cleanIntegrationCredential(prevCh?.apiKey);
+        const nextSecret = cleanIntegrationCredential(incCh.apiSecret) || cleanIntegrationCredential(prevCh?.apiSecret);
+        return {
+          ...incCh,
+          apiKey: nextKey,
+          apiSecret: nextSecret,
+        };
+      });
+    if (deletedShippingIds.includes('delhivery') && merged.delhiverySettings) {
+      merged.delhiverySettings = { ...merged.delhiverySettings, enabled: false, apiToken: '' };
+    }
+  } else if (Array.isArray(prev.shippingChannels)) {
+    merged.shippingChannels = prev.shippingChannels.filter((c) => c && !deletedShippingIds.includes(c.id));
+  }
+
+  // 5. Preserve WhatsApp access token (or keep cleared if deleted)
+  if (incoming.whatsappIntegrationDeleted) {
+    merged.whatsappIntegrationDeleted = true;
+    merged.whatsappSettings = {
+      ...(prev.whatsappSettings || INITIAL_SETTINGS.whatsappSettings!),
+      ...(incoming.whatsappSettings || {}),
+      enabled: false,
+      accessToken: '',
+      phoneNumberId: '',
+      wabaId: '',
+      phoneNumber: '',
+      webhookVerifyToken: '',
+    };
+  } else if (incoming.whatsappSettings || prev.whatsappSettings) {
+    const incWa = incoming.whatsappSettings;
+    const prevWa = prev.whatsappSettings;
+    const nextToken = cleanIntegrationCredential(incWa?.accessToken) || cleanIntegrationCredential(prevWa?.accessToken);
+    merged.whatsappSettings = {
+      ...(prevWa || INITIAL_SETTINGS.whatsappSettings!),
+      ...(incWa || {}),
+      accessToken: nextToken,
+    };
+  }
+
+  // 6. Preserve SMS gateways secrets & respect deletedSmsGatewayIds
+  if (incoming.smsSettings && Array.isArray(incoming.smsSettings.gateways)) {
+    const prevGateways = Array.isArray(prev.smsSettings?.gateways) ? prev.smsSettings!.gateways : [];
+    merged.smsSettings = {
+      ...(prev.smsSettings || INITIAL_SETTINGS.smsSettings!),
+      ...incoming.smsSettings,
+      gateways: incoming.smsSettings.gateways
+        .filter((incGw) => incGw && !deletedSmsIds.includes(incGw.id))
+        .map((incGw) => {
+          const prevGw = prevGateways.find((g) => g.id === incGw.id || g.provider === incGw.provider);
+          return {
+            ...incGw,
+            apiKey: cleanIntegrationCredential(incGw.apiKey) || cleanIntegrationCredential(prevGw?.apiKey),
+            accessToken: cleanIntegrationCredential(incGw.accessToken) || cleanIntegrationCredential(prevGw?.accessToken),
+          };
+        }),
+    };
+  } else if (prev.smsSettings && Array.isArray(prev.smsSettings.gateways)) {
+    merged.smsSettings = {
+      ...prev.smsSettings,
+      gateways: prev.smsSettings.gateways.filter((g) => g && !deletedSmsIds.includes(g.id)),
+    };
+  }
+
+  return merged;
+}
+
+function getAdminAuthToken(): string {
+  try {
+    return (
+      sessionStorage.getItem('redmode_admin_token') ||
+      localStorage.getItem('redmode_admin_token') ||
+      ''
+    );
+  } catch {
+    return '';
+  }
+}
+
+function syncIntegrationsToServer(settingsObj: Partial<StoreSettings>): void {
+  const adminToken = getAdminAuthToken();
+  if (!adminToken) return;
+  try {
+    fetch('/api/admin/integrations-config', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        paymentGateways: settingsObj.paymentGateways,
+        activePaymentGatewayId: settingsObj.activePaymentGatewayId,
+        activeInternationalGatewayId: settingsObj.activeInternationalGatewayId,
+        deletedPaymentGatewayIds: settingsObj.deletedPaymentGatewayIds,
+        razorpaySettings: settingsObj.razorpaySettings,
+        shippingChannels: settingsObj.shippingChannels,
+        activeShippingChannelId: settingsObj.activeShippingChannelId,
+        deletedShippingChannelIds: settingsObj.deletedShippingChannelIds,
+        delhiverySettings: settingsObj.delhiverySettings,
+        whatsappSettings: settingsObj.whatsappSettings,
+        whatsappIntegrationDeleted: settingsObj.whatsappIntegrationDeleted,
+        smsSettings: settingsObj.smsSettings,
+        deletedSmsGatewayIds: settingsObj.deletedSmsGatewayIds,
+      }),
+    }).catch(() => {});
+  } catch {}
+}
+
 /**
  * Strips private API secrets and admin passwords before persisting storefront settings
  * to the public `settings/store_settings` document so client reads never leak secrets
@@ -80,15 +330,20 @@ function cleanForFirestore(obj: any): any {
  */
 function sanitizeSettingsForPublicFirestore(raw: Partial<StoreSettings>): Record<string, any> {
   const copy: any = cleanForFirestore(raw) || {};
-  delete copy.adminPassword;
-  delete copy.razorpayKeySecret;
-  delete copy.paypalClientSecret;
-  delete copy.delhiveryApiToken;
-  delete copy.twoFactorApiKey;
-  delete copy.whatsappAccessToken;
+  // Actively delete legacy forbidden top-level secret fields in Firestore so merge:true always passes hasNoExposedSecrets
+  copy.adminPassword = deleteField();
+  copy.razorpayKeySecret = deleteField();
+  copy.paypalClientSecret = deleteField();
+  copy.delhiveryApiToken = deleteField();
+  copy.twoFactorApiKey = deleteField();
+  copy.whatsappAccessToken = deleteField();
 
   if (copy.razorpaySettings && typeof copy.razorpaySettings === 'object') {
-    copy.razorpaySettings = { ...copy.razorpaySettings, keySecret: '' };
+    copy.razorpaySettings = {
+      ...copy.razorpaySettings,
+      keyId: cleanIntegrationCredential(copy.razorpaySettings.keyId),
+      keySecret: '',
+    };
   }
   if (copy.delhiverySettings && typeof copy.delhiverySettings === 'object') {
     copy.delhiverySettings = { ...copy.delhiverySettings, apiToken: '' };
@@ -99,6 +354,7 @@ function sanitizeSettingsForPublicFirestore(raw: Partial<StoreSettings>): Record
   if (Array.isArray(copy.paymentGateways)) {
     copy.paymentGateways = copy.paymentGateways.map((g: any) => ({
       ...g,
+      apiKey: cleanIntegrationCredential(g.apiKey),
       apiSecret: '',
       webhookSecret: '',
     }));
@@ -1767,18 +2023,65 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (razorpaySettings.keySecret === 'Asrb0WLHUFBi3iEU3FK1DfiN') {
           razorpaySettings.keySecret = '';
         }
-        razorpaySettings.enabled = true;
 
-        const shippingChannels = parsed.shippingChannels && parsed.shippingChannels.length > 0
+        const deletedShippingChannelIds: string[] = Array.isArray(parsed.deletedShippingChannelIds)
+          ? parsed.deletedShippingChannelIds
+          : [];
+        const shippingChannels = Array.isArray(parsed.shippingChannels)
           ? parsed.shippingChannels
+              .filter((c: any) => c && !deletedShippingChannelIds.includes(c.id))
+              .map((c: any) => ({
+                ...c,
+                apiKey: cleanIntegrationCredential(c.apiKey),
+                apiSecret: cleanIntegrationCredential(c.apiSecret),
+              }))
           : INITIAL_SETTINGS.shippingChannels;
-        const activeShippingChannelId = parsed.activeShippingChannelId || 'delhivery';
+        const activeShippingChannelId =
+          parsed.activeShippingChannelId !== undefined ? parsed.activeShippingChannelId : 'delhivery';
 
-        const paymentGateways = parsed.paymentGateways && parsed.paymentGateways.length > 0
+        const deletedPaymentGatewayIds: string[] = Array.isArray(parsed.deletedPaymentGatewayIds)
+          ? parsed.deletedPaymentGatewayIds
+          : [];
+        const paymentGateways = Array.isArray(parsed.paymentGateways)
           ? parsed.paymentGateways
+              .filter((g: any) => g && !deletedPaymentGatewayIds.includes(g.id))
+              .map((g: any) => ({
+                ...g,
+                apiKey: cleanIntegrationCredential(g.apiKey),
+                apiSecret: cleanIntegrationCredential(g.apiSecret),
+                webhookSecret: cleanIntegrationCredential(g.webhookSecret),
+              }))
           : INITIAL_SETTINGS.paymentGateways;
-        const activePaymentGatewayId = parsed.activePaymentGatewayId || 'razorpay_domestic';
-        const activeInternationalGatewayId = parsed.activeInternationalGatewayId || 'paypal_export';
+        const activePaymentGatewayId =
+          parsed.activePaymentGatewayId !== undefined ? parsed.activePaymentGatewayId : 'razorpay_domestic';
+        const activeInternationalGatewayId =
+          parsed.activeInternationalGatewayId !== undefined ? parsed.activeInternationalGatewayId : 'paypal_export';
+
+        const deletedSmsGatewayIds: string[] = Array.isArray(parsed.deletedSmsGatewayIds)
+          ? parsed.deletedSmsGatewayIds
+          : [];
+        const smsSettings = parsed.smsSettings
+          ? {
+              ...INITIAL_SETTINGS.smsSettings!,
+              ...parsed.smsSettings,
+              gateways: Array.isArray(parsed.smsSettings.gateways)
+                ? parsed.smsSettings.gateways.filter((g: any) => g && !deletedSmsGatewayIds.includes(g.id))
+                : INITIAL_SETTINGS.smsSettings!.gateways,
+            }
+          : INITIAL_SETTINGS.smsSettings;
+
+        const whatsappSettings = parsed.whatsappIntegrationDeleted
+          ? {
+              ...INITIAL_SETTINGS.whatsappSettings!,
+              ...(parsed.whatsappSettings || {}),
+              enabled: false,
+              accessToken: '',
+              phoneNumberId: '',
+              wabaId: '',
+              phoneNumber: '',
+              webhookVerifyToken: '',
+            }
+          : parsed.whatsappSettings || INITIAL_SETTINGS.whatsappSettings;
 
         const announcementBar = {
           ...INITIAL_SETTINGS.announcementBar,
@@ -1796,9 +2099,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           razorpaySettings,
           shippingChannels,
           activeShippingChannelId,
+          deletedShippingChannelIds,
           paymentGateways,
           activePaymentGatewayId,
           activeInternationalGatewayId,
+          deletedPaymentGatewayIds,
+          smsSettings,
+          deletedSmsGatewayIds,
+          whatsappSettings,
           announcementBar,
           logoUrl: cleanedLogoUrl,
         };
@@ -2492,7 +2800,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             const data = snap.data();
             if (data && Object.keys(data).length > 0) {
               setSettings((prev) => {
-                const merged = { ...prev, ...data } as StoreSettings;
+                const merged = mergeIntegrationSettingsPreservingSecrets(prev, data);
                 if (
                   !merged.storeAddress ||
                   merged.storeAddress.toLowerCase().includes('jaipur') ||
@@ -2517,65 +2825,72 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   merged.supportEmail = 'MyRedMode@gmail.com';
                 }
                 if (merged.smsSettings) {
+                  const prevGateways = Array.isArray(prev.smsSettings?.gateways) ? prev.smsSettings!.gateways : [];
                   const rawGateways = Array.isArray(merged.smsSettings.gateways) ? merged.smsSettings.gateways : [];
+                  const deletedSmsIds = Array.isArray(merged.deletedSmsGatewayIds) ? merged.deletedSmsGatewayIds : [];
                   const hadMoreThanTwo = rawGateways.some((g) => g.provider !== 'twofactor' && g.provider !== 'meta_whatsapp');
-                  const existingTf = rawGateways.find((g) => g.provider === 'twofactor');
-                  const tfMissingKey = !existingTf?.apiKey || existingTf.apiKey.trim().length < 8;
-                  const shouldPromoteTf =
-                    tfMissingKey ||
-                    merged.smsSettings.activeProviderId === 'fast2sms' ||
-                    merged.smsSettings.activeProviderId === 'msg91' ||
-                    !merged.smsSettings.activeProviderId;
 
-                  const nextActiveId = shouldPromoteTf ? 'twofactor' : merged.smsSettings.activeProviderId;
-                  const nextFallbackId = nextActiveId === 'twofactor' ? 'meta_whatsapp' : 'twofactor';
-
-                  const cleanedGateways = INITIAL_SETTINGS.smsSettings!.gateways.map((defGw) => {
-                    const found = rawGateways.find((g) => g.provider === defGw.provider);
-                    if (defGw.provider === 'twofactor') {
+                  const cleanedGateways = rawGateways
+                    .filter((g) => g && (g.provider === 'twofactor' || g.provider === 'meta_whatsapp') && !deletedSmsIds.includes(g.id))
+                    .map((found) => {
+                      const defGw = INITIAL_SETTINGS.smsSettings!.gateways.find((d) => d.provider === found.provider);
+                      const prevGw = prevGateways.find((g) => g.provider === found.provider);
+                      if (found.provider === 'twofactor') {
+                        const candidateTfKey =
+                          cleanIntegrationCredential(found?.apiKey) ||
+                          cleanIntegrationCredential(prevGw?.apiKey);
+                        return {
+                          ...(defGw || {}),
+                          ...found,
+                          id: 'twofactor',
+                          provider: 'twofactor' as const,
+                          enabled: found.enabled ?? true,
+                          apiKey: candidateTfKey.length >= 8 ? candidateTfKey : '',
+                        };
+                      }
+                      const candidateWaToken =
+                        cleanIntegrationCredential(found?.accessToken) ||
+                        cleanIntegrationCredential(prevGw?.accessToken);
                       return {
-                        ...defGw,
-                        ...(found || {}),
-                        id: 'twofactor',
-                        provider: 'twofactor' as const,
-                        enabled: true,
-                        isPrimary: nextActiveId === 'twofactor',
-                        apiKey:
-                          found?.apiKey &&
-                          found.apiKey.trim().length >= 8 &&
-                          found.apiKey.trim() !== '699e72b1-de86-11f1-bb6c-0200cd936042'
-                            ? found.apiKey.trim()
-                            : '',
+                        ...(defGw || {}),
+                        ...found,
+                        id: 'meta_whatsapp',
+                        provider: 'meta_whatsapp' as const,
+                        enabled: found.enabled ?? true,
+                        phoneNumberId:
+                          !found?.phoneNumberId || found.phoneNumberId === '109845729104823'
+                            ? (prevGw?.phoneNumberId && prevGw.phoneNumberId !== '109845729104823'
+                                ? prevGw.phoneNumberId
+                                : '1375149605673144')
+                            : found.phoneNumberId,
+                        wabaId:
+                          !found?.wabaId || found.wabaId === '392019482910482'
+                            ? (prevGw?.wabaId && prevGw.wabaId !== '392019482910482'
+                                ? prevGw.wabaId
+                                : '2745819689145292')
+                            : found.wabaId,
+                        accessToken: candidateWaToken,
                       };
-                    }
-                    return {
-                      ...defGw,
-                      ...(found || {}),
-                      id: 'meta_whatsapp',
-                      provider: 'meta_whatsapp' as const,
-                      enabled: found?.enabled ?? true,
-                      isPrimary: nextActiveId === 'meta_whatsapp',
-                      phoneNumberId:
-                        !found?.phoneNumberId || found.phoneNumberId === '109845729104823'
-                          ? '1375149605673144'
-                          : found.phoneNumberId,
-                      wabaId:
-                        !found?.wabaId || found.wabaId === '392019482910482'
-                          ? '2745819689145292'
-                          : found.wabaId,
-                      accessToken:
-                        found?.accessToken && found.accessToken.includes('EAAG9xxxxxxx')
-                          ? ''
-                          : (found?.accessToken || ''),
-                    };
-                  });
+                    });
+
+                  const nextActiveId =
+                    merged.smsSettings.activeProviderId === 'fast2sms' || merged.smsSettings.activeProviderId === 'msg91'
+                      ? (cleanedGateways[0]?.id || '')
+                      : (cleanedGateways.some((g) => g.id === merged.smsSettings?.activeProviderId)
+                          ? merged.smsSettings.activeProviderId
+                          : cleanedGateways[0]?.id || '');
+                  const nextFallbackId =
+                    cleanedGateways.find((g) => g.id !== nextActiveId)?.id || undefined;
 
                   merged.smsSettings = {
                     ...merged.smsSettings,
                     enabled: merged.smsSettings.enabled ?? true,
                     activeProviderId: nextActiveId,
                     fallbackProviderId: nextFallbackId,
-                    gateways: cleanedGateways,
+                    gateways: cleanedGateways.map((g) => ({
+                      ...g,
+                      isPrimary: g.id === nextActiveId,
+                    })),
                   };
 
                   if (hadMoreThanTwo) {
@@ -2584,22 +2899,6 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                       sanitizeSettingsForPublicFirestore({ smsSettings: merged.smsSettings }),
                       { merge: true }
                     ).catch(() => {});
-                  }
-
-                  const adminToken =
-                    sessionStorage.getItem('redmode_admin_token') ||
-                    localStorage.getItem('redmode_admin_token') ||
-                    '';
-                  if (adminToken) {
-                    fetch('/api/admin/sms-settings', {
-                      method: 'POST',
-                      headers: {
-                        'Content-Type': 'application/json',
-                        Authorization: `Bearer ${adminToken}`,
-                      },
-                      credentials: 'include',
-                      body: JSON.stringify(merged.smsSettings),
-                    }).catch(() => {});
                   }
                 }
                 try {
@@ -5821,15 +6120,21 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     orderId: string,
     mode: 'Surface' | 'Express' = 'Surface'
   ): { success: boolean; awb: string; courier: string; message: string } => {
-    const activeChannel = settings.shippingChannels?.find((c) => c.id === settings.activeShippingChannelId) || settings.shippingChannels?.[0];
+    const activeChannel = settings.activeShippingChannelId
+      ? settings.shippingChannels?.find(
+          (c) => c.id === settings.activeShippingChannelId && c.enabled !== false
+        )
+      : undefined;
 
-    // Generate courier AWB based on active provider
+    // Generate courier AWB based on active provider (or standard manual AWB if couriers are deactivated)
     const awbNumber = generateAwbForChannel(activeChannel);
 
     const deliveryDays = mode === 'Express' ? 2 : 4;
     const deliveryDate = new Date();
     deliveryDate.setDate(deliveryDate.getDate() + deliveryDays);
-    const courierTitle = activeChannel?.name || (mode === 'Express' ? 'Delhivery Express Air' : 'Delhivery Surface Logistics');
+    const courierTitle =
+      activeChannel?.name ||
+      (activeChannel === undefined ? 'Manual Store Dispatch' : mode === 'Express' ? 'Delhivery Express Air' : 'Delhivery Surface Logistics');
     const trackingUrl = activeChannel?.trackingUrlTemplate
       ? activeChannel.trackingUrlTemplate.replace('{{awb}}', awbNumber)
       : `https://www.delhivery.com/track/package/${awbNumber}`;
@@ -5873,8 +6178,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       })
     );
 
-    // Also invoke server-side Delhivery CMU shipment creation endpoint if Delhivery is active
-    if (targetOrderRef && (!activeChannel || activeChannel.provider === 'delhivery')) {
+    // Invoke server-side Delhivery CMU shipment creation endpoint ONLY when Delhivery is the active enabled courier
+    if (targetOrderRef && activeChannel && activeChannel.provider === 'delhivery' && activeChannel.enabled !== false) {
       const adminToken =
         sessionStorage.getItem('redmode_admin_token') ||
         localStorage.getItem('redmode_admin_token') ||
@@ -5930,70 +6235,104 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const updateDelhiverySettings = (newDelhivery: Partial<DelhiverySettings>) => {
     setSettings((prev) => {
-      const current = prev.delhiverySettings || {
-        enabled: true,
-        apiToken: '',
-        clientName: 'REDMODE_JAIPUR',
-        warehouseName: 'REDMODE Central Hub Jaipur',
-        pickupPincode: '302002',
-        pickupAddress: 'Plot 42, Hawa Mahal Road, Jaipur, Rajasthan',
-        pickupPhone: '7302797464',
-        environment: 'production',
-        defaultShippingMode: 'Surface',
-        autoGenerateLabel: true,
-        codRemittanceCycle: 'T+2',
+      const current = prev.delhiverySettings || INITIAL_SETTINGS.delhiverySettings!;
+      const mergedDelhivery = {
+        ...current,
+        ...newDelhivery,
+        apiToken: cleanIntegrationCredential(newDelhivery.apiToken !== undefined ? newDelhivery.apiToken : current.apiToken),
       };
+      const updatedChannels = Array.isArray(prev.shippingChannels)
+        ? prev.shippingChannels.map((c) =>
+            c.provider === 'delhivery'
+              ? {
+                  ...c,
+                  apiKey: mergedDelhivery.apiToken || c.apiKey,
+                  clientId: mergedDelhivery.clientName || c.clientId,
+                  warehouseName: mergedDelhivery.warehouseName || c.warehouseName,
+                  pickupPincode: mergedDelhivery.pickupPincode || c.pickupPincode,
+                  pickupAddress: mergedDelhivery.pickupAddress || c.pickupAddress,
+                  pickupPhone: mergedDelhivery.pickupPhone || c.pickupPhone,
+                  environment: mergedDelhivery.environment || c.environment,
+                }
+              : c
+          )
+        : prev.shippingChannels;
+
       const updated = {
         ...prev,
-        delhiverySettings: {
-          ...current,
-          ...newDelhivery,
-        },
+        delhiverySettings: mergedDelhivery,
+        shippingChannels: updatedChannels,
       };
       try {
         localStorage.setItem('redmode_settings', JSON.stringify(updated));
       } catch (e) {
         console.warn('Failed to save settings:', e);
       }
+      try {
+        setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
+      } catch {}
+      syncIntegrationsToServer(updated);
       return updated;
     });
   };
 
   const updateShippingChannels = (channels: ShippingChannelConfig[], activeChannelId?: string) => {
     setSettings((prev) => {
-      const targetActiveId = activeChannelId || prev.activeShippingChannelId || channels[0]?.id || 'delhivery';
-      
-      // STRICT ENFORCEMENT: Exactly ONE active shipping channel
+      const targetActiveId =
+        activeChannelId !== undefined ? activeChannelId : prev.activeShippingChannelId || '';
+
       const updatedChannels = channels.map((c) => ({
         ...c,
-        isPrimary: c.id === targetActiveId,
-        enabled: c.id === targetActiveId ? true : c.enabled,
+        apiKey: cleanIntegrationCredential(c.apiKey),
+        apiSecret: cleanIntegrationCredential(c.apiSecret),
+        clientId: (c.clientId || '').trim(),
+        warehouseName: (c.warehouseName || '').trim(),
+        pickupPincode: (c.pickupPincode || '').trim(),
+        isPrimary: Boolean(targetActiveId && c.id === targetActiveId),
+        enabled: targetActiveId && c.id === targetActiveId ? true : c.enabled,
       }));
 
-      const activeChannel = updatedChannels.find((c) => c.id === targetActiveId) || updatedChannels[0];
+      // Track permanently deleted courier IDs (and un-mark any newly re-added IDs)
+      const currentIds = new Set(updatedChannels.map((c) => c.id));
+      const prevIds = (prev.shippingChannels || []).map((c) => c.id);
+      const newlyDeleted = prevIds.filter((id) => !currentIds.has(id));
+      const nextDeletedShippingIds = Array.from(
+        new Set([...(prev.deletedShippingChannelIds || []), ...newlyDeleted])
+      ).filter((id) => !currentIds.has(id));
 
-      // Keep delhiverySettings in sync if Delhivery is active
-      const updatedDelhivery = activeChannel && activeChannel.provider === 'delhivery'
+      const activeChannel = targetActiveId
+        ? updatedChannels.find((c) => c.id === targetActiveId)
+        : undefined;
+
+      // Keep delhiverySettings in sync if Delhivery exists, or clear if deleted
+      const delhiveryCh = updatedChannels.find((c) => c.provider === 'delhivery');
+      const syncChannel = activeChannel?.provider === 'delhivery' ? activeChannel : delhiveryCh;
+      const updatedDelhivery = syncChannel
         ? {
             ...prev.delhiverySettings,
-            enabled: true,
-            apiToken: activeChannel.apiKey,
-            clientName: activeChannel.clientId || prev.delhiverySettings?.clientName || 'Redmode',
-            warehouseName: activeChannel.warehouseName || prev.delhiverySettings?.warehouseName || 'REDMODE B2C',
-            pickupPincode: activeChannel.pickupPincode || prev.delhiverySettings?.pickupPincode || '250002',
-            pickupAddress: activeChannel.pickupAddress || prev.delhiverySettings?.pickupAddress || '',
-            pickupPhone: activeChannel.pickupPhone || prev.delhiverySettings?.pickupPhone || '7302797464',
-            environment: (activeChannel.environment || 'production') as 'production' | 'staging',
-            defaultShippingMode: (activeChannel.shippingMode === 'Express' ? 'Express' : 'Surface') as 'Surface' | 'Express',
-            codRemittanceCycle: (activeChannel.codRemittanceCycle || 'T+2') as 'T+2' | 'Weekly' | 'Bi-Weekly',
+            enabled: Boolean(activeChannel?.id === syncChannel.id && syncChannel.enabled !== false),
+            apiToken: syncChannel.apiKey,
+            clientName: syncChannel.clientId || prev.delhiverySettings?.clientName || 'Redmode',
+            warehouseName: syncChannel.warehouseName || prev.delhiverySettings?.warehouseName || 'REDMODE B2C',
+            pickupPincode: syncChannel.pickupPincode || prev.delhiverySettings?.pickupPincode || '250002',
+            pickupAddress: syncChannel.pickupAddress || prev.delhiverySettings?.pickupAddress || '',
+            pickupPhone: syncChannel.pickupPhone || prev.delhiverySettings?.pickupPhone || '7302797464',
+            environment: (syncChannel.environment || 'production') as 'production' | 'staging',
+            defaultShippingMode: (syncChannel.shippingMode === 'Express' ? 'Express' : 'Surface') as 'Surface' | 'Express',
+            codRemittanceCycle: (syncChannel.codRemittanceCycle || 'T+2') as 'T+2' | 'Weekly' | 'Bi-Weekly',
             autoGenerateLabel: true,
           }
-        : prev.delhiverySettings;
+        : {
+            ...(prev.delhiverySettings || INITIAL_SETTINGS.delhiverySettings!),
+            enabled: false,
+            apiToken: '',
+          };
 
-      const updated = {
+      const updated: StoreSettings = {
         ...prev,
         shippingChannels: updatedChannels,
         activeShippingChannelId: targetActiveId,
+        deletedShippingChannelIds: nextDeletedShippingIds,
         delhiverySettings: updatedDelhivery,
       };
       try {
@@ -6004,6 +6343,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       try {
         setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
       } catch {}
+      syncIntegrationsToServer(updated);
       return updated;
     });
   };
@@ -6015,45 +6355,61 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   ) => {
     setSettings((prev) => {
       const targetDomesticId =
-        activeDomesticId ||
-        prev.activePaymentGatewayId ||
-        gateways.find((g) => g.targetMarket === 'domestic' || g.targetMarket === 'both')?.id ||
-        'razorpay_domestic';
+        activeDomesticId !== undefined
+          ? activeDomesticId
+          : prev.activePaymentGatewayId || '';
 
       const targetInternationalId =
-        activeInternationalId ||
-        prev.activeInternationalGatewayId ||
-        gateways.find((g) => g.targetMarket === 'international')?.id ||
-        'paypal_export';
+        activeInternationalId !== undefined
+          ? activeInternationalId
+          : prev.activeInternationalGatewayId || '';
 
       const updatedGateways = gateways.map((g) => ({
         ...g,
-        isPrimary: g.id === targetDomesticId,
+        apiKey: cleanIntegrationCredential(g.apiKey),
+        apiSecret: cleanIntegrationCredential(g.apiSecret),
+        webhookSecret: cleanIntegrationCredential(g.webhookSecret),
+        merchantName: (g.merchantName || 'REDMODE').trim(),
+        isPrimary: Boolean(targetDomesticId && g.id === targetDomesticId),
       }));
 
-      // Find the primary Razorpay gateway to keep razorpaySettings in sync
+      // Track permanently deleted gateway IDs (and un-mark any re-added IDs)
+      const currentIds = new Set(updatedGateways.map((g) => g.id));
+      const prevIds = (prev.paymentGateways || []).map((g) => g.id);
+      const newlyDeleted = prevIds.filter((id) => !currentIds.has(id));
+      const nextDeletedPaymentIds = Array.from(
+        new Set([...(prev.deletedPaymentGatewayIds || []), ...newlyDeleted])
+      ).filter((id) => !currentIds.has(id));
+
+      // Keep razorpaySettings in sync (or clear if Razorpay gateway was deleted)
       const activeRazorpay =
-        updatedGateways.find((g) => g.provider === 'razorpay' && g.enabled) ||
+        updatedGateways.find((g) => g.provider === 'razorpay' && g.id === targetDomesticId && g.enabled) ||
         updatedGateways.find((g) => g.provider === 'razorpay');
 
       const updatedRazorpaySettings = activeRazorpay
         ? {
             enabled: activeRazorpay.enabled,
             keyId: activeRazorpay.apiKey,
-            keySecret: activeRazorpay.apiSecret || prev.razorpaySettings?.keySecret || '',
+            keySecret: activeRazorpay.apiSecret || '',
             merchantName: activeRazorpay.merchantName || 'REDMODE',
             themeColor: activeRazorpay.themeColor || '#111827',
             mode: (activeRazorpay.apiKey.startsWith('rzp_live') ? 'live' : activeRazorpay.mode) as
               | 'test'
               | 'live',
           }
-        : prev.razorpaySettings;
+        : {
+            ...(prev.razorpaySettings || INITIAL_SETTINGS.razorpaySettings!),
+            enabled: false,
+            keyId: '',
+            keySecret: '',
+          };
 
       const updated: StoreSettings = {
         ...prev,
         paymentGateways: updatedGateways,
         activePaymentGatewayId: targetDomesticId,
         activeInternationalGatewayId: targetInternationalId,
+        deletedPaymentGatewayIds: nextDeletedPaymentIds,
         razorpaySettings: updatedRazorpaySettings,
       };
 
@@ -6065,34 +6421,61 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       try {
         setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
       } catch {}
+      syncIntegrationsToServer(updated);
       return updated;
     });
   };
 
-  const updateWhatsAppSettings = (newWhatsApp: Partial<WhatsAppSettings>) => {
+  const updateWhatsAppSettings = (newWhatsApp: Partial<WhatsAppSettings> & { __delete?: boolean }) => {
     setSettings((prev) => {
+      const isDeleting = Boolean(newWhatsApp.__delete);
+      const { __delete: _ignored, ...cleanFields } = newWhatsApp as any;
       const current = prev.whatsappSettings || INITIAL_SETTINGS.whatsappSettings!;
-      const mergedWhatsApp = {
-        ...current,
-        ...newWhatsApp,
-      };
-      // Cross-sync Meta WhatsApp credentials with smsSettings.meta_whatsapp
+      const mergedWhatsApp: WhatsAppSettings = isDeleting
+        ? {
+            ...current,
+            enabled: false,
+            provider: 'meta_cloud_api',
+            accessToken: '',
+            phoneNumberId: '',
+            wabaId: '',
+            phoneNumber: '',
+            webhookVerifyToken: '',
+          }
+        : {
+            ...current,
+            ...cleanFields,
+            accessToken: cleanIntegrationCredential(
+              cleanFields.accessToken !== undefined ? cleanFields.accessToken : current.accessToken
+            ),
+            phoneNumberId: (
+              cleanFields.phoneNumberId !== undefined ? cleanFields.phoneNumberId : current.phoneNumberId || ''
+            ).trim(),
+            wabaId: (cleanFields.wabaId !== undefined ? cleanFields.wabaId : current.wabaId || '').trim(),
+          };
+
+      // Cross-sync Meta WhatsApp credentials with smsSettings.meta_whatsapp (if it exists)
       const currentSms = prev.smsSettings || INITIAL_SETTINGS.smsSettings!;
       const syncedGateways = Array.isArray(currentSms.gateways)
         ? currentSms.gateways.map((g) =>
             g.provider === 'meta_whatsapp'
               ? {
                   ...g,
-                  phoneNumberId: mergedWhatsApp.phoneNumberId || g.phoneNumberId,
-                  wabaId: mergedWhatsApp.wabaId || g.wabaId,
-                  accessToken: mergedWhatsApp.accessToken || g.accessToken,
+                  phoneNumberId: isDeleting ? '' : mergedWhatsApp.phoneNumberId || g.phoneNumberId,
+                  wabaId: isDeleting ? '' : mergedWhatsApp.wabaId || g.wabaId,
+                  accessToken: isDeleting ? '' : mergedWhatsApp.accessToken || g.accessToken,
                 }
               : g
           )
         : currentSms.gateways;
-      const updated = {
+      const updated: StoreSettings = {
         ...prev,
         whatsappSettings: mergedWhatsApp,
+        whatsappIntegrationDeleted: isDeleting
+          ? true
+          : Boolean(mergedWhatsApp.enabled || mergedWhatsApp.accessToken)
+          ? false
+          : prev.whatsappIntegrationDeleted,
         smsSettings: {
           ...currentSms,
           gateways: syncedGateways,
@@ -6106,6 +6489,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       try {
         setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
       } catch {}
+      syncIntegrationsToServer(updated);
       return updated;
     });
   };
@@ -6113,11 +6497,30 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const updateSmsSettings = (newSms: Partial<SmsIntegrationSettings>) => {
     setSettings((prev) => {
       const current = prev.smsSettings || INITIAL_SETTINGS.smsSettings!;
-      const updatedSms = {
+      const nextGateways = Array.isArray(newSms.gateways)
+        ? newSms.gateways.map((g) => ({
+            ...g,
+            apiKey: cleanIntegrationCredential(g.apiKey),
+            accessToken: cleanIntegrationCredential(g.accessToken),
+            phoneNumberId: (g.phoneNumberId || '').trim(),
+            wabaId: (g.wabaId || '').trim(),
+          }))
+        : current.gateways;
+
+      // Track permanently deleted SMS/OTP gateway IDs
+      const currentIds = new Set(nextGateways.map((g) => g.id));
+      const prevIds = (current.gateways || []).map((g) => g.id);
+      const newlyDeleted = prevIds.filter((id) => !currentIds.has(id));
+      const nextDeletedSmsIds = Array.from(
+        new Set([...(prev.deletedSmsGatewayIds || []), ...newlyDeleted])
+      ).filter((id) => !currentIds.has(id));
+
+      const updatedSms: SmsIntegrationSettings = {
         ...current,
         ...newSms,
+        gateways: nextGateways,
       };
-      // Cross-sync Meta WhatsApp credentials back to whatsappSettings
+      // Cross-sync Meta WhatsApp credentials back to whatsappSettings (only if meta_whatsapp exists & has values)
       const metaGw = updatedSms.gateways?.find((g) => g.provider === 'meta_whatsapp');
       const currentWa = prev.whatsappSettings || INITIAL_SETTINGS.whatsappSettings!;
       const syncedWa = metaGw
@@ -6129,9 +6532,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }
         : currentWa;
 
-      const updated = {
+      const updated: StoreSettings = {
         ...prev,
         smsSettings: updatedSms,
+        deletedSmsGatewayIds: nextDeletedSmsIds,
         whatsappSettings: syncedWa,
       };
       try {
@@ -6142,12 +6546,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       try {
         setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
       } catch {}
+      syncIntegrationsToServer(updated);
 
       // Sync active credentials to backend using verified Admin Session Token
-      const adminToken =
-        sessionStorage.getItem('redmode_admin_token') ||
-        localStorage.getItem('redmode_admin_token') ||
-        '';
+      const adminToken = getAdminAuthToken();
       fetch('/api/admin/sms-settings', {
         method: 'POST',
         headers: {
@@ -6460,17 +6862,40 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const updateSettings = (newSettings: StoreSettings) => {
-    setSettings(newSettings);
+    // Keep paymentGateways Razorpay entry in sync when razorpaySettings is updated via AdminSettingsView
+    let finalSettings = newSettings;
+    if (newSettings.razorpaySettings && Array.isArray(newSettings.paymentGateways)) {
+      const rzp = newSettings.razorpaySettings;
+      finalSettings = {
+        ...newSettings,
+        paymentGateways: newSettings.paymentGateways.map((g) =>
+          g.provider === 'razorpay' && (g.id === newSettings.activePaymentGatewayId || g.id === 'razorpay_domestic')
+            ? {
+                ...g,
+                enabled: rzp.enabled,
+                apiKey: cleanIntegrationCredential(rzp.keyId) || g.apiKey,
+                apiSecret: cleanIntegrationCredential(rzp.keySecret) || g.apiSecret,
+                merchantName: rzp.merchantName || g.merchantName,
+                themeColor: rzp.themeColor || g.themeColor,
+                mode: rzp.mode || g.mode,
+              }
+            : g
+        ),
+      };
+    }
+
+    setSettings(finalSettings);
     try {
-      localStorage.setItem('redmode_settings', JSON.stringify(newSettings));
+      localStorage.setItem('redmode_settings', JSON.stringify(finalSettings));
     } catch (e) {
       console.warn('Failed to save settings to localStorage:', e);
     }
     try {
-      setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(newSettings), { merge: true }).catch((err) => {
+      setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(finalSettings), { merge: true }).catch((err) => {
         console.debug('Firestore store_settings sync warning:', err);
       });
     } catch {}
+    syncIntegrationsToServer(finalSettings);
 
     if (newSettings.adminProfile) {
       const profile = newSettings.adminProfile;
@@ -6677,6 +7102,33 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     };
 
+    const hydrateAdminIntegrationsFromServer = () => {
+      const token = getAdminAuthToken();
+      fetch('/api/admin/integrations-config', {
+        method: 'GET',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        credentials: 'include',
+      })
+        .then(async (r) => {
+          if (!r.ok) return null;
+          const txt = await r.text();
+          if (!txt || !txt.trim().startsWith('{')) return null;
+          return JSON.parse(txt);
+        })
+        .then((data) => {
+          if (data?.success && data.config) {
+            setSettings((prev) => {
+              const merged = mergeIntegrationSettingsPreservingSecrets(prev, data.config);
+              try {
+                localStorage.setItem('redmode_settings', JSON.stringify(merged));
+              } catch {}
+              return merged;
+            });
+          }
+        })
+        .catch(() => {});
+    };
+
     const verifyServerToken = () => {
       const token =
         sessionStorage.getItem('redmode_admin_token') ||
@@ -6695,8 +7147,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         .catch(() => {});
     };
 
-    // Verify token immediately on mount/auth and periodically
+    // Verify token and hydrate server-side integration credentials immediately on mount/auth
     verifyServerToken();
+    hydrateAdminIntegrationsFromServer();
 
     const intervalId = setInterval(() => {
       const elapsed = Date.now() - readLastActivity();

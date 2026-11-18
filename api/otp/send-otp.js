@@ -107,13 +107,15 @@ export default async function handler(req, res) {
   let deliverySuccess = false;
   const providerErrors = [];
 
-  const gateways = Array.isArray(smsSettings?.gateways) ? smsSettings.gateways : [];
+  const hasExplicitGateways = Array.isArray(smsSettings?.gateways);
+  const gateways = hasExplicitGateways ? smsSettings.gateways : [];
   const tfGw = gateways.find((g) => g.provider === 'twofactor');
   const waGw = gateways.find((g) => g.provider === 'meta_whatsapp');
   const fastGw = gateways.find((g) => g.provider === 'fast2sms');
   const msgGw = gateways.find((g) => g.provider === 'msg91');
 
   const tryTwoFactor = async () => {
+    if (hasExplicitGateways && (!tfGw || tfGw.enabled === false)) return false;
     if (tfGw && tfGw.enabled === false) return false;
     const twoFactorKey = (
       (!isPlaceholderCredential(tfGw?.apiKey) ? tfGw.apiKey : '') ||
@@ -153,6 +155,7 @@ export default async function handler(req, res) {
   };
 
   const tryMetaWhatsApp = async () => {
+    if (hasExplicitGateways && (!waGw || waGw.enabled === false)) return false;
     if (waGw && waGw.enabled === false) return false;
     const waToken = (
       (!isPlaceholderCredential(waGw?.accessToken) ? waGw.accessToken : '') ||
@@ -243,6 +246,7 @@ export default async function handler(req, res) {
   };
 
   const tryFast2Sms = async () => {
+    if (hasExplicitGateways && (!fastGw || fastGw.enabled === false)) return false;
     if (fastGw && fastGw.enabled === false) return false;
     const fast2SmsKey = (fastGw?.apiKey || process.env.FAST2SMS_API_KEY || '').trim();
     if (!fast2SmsKey || fast2SmsKey.length < 8) return false;
@@ -271,6 +275,7 @@ export default async function handler(req, res) {
   };
 
   const tryMsg91 = async () => {
+    if (hasExplicitGateways && (!msgGw || msgGw.enabled === false)) return false;
     if (msgGw && msgGw.enabled === false) return false;
     const msgKey = (msgGw?.apiKey || process.env.MSG91_AUTH_KEY || '').trim();
     const templateId = (msgGw?.templateId || '').trim();
@@ -294,8 +299,15 @@ export default async function handler(req, res) {
     return false;
   };
 
-  const activeProvider = smsSettings?.activeProviderId || 'twofactor';
-  const fallbackProvider = smsSettings?.fallbackProviderId || (activeProvider === 'twofactor' ? 'meta_whatsapp' : 'twofactor');
+  const activeProvider = smsSettings?.activeProviderId !== undefined ? smsSettings.activeProviderId : 'twofactor';
+  const fallbackProvider =
+    smsSettings?.fallbackProviderId !== undefined
+      ? smsSettings.fallbackProviderId
+      : activeProvider === 'twofactor'
+      ? 'meta_whatsapp'
+      : activeProvider === 'meta_whatsapp'
+      ? 'twofactor'
+      : 'none';
 
   const runProvider = async (id) => {
     if (id === 'twofactor') return tryTwoFactor();
@@ -305,9 +317,11 @@ export default async function handler(req, res) {
     return false;
   };
 
-  const primaryOk = await runProvider(activeProvider);
-  if (!primaryOk && fallbackProvider && fallbackProvider !== 'none' && fallbackProvider !== activeProvider) {
-    await runProvider(fallbackProvider);
+  if (activeProvider) {
+    const primaryOk = await runProvider(activeProvider);
+    if (!primaryOk && fallbackProvider && fallbackProvider !== 'none' && fallbackProvider !== activeProvider) {
+      await runProvider(fallbackProvider);
+    }
   }
 
   if (!deliverySuccess) {

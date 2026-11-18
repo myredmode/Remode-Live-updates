@@ -139,7 +139,7 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
 
   // Load channels from settings or provide defaults
   const [channels, setChannels] = useState<ShippingChannelConfig[]>(() => {
-    if (settings.shippingChannels && settings.shippingChannels.length > 0) {
+    if (Array.isArray(settings.shippingChannels)) {
       return settings.shippingChannels;
     }
     return [
@@ -165,11 +165,15 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
   });
 
   const [activeChannelId, setActiveChannelId] = useState<string>(() => {
-    return settings.activeShippingChannelId || 'delhivery';
+    return settings.activeShippingChannelId !== undefined
+      ? settings.activeShippingChannelId
+      : 'delhivery';
   });
 
   const [selectedChannelId, setSelectedChannelId] = useState<string>(() => {
-    return settings.activeShippingChannelId || 'delhivery';
+    if (settings.activeShippingChannelId) return settings.activeShippingChannelId;
+    if (Array.isArray(settings.shippingChannels)) return settings.shippingChannels[0]?.id || '';
+    return 'delhivery';
   });
 
   // UI States
@@ -181,22 +185,27 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
   const [notification, setNotification] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
   const [webhookCopied, setWebhookCopied] = useState<boolean>(false);
 
-  // Modals for Delete
+  // Modal for Delete
   const [channelToDelete, setChannelToDelete] = useState<ShippingChannelConfig | null>(null);
-  const [activeDeleteBlockedCourier, setActiveDeleteBlockedCourier] = useState<ShippingChannelConfig | null>(null);
 
-  // Sync state if settings change externally
+  // Sync state if settings change externally (preserving empty arrays & deactivated active ID)
   useEffect(() => {
-    if (settings.shippingChannels && settings.shippingChannels.length > 0) {
+    if (Array.isArray(settings.shippingChannels)) {
       setChannels(settings.shippingChannels);
+      if (selectedChannelId && !settings.shippingChannels.some((c) => c.id === selectedChannelId)) {
+        setSelectedChannelId(settings.shippingChannels[0]?.id || '');
+      } else if (!selectedChannelId && settings.shippingChannels.length > 0) {
+        setSelectedChannelId(settings.shippingChannels[0].id);
+      }
     }
-    if (settings.activeShippingChannelId) {
+    if (settings.activeShippingChannelId !== undefined) {
       setActiveChannelId(settings.activeShippingChannelId);
     }
   }, [settings.shippingChannels, settings.activeShippingChannelId]);
 
   // Ensure selected channel exists
   const currentChannel = channels.find((c) => c.id === selectedChannelId) || channels[0] || null;
+  const isChannelActive = (ch: ShippingChannelConfig) => ch.id === activeChannelId && ch.enabled !== false;
 
   // Field change handler
   const handleFieldChange = (field: keyof ShippingChannelConfig, value: any) => {
@@ -211,7 +220,7 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
     );
   };
 
-  // Switch active courier
+  // Activate courier
   const handleMakeActive = (channelId: string) => {
     setActiveChannelId(channelId);
     const updatedChannels = channels.map((ch) => ({
@@ -225,10 +234,31 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
 
     setNotification({
       type: 'success',
-      text: `"${target?.name || channelId}" is now the active courier for all new orders.`,
+      text: `"${target?.name || channelId}" is now active for all new orders.`,
     });
     if (onSaveNotification) {
-      onSaveNotification(`Active courier: ${target?.name}`);
+      onSaveNotification(`Activated courier: ${target?.name}`);
+    }
+    setTimeout(() => setNotification(null), 4000);
+  };
+
+  // Deactivate courier
+  const handleDeactivate = (channelId: string) => {
+    const target = channels.find((c) => c.id === channelId);
+    const nextActiveId = activeChannelId === channelId ? '' : activeChannelId;
+    setActiveChannelId(nextActiveId);
+    const updatedChannels = channels.map((ch) =>
+      ch.id === channelId ? { ...ch, enabled: false, isPrimary: false } : ch
+    );
+    setChannels(updatedChannels);
+    updateShippingChannels(updatedChannels, nextActiveId);
+
+    setNotification({
+      type: 'info',
+      text: `"${target?.name || channelId}" has been deactivated. Automatic courier API dispatch is paused.`,
+    });
+    if (onSaveNotification) {
+      onSaveNotification(`Deactivated courier: ${target?.name}`);
     }
     setTimeout(() => setNotification(null), 4000);
   };
@@ -276,41 +306,39 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
     setTimeout(() => setNotification(null), 5000);
   };
 
-  // Delete initiated by user
+  // Delete initiated by user (allowed for any courier, including active or last)
   const handleDeleteClick = (channel: ShippingChannelConfig) => {
-    // If the courier is active, block deletion and instruct to switch first
-    if (channel.id === activeChannelId) {
-      setActiveDeleteBlockedCourier(channel);
-      return;
-    }
-
-    // Otherwise, show confirmation modal
     setChannelToDelete(channel);
   };
 
-  // Confirm delete handler (REAL persistence)
+  // Confirm delete handler (REAL permanent persistence)
   const handleConfirmDelete = () => {
     if (!channelToDelete) return;
 
     const remaining = channels.filter((c) => c.id !== channelToDelete.id);
+    const nextActiveId = channelToDelete.id === activeChannelId ? '' : activeChannelId;
+    if (channelToDelete.id === activeChannelId) {
+      setActiveChannelId('');
+    }
 
-    // If the currently selected editing channel was deleted, select active channel
     if (selectedChannelId === channelToDelete.id) {
-      setSelectedChannelId(activeChannelId);
+      setSelectedChannelId(nextActiveId || remaining[0]?.id || '');
     }
 
     setChannels(remaining);
-
-    // Persist to StoreContext & localStorage
-    updateShippingChannels(remaining, activeChannelId);
+    updateShippingChannels(remaining, nextActiveId);
 
     const deletedName = channelToDelete.name;
     setChannelToDelete(null);
+    setTestResult(null);
 
     setNotification({
       type: 'success',
-      text: `Courier "${deletedName}" was deleted successfully.`,
+      text: `Courier "${deletedName}" was permanently deleted.`,
     });
+    if (onSaveNotification) {
+      onSaveNotification(`Deleted courier: ${deletedName}`);
+    }
     setTimeout(() => setNotification(null), 4000);
   };
 
@@ -318,8 +346,16 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
   const handleSaveChanges = () => {
     const updatedChannels = channels.map((ch) => ({
       ...ch,
+      name: (ch.name || '').trim() || ch.name,
+      apiKey: (ch.apiKey || '').trim(),
+      apiSecret: (ch.apiSecret || '').trim(),
+      clientId: (ch.clientId || '').trim(),
+      warehouseName: (ch.warehouseName || '').trim(),
+      pickupPincode: (ch.pickupPincode || '').trim(),
+      apiBaseUrl: (ch.apiBaseUrl || '').trim(),
       isPrimary: ch.id === activeChannelId,
     }));
+    setChannels(updatedChannels);
     updateShippingChannels(updatedChannels, activeChannelId);
 
     setNotification({
@@ -415,14 +451,14 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
 
   // Lock background body scroll when modals open
   useEffect(() => {
-    if (isAddCourierOpen || channelToDelete || activeDeleteBlockedCourier) {
+    if (isAddCourierOpen || channelToDelete) {
       const orig = document.body.style.overflow;
       document.body.style.overflow = 'hidden';
       return () => {
         document.body.style.overflow = orig;
       };
     }
-  }, [isAddCourierOpen, channelToDelete, activeDeleteBlockedCourier]);
+  }, [isAddCourierOpen, channelToDelete]);
 
   // Handle ESC key
   useEffect(() => {
@@ -430,7 +466,6 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
       if (e.key === 'Escape') {
         setIsAddCourierOpen(false);
         setChannelToDelete(null);
-        setActiveDeleteBlockedCourier(null);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -482,94 +517,128 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
         </div>
 
         {/* Compact Courier Cards Grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {channels.map((ch) => {
-            const isActive = ch.id === activeChannelId;
-            const isSelected = ch.id === selectedChannelId;
-            const isConfigured = Boolean(ch.apiKey && ch.apiKey.trim().length > 0);
+        {channels.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-slate-300 p-6 text-center space-y-2.5 bg-slate-50/50">
+            <p className="text-xs font-medium text-slate-600">
+              No courier channels configured. Add a shipping partner to enable live AWB &amp; shipment creation.
+            </p>
+            <button
+              type="button"
+              onClick={() => setIsAddCourierOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Add Courier</span>
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {channels.map((ch) => {
+              const isActive = isChannelActive(ch);
+              const isSelected = ch.id === selectedChannelId;
+              const isConfigured = Boolean(ch.apiKey && ch.apiKey.trim().length > 0);
 
-            return (
-              <div
-                key={ch.id}
-                onClick={() => setSelectedChannelId(ch.id)}
-                className={`p-3.5 rounded-lg border transition cursor-pointer flex flex-col justify-between ${
-                  isSelected
-                    ? 'border-slate-900 bg-slate-50/60 ring-1 ring-slate-900'
-                    : 'border-slate-200 hover:border-slate-300 bg-white'
-                }`}
-              >
-                <div>
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <div className="w-7 h-7 rounded bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
-                        <Truck className="w-3.5 h-3.5" />
+              return (
+                <div
+                  key={ch.id}
+                  onClick={() => {
+                    setSelectedChannelId(ch.id);
+                    setTestResult(null);
+                  }}
+                  className={`p-3.5 rounded-lg border transition cursor-pointer flex flex-col justify-between ${
+                    isSelected
+                      ? 'border-slate-900 bg-slate-50/60 ring-1 ring-slate-900'
+                      : 'border-slate-200 hover:border-slate-300 bg-white'
+                  }`}
+                >
+                  <div>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <div className="w-7 h-7 rounded bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
+                          <Truck className="w-3.5 h-3.5" />
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-semibold text-slate-900 line-clamp-1">{ch.name}</h4>
+                          <p className="text-[11px] text-slate-400 capitalize">{ch.provider}</p>
+                        </div>
                       </div>
-                      <div>
-                        <h4 className="text-sm font-semibold text-slate-900 line-clamp-1">{ch.name}</h4>
-                        <p className="text-[11px] text-slate-400 capitalize">{ch.provider}</p>
-                      </div>
+
+                      {/* Status Badge */}
+                      {isActive ? (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 shrink-0">
+                          ACTIVE
+                        </span>
+                      ) : ch.enabled === false ? (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-rose-50 text-rose-700 border border-rose-200 shrink-0">
+                          DEACTIVATED
+                        </span>
+                      ) : !isConfigured ? (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-200 shrink-0">
+                          NEEDS SETUP
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-medium text-slate-500 bg-slate-100 shrink-0">
+                          INACTIVE
+                        </span>
+                      )}
                     </div>
-
-                    {/* Status Badge */}
-                    {isActive ? (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 shrink-0">
-                        ACTIVE
-                      </span>
-                    ) : !isConfigured ? (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-200 shrink-0">
-                        NEEDS SETUP
-                      </span>
-                    ) : (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-medium text-slate-500 bg-slate-100 shrink-0">
-                        INACTIVE
-                      </span>
-                    )}
                   </div>
-                </div>
 
-                {/* Card Actions */}
-                <div className="pt-3 mt-3 border-t border-slate-100 flex items-center justify-between text-xs">
-                  <div className="flex items-center gap-3">
-                    {!isActive && (
+                  {/* Card Actions */}
+                  <div className="pt-3 mt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-3">
+                      {isActive ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeactivate(ch.id);
+                          }}
+                          className="text-amber-700 hover:text-amber-900 font-semibold cursor-pointer"
+                        >
+                          Deactivate
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleMakeActive(ch.id);
+                          }}
+                          className="text-emerald-700 hover:text-emerald-900 font-semibold cursor-pointer"
+                        >
+                          Activate
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleMakeActive(ch.id);
+                          setSelectedChannelId(ch.id);
                         }}
-                        className="text-slate-800 hover:text-black font-semibold cursor-pointer"
+                        className="text-slate-600 hover:text-slate-900 cursor-pointer"
                       >
-                        Make Active
+                        Edit
                       </button>
-                    )}
+                    </div>
+
                     <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setSelectedChannelId(ch.id);
+                        handleDeleteClick(ch);
                       }}
-                      className="text-slate-600 hover:text-slate-900 cursor-pointer"
+                      className="text-slate-400 hover:text-rose-600 cursor-pointer p-1"
+                      title="Delete Courier"
                     >
-                      Edit
+                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
-
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDeleteClick(ch);
-                    }}
-                    className="text-slate-400 hover:text-rose-600 cursor-pointer p-1"
-                    title="Delete Courier"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* 3. COURIER CONFIGURATION SECTION */}
@@ -579,9 +648,13 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-4 border-b border-slate-100">
             <div className="flex items-center gap-2.5">
               <h3 className="text-base font-semibold text-slate-900">{currentChannel.name}</h3>
-              {currentChannel.id === activeChannelId ? (
+              {isChannelActive(currentChannel) ? (
                 <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
                   ACTIVE
+                </span>
+              ) : currentChannel.enabled === false ? (
+                <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-rose-50 text-rose-700 border border-rose-200">
+                  DEACTIVATED
                 </span>
               ) : (
                 <span className="px-2 py-0.5 rounded text-[11px] font-medium text-slate-500 bg-slate-100">
@@ -599,13 +672,21 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
               >
                 {isTesting ? 'Testing Connection...' : 'Test Connection'}
               </button>
-              {currentChannel.id !== activeChannelId && (
+              {isChannelActive(currentChannel) ? (
+                <button
+                  type="button"
+                  onClick={() => handleDeactivate(currentChannel.id)}
+                  className="px-3 py-1.5 border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-medium rounded-lg transition cursor-pointer"
+                >
+                  Deactivate
+                </button>
+              ) : (
                 <button
                   type="button"
                   onClick={() => handleMakeActive(currentChannel.id)}
                   className="px-3 py-1.5 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer"
                 >
-                  Make Active
+                  Activate
                 </button>
               )}
             </div>
@@ -980,15 +1061,13 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
                 {isTesting ? 'Testing Connection...' : 'Test Connection'}
               </button>
 
-              {currentChannel.id !== activeChannelId && channels.length > 1 && (
-                <button
-                  type="button"
-                  onClick={() => handleDeleteClick(currentChannel)}
-                  className="px-3 py-2 text-rose-600 hover:text-rose-700 text-xs font-medium transition cursor-pointer"
-                >
-                  Delete Courier
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => handleDeleteClick(currentChannel)}
+                className="px-3 py-2 text-rose-600 hover:text-rose-700 text-xs font-medium transition cursor-pointer"
+              >
+                Delete Courier
+              </button>
             </div>
 
             <button
@@ -1146,51 +1225,6 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
         </div>
       )}
 
-      {/* MODAL 3: CANNOT DELETE ACTIVE COURIER MODAL */}
-      {activeDeleteBlockedCourier && (
-        <div
-          className="fixed inset-0 z-50 bg-black/65 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto overscroll-contain animate-in fade-in duration-150"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setActiveDeleteBlockedCourier(null);
-          }}
-        >
-          <div
-            className="relative bg-white rounded-2xl max-w-sm w-full max-h-[85vh] flex flex-col p-5 border border-slate-200 shadow-2xl space-y-4 overflow-hidden animate-in zoom-in-95 duration-150"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-start justify-between">
-              <div className="flex items-start gap-3">
-                <div className="w-9 h-9 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
-                  <AlertTriangle className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-semibold text-slate-900">Cannot Delete Active Courier</h3>
-                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                    You cannot delete the active courier. Activate another courier first.
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActiveDeleteBlockedCourier(null)}
-                className="p-1 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer shrink-0"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="pt-2 flex items-center justify-end border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => setActiveDeleteBlockedCourier(null)}
-                className="px-4 py-1.5 text-xs font-semibold bg-slate-900 hover:bg-black text-white rounded-xl transition cursor-pointer"
-              >
-                Got it
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

@@ -580,6 +580,10 @@ export interface StoreSettings {
   paymentGateways?: PaymentGatewayConfig[];
   activePaymentGatewayId?: string;
   activeInternationalGatewayId?: string;
+  deletedPaymentGatewayIds?: string[];
+  deletedShippingChannelIds?: string[];
+  deletedSmsGatewayIds?: string[];
+  whatsappIntegrationDeleted?: boolean;
   customDomainSettings?: CustomDomainConfig;
   smsSettings?: SmsIntegrationSettings;
 }

@@ -631,7 +631,17 @@ export default async function handler(req, res) {
     const { clientId, clientSecret, mode } = body;
     const finalClientId = (clientId || process.env.PAYPAL_CLIENT_ID || '').trim();
     const finalClientSecret = (clientSecret || process.env.PAYPAL_CLIENT_SECRET || '').trim();
-    const isLive = (mode || process.env.PAYPAL_MODE || 'live') === 'live';
+    const isLive = (mode || process.env.PAYPAL_MODE || 'live').toLowerCase() === 'live';
+
+    if (
+      finalClientId.toLowerCase().includes('paypal_sandbox_export') ||
+      finalClientSecret.toLowerCase().includes('paypal_sandbox_export')
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Placeholder PayPal credentials detected. Please enter your actual PayPal REST App Client ID and Client Secret.',
+      });
+    }
 
     if (!finalClientId || !finalClientSecret) {
       return res.status(400).json({
@@ -652,6 +662,26 @@ export default async function handler(req, res) {
       });
       if (!tokenRes.ok) {
         const errJson = await tokenRes.json().catch(() => ({}));
+        if (tokenRes.status === 401) {
+          const altUrl = isLive
+            ? 'https://api-m.sandbox.paypal.com/v1/oauth2/token'
+            : 'https://api-m.paypal.com/v1/oauth2/token';
+          const altRes = await fetch(altUrl, {
+            method: 'POST',
+            headers: { Authorization: authHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'grant_type=client_credentials',
+          }).catch(() => null);
+          if (altRes?.ok) {
+            return res.status(400).json({
+              success: false,
+              environmentMismatch: true,
+              suggestedMode: isLive ? 'test' : 'live',
+              message: isLive
+                ? 'Client Authentication failed in Production Live mode — these credentials belong to PayPal SANDBOX! Please change Environment Mode to "Test / Sandbox Mode", click Save Changes, and test again.'
+                : 'Client Authentication failed in Test / Sandbox mode — these credentials belong to PayPal LIVE! Please change Environment Mode to "Production Live", click Save Changes, and test again.',
+            });
+          }
+        }
         return res.status(tokenRes.status).json({
           success: false,
           message: errJson?.error_description || 'Invalid PayPal Client ID or Secret.',
@@ -891,23 +921,91 @@ export default async function handler(req, res) {
       return res.status(400).json({ success: false, message: 'Razorpay authentication failed.' });
     }
     if (provider === 'paypal') {
+      if (
+        key.toLowerCase().includes('paypal_sandbox_export') ||
+        secret.toLowerCase().includes('paypal_sandbox_export')
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: 'Placeholder PayPal credentials detected. Please enter your actual Client ID and Client Secret.',
+        });
+      }
       if (!secret) {
         return res.status(400).json({ success: false, message: 'PayPal Client Secret is required.' });
       }
+      const isLive = (mode || 'live').toLowerCase() === 'live';
       const authHeader = 'Basic ' + Buffer.from(`${key}:${secret}`).toString('base64');
-      const url =
-        mode === 'live'
-          ? 'https://api-m.paypal.com/v1/oauth2/token'
-          : 'https://api-m.sandbox.paypal.com/v1/oauth2/token';
+      const url = isLive
+        ? 'https://api-m.paypal.com/v1/oauth2/token'
+        : 'https://api-m.sandbox.paypal.com/v1/oauth2/token';
       const resTok = await fetch(url, {
         method: 'POST',
         headers: { Authorization: authHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'grant_type=client_credentials',
       });
       if (resTok.ok) {
-        return res.status(200).json({ success: true, message: 'PayPal credentials verified!' });
+        return res.status(200).json({
+          success: true,
+          mode: isLive ? 'Live' : 'Sandbox',
+          message: `PayPal credentials verified in ${isLive ? 'LIVE' : 'SANDBOX'} mode!`,
+        });
       }
-      return res.status(400).json({ success: false, message: 'PayPal authentication failed.' });
+      if (resTok.status === 401) {
+        const altUrl = isLive
+          ? 'https://api-m.sandbox.paypal.com/v1/oauth2/token'
+          : 'https://api-m.paypal.com/v1/oauth2/token';
+        const altRes = await fetch(altUrl, {
+          method: 'POST',
+          headers: { Authorization: authHeader, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'grant_type=client_credentials',
+        }).catch(() => null);
+        if (altRes?.ok) {
+          return res.status(400).json({
+            success: false,
+            environmentMismatch: true,
+            suggestedMode: isLive ? 'test' : 'live',
+            message: isLive
+              ? 'Client Authentication failed in Live mode — these credentials belong to PayPal SANDBOX! Switch to "Test / Sandbox Mode", click Save Changes, and test again.'
+              : 'Client Authentication failed in Sandbox mode — these credentials belong to PayPal LIVE! Switch to "Production Live", click Save Changes, and test again.',
+          });
+        }
+      }
+      return res.status(resTok.status || 400).json({ success: false, message: 'PayPal authentication failed.' });
+    }
+    if (provider === 'stripe') {
+      if (!secret) {
+        return res.status(400).json({ success: false, message: 'Stripe Secret Key (sk_...) is required.' });
+      }
+      const stripeRes = await fetch('https://api.stripe.com/v1/balance', {
+        headers: { Authorization: `Bearer ${secret}` },
+      });
+      if (stripeRes.ok) {
+        return res.status(200).json({
+          success: true,
+          mode: secret.startsWith('sk_live') ? 'Live' : 'Test Mode',
+          message: `Stripe Global gateway authenticated (${secret.startsWith('sk_live') ? 'Live' : 'Test Mode'}).`,
+        });
+      }
+      const stripeErr = await stripeRes.json().catch(() => ({}));
+      return res.status(stripeRes.status).json({
+        success: false,
+        message: stripeErr?.error?.message || 'Stripe authentication failed.',
+      });
+    }
+    if (provider === 'upi_qr') {
+      if (!/^[\w.\-_]{2,}@[a-zA-Z]{2,}$/.test(key)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please enter a valid UPI VPA ID (e.g. redmode@okicici).',
+        });
+      }
+      return res.status(200).json({ success: true, message: `Direct Business UPI VPA "${key}" verified.` });
+    }
+    if (!secret) {
+      return res.status(400).json({
+        success: false,
+        message: `Both Key / Merchant ID and Secret / Salt Key are required for ${provider || 'gateway'}.`,
+      });
     }
     return res.status(200).json({ success: true, message: 'Gateway configuration format verified.' });
   }
@@ -1150,9 +1248,18 @@ export default async function handler(req, res) {
 
   if (pathStr === 'shipping/test-channel' && req.method === 'POST') {
     if (!requireAdminRole(['Super Admin'])) return;
-    const { provider, apiKey, warehouseName = 'REDMODE B2C', environment = 'production', pincode = '250002', name = 'Courier' } = body;
-    const token = (apiKey || process.env.DELHIVERY_API_TOKEN || '').trim();
-    if (!token && provider !== 'custom') {
+    const {
+      provider,
+      apiKey,
+      apiSecret,
+      clientId,
+      warehouseName = 'REDMODE B2C',
+      environment = 'production',
+      pincode = '250002',
+      name = 'Courier',
+    } = body;
+    const token = (apiKey || (provider === 'delhivery' ? process.env.DELHIVERY_API_TOKEN : '') || '').trim();
+    if (!token && provider !== 'custom' && !(provider === 'shiprocket' && clientId && apiSecret)) {
       return res.status(400).json({ success: false, message: `API Token is required for ${name}.` });
     }
     if (provider === 'delhivery') {
@@ -1184,6 +1291,48 @@ export default async function handler(req, res) {
         prepaid: postalInfo.pre_paid === 'Y',
         message: `Delhivery Direct API Connected! Warehouse "${warehouseName}" verified.`,
       });
+    }
+    if (provider === 'shiprocket') {
+      if (token.split('.').length === 3) {
+        const srRes = await fetch('https://apiv2.shiprocket.in/v1/external/settings/company/pickup', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!srRes.ok) {
+          return res.status(srRes.status).json({
+            success: false,
+            message: `Shiprocket API returned HTTP ${srRes.status}. Verify JWT token.`,
+          });
+        }
+        return res.status(200).json({ success: true, message: 'Connected to Shiprocket API successfully!' });
+      }
+      if (clientId && apiSecret) {
+        const authRes = await fetch('https://apiv2.shiprocket.in/v1/external/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: clientId, password: apiSecret }),
+        });
+        const authData = await authRes.json().catch(() => ({}));
+        if (!authRes.ok || !authData?.token) {
+          return res.status(authRes.status || 401).json({
+            success: false,
+            message: authData?.message || 'Shiprocket authentication failed.',
+          });
+        }
+        return res.status(200).json({ success: true, message: 'Connected to Shiprocket API successfully!' });
+      }
+      return res.status(400).json({
+        success: false,
+        message: 'Enter a valid Shiprocket JWT token or Registered Email + Password.',
+      });
+    }
+    if (provider === 'amazon' || provider === 'bluedart') {
+      if (!clientId || !token) {
+        return res.status(400).json({
+          success: false,
+          message: `Client / Account ID and API Key are required for ${name}.`,
+        });
+      }
+      return res.status(200).json({ success: true, message: `${name} credentials validated for "${clientId}".` });
     }
     return res.status(200).json({ success: true, message: `Channel "${name}" verified.` });
   }
@@ -1510,6 +1659,14 @@ export default async function handler(req, res) {
       return res.status(403).json({ success: false, message: 'Invalid webhook verify token.' });
     }
     return res.status(200).json({ status: 'EVENT_RECEIVED' });
+  }
+
+  if (pathStr === 'admin/integrations-config') {
+    if (!requireAdminRole(['Super Admin'])) return;
+    if (req.method === 'POST') {
+      return res.status(200).json({ success: true, config: body || {} });
+    }
+    return res.status(200).json({ success: true, config: {} });
   }
 
   if (pathStr === 'admin/sms-settings') {
