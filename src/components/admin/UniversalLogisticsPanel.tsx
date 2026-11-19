@@ -184,6 +184,11 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [notification, setNotification] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
   const [webhookCopied, setWebhookCopied] = useState<boolean>(false);
+  const [pickupDate, setPickupDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const [pickupTime, setPickupTime] = useState<string>('14:00:00');
+  const [expectedPackages, setExpectedPackages] = useState<number>(1);
+  const [isSchedulingPickup, setIsSchedulingPickup] = useState<boolean>(false);
+  const [pickupResult, setPickupResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // Modal for Delete
   const [channelToDelete, setChannelToDelete] = useState<ShippingChannelConfig | null>(null);
@@ -207,13 +212,20 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
   const currentChannel = channels.find((c) => c.id === selectedChannelId) || channels[0] || null;
   const isChannelActive = (ch: ShippingChannelConfig) => ch.id === activeChannelId && ch.enabled !== false;
 
-  // Field change handler
+  // Field change handler (auto-syncs Delhivery API host when environment switches)
   const handleFieldChange = (field: keyof ShippingChannelConfig, value: any) => {
     if (!currentChannel) return;
     setChannels((prev) =>
       prev.map((ch) => {
         if (ch.id === currentChannel.id) {
-          return { ...ch, [field]: value };
+          const next = { ...ch, [field]: value };
+          if (field === 'environment' && ch.provider === 'delhivery') {
+            next.apiBaseUrl =
+              value === 'staging'
+                ? 'https://staging-express.delhivery.com'
+                : 'https://track.delhivery.com';
+          }
+          return next;
         }
         return ch;
       })
@@ -430,6 +442,63 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
       setTestResult({
         success: false,
         message: `Network error while testing connection to ${currentChannel.name}: ${err?.message || 'Unable to reach server'}.`,
+      });
+    }
+  };
+
+  // Schedule Delhivery Pickup
+  const handleSchedulePickup = async () => {
+    if (!currentChannel || currentChannel.provider !== 'delhivery') return;
+    if (!currentChannel.apiKey || !currentChannel.apiKey.trim()) {
+      setPickupResult({
+        success: false,
+        message: 'Enter and save your Delhivery API Token before scheduling a pickup.',
+      });
+      return;
+    }
+
+    setIsSchedulingPickup(true);
+    setPickupResult(null);
+
+    try {
+      const adminToken =
+        sessionStorage.getItem('redmode_admin_token') ||
+        localStorage.getItem('redmode_admin_token') ||
+        '';
+      const res = await fetch('/api/delhivery/schedule-pickup', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          pickupDate,
+          pickupTime,
+          expectedPackageCount: expectedPackages,
+          warehouseName: (currentChannel.warehouseName || 'REDMODE B2C').trim(),
+          apiToken: currentChannel.apiKey.trim(),
+          environment: currentChannel.environment || 'production',
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      setIsSchedulingPickup(false);
+      if (res.ok && data?.success) {
+        setPickupResult({
+          success: true,
+          message: data.message || `Pickup scheduled for ${pickupDate}!`,
+        });
+      } else {
+        setPickupResult({
+          success: false,
+          message: data?.message || `Pickup request failed (HTTP ${res.status}).`,
+        });
+      }
+    } catch (err: any) {
+      setIsSchedulingPickup(false);
+      setPickupResult({
+        success: false,
+        message: `Network error scheduling pickup: ${err?.message || 'Unable to reach server'}.`,
       });
     }
   };
@@ -722,6 +791,38 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
               >
                 <X className="w-3.5 h-3.5" />
               </button>
+            </div>
+          )}
+
+          {/* Delhivery B2C Setup Checklist */}
+          {currentChannel.provider === 'delhivery' && (
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs text-slate-700">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-slate-900">Delhivery One B2C Setup Checklist</span>
+                <a
+                  href="https://one.delhivery.com/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-700 hover:text-slate-950 underline"
+                >
+                  <span>Open Delhivery One</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
+              <ol className="list-decimal list-inside space-y-1 text-[11px] text-slate-600 leading-relaxed">
+                <li>
+                  In <strong>Delhivery One -&gt; Settings -&gt; API Setup</strong>, copy your <strong>API Token</strong> (use Sandbox token if testing in Staging mode, Live token for Production).
+                </li>
+                <li>
+                  Copy your exact <strong>Registered Warehouse / Pickup Location Name</strong> (case-sensitive, e.g. <code className="px-1 py-0.5 bg-white border border-slate-200 rounded">REDMODE B2C</code>) and <strong>Client Name</strong> from Delhivery One -&gt; Pickups / Warehouses.
+                </li>
+                <li>
+                  Click <strong>Test Connection</strong> to verify token authentication &amp; pincode serviceability, then click <strong>Save Changes</strong> and <strong>Activate</strong>.
+                </li>
+                <li>
+                  Once Active, clicking <strong>Accept -&gt; RTD</strong> or <strong>Dispatch</strong> manifests real official AWBs with Delhivery CMU API for 4x6 thermal labels.
+                </li>
+              </ol>
             </div>
           )}
 
@@ -1079,6 +1180,85 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
               <span>Save Changes</span>
             </button>
           </div>
+        </div>
+      )}
+
+      {/* 4. SCHEDULE DELHIVERY PICKUP SECTION */}
+      {currentChannel && currentChannel.provider === 'delhivery' && (
+        <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-900">Schedule Delhivery Pickup</h4>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Request a Delhivery rider pickup for manifested RTD parcels at warehouse <strong>{currentChannel.warehouseName || 'REDMODE B2C'}</strong>.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">Pickup Date</label>
+              <input
+                type="date"
+                value={pickupDate}
+                onChange={(e) => setPickupDate(e.target.value)}
+                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">Time Slot</label>
+              <select
+                value={pickupTime}
+                onChange={(e) => setPickupTime(e.target.value)}
+                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900"
+              >
+                <option value="11:00:00">Morning (11:00 AM - 02:00 PM)</option>
+                <option value="14:00:00">Afternoon (02:00 PM - 05:00 PM)</option>
+                <option value="16:00:00">Evening (04:00 PM - 07:00 PM)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">Expected Packages</label>
+              <input
+                type="number"
+                min={1}
+                max={500}
+                value={expectedPackages}
+                onChange={(e) => setExpectedPackages(Math.max(1, Number(e.target.value) || 1))}
+                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900"
+              />
+            </div>
+
+            <button
+              type="button"
+              onClick={handleSchedulePickup}
+              disabled={isSchedulingPickup}
+              className="px-4 py-2 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer disabled:opacity-50"
+            >
+              {isSchedulingPickup ? 'Requesting Pickup...' : 'Request Pickup Now'}
+            </button>
+          </div>
+
+          {pickupResult && (
+            <div
+              className={`p-3 rounded-lg text-xs flex items-start justify-between gap-2 ${
+                pickupResult.success
+                  ? 'bg-emerald-50 text-emerald-900 border border-emerald-200 font-medium'
+                  : 'bg-rose-50 text-rose-900 border border-rose-200 font-medium'
+              }`}
+            >
+              <span>{pickupResult.message}</span>
+              <button
+                type="button"
+                onClick={() => setPickupResult(null)}
+                className="text-slate-500 hover:text-slate-800 cursor-pointer shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
         </div>
       )}
 

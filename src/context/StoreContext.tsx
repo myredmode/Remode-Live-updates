@@ -5109,13 +5109,118 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
+  const manifestOrderOnDelhivery = (
+    targetOrder: Order,
+    activeChannel?: ShippingChannelConfig,
+    mode: 'Surface' | 'Express' = 'Surface'
+  ) => {
+    if (!targetOrder || !activeChannel || activeChannel.provider !== 'delhivery' || activeChannel.enabled === false) {
+      return;
+    }
+    const adminToken =
+      sessionStorage.getItem('redmode_admin_token') ||
+      localStorage.getItem('redmode_admin_token') ||
+      '';
+    const dCfg = settings.delhiverySettings;
+    fetch('/api/delhivery/create-shipment', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        order: targetOrder,
+        mode,
+        officialWaybill: false,
+        apiToken: activeChannel.apiKey || dCfg?.apiToken || '',
+        clientName: activeChannel.clientId || dCfg?.clientName || 'Redmode',
+        warehouseName: activeChannel.warehouseName || dCfg?.warehouseName || 'REDMODE B2C',
+        pickupPincode: activeChannel.pickupPincode || dCfg?.pickupPincode || '250002',
+        pickupAddress: activeChannel.pickupAddress || dCfg?.pickupAddress || '',
+        pickupPhone: activeChannel.pickupPhone || dCfg?.pickupPhone || '7302797464',
+        environment: activeChannel.environment || dCfg?.environment || 'production',
+      }),
+    })
+      .then(async (r) => {
+        const res = await r.json().catch(() => null);
+        return { ok: r.ok, res };
+      })
+      .then(({ ok, res }) => {
+        if (ok && res?.success && res.waybill && res.configured !== false) {
+          setOrders((prev) =>
+            prev.map((o) => {
+              if (o.id !== targetOrder.id) return o;
+              const synced: Order = {
+                ...o,
+                awb_number: res.waybill,
+                label_url_or_data: `/api/shipping/label/${encodeURIComponent(res.waybill)}`,
+                shipmozo: o.shipmozo
+                  ? {
+                      ...o.shipmozo,
+                      awb: res.waybill,
+                      trackingUrl: `https://www.delhivery.com/track/package/${res.waybill}`,
+                      history: [
+                        {
+                          status: 'Delhivery CMU Manifested',
+                          location: activeChannel.warehouseName || 'Delhivery Hub',
+                          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                          note: `Official Delhivery Waybill #${res.waybill} allocated via CMU API (${res.environment || 'production'}).`,
+                        },
+                        ...(o.shipmozo.history || []),
+                      ],
+                    }
+                  : undefined,
+              };
+              persistOrderUpdate(synced);
+              return synced;
+            })
+          );
+        } else if (res && res.configured !== false && (!ok || res.success === false)) {
+          const errMsg = res.message || 'Delhivery CMU rejected shipment manifestation.';
+          setOrders((prev) =>
+            prev.map((o) => {
+              if (o.id !== targetOrder.id || !o.shipmozo) return o;
+              const updatedErr: Order = {
+                ...o,
+                shipmozo: {
+                  ...o.shipmozo,
+                  history: [
+                    {
+                      status: 'Delhivery API Sync Attention',
+                      location: activeChannel.warehouseName || 'REDMODE Hub',
+                      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                      note: errMsg,
+                    },
+                    ...(o.shipmozo.history || []),
+                  ],
+                },
+              };
+              persistOrderUpdate(updatedErr);
+              return updatedErr;
+            })
+          );
+        }
+      })
+      .catch(() => {});
+  };
+
   const bulkAcceptOrdersToRTD = (orderIds: string[]): { successCount: number } => {
     if (!orderIds || !orderIds.length) return { successCount: 0 };
     const nowIso = new Date().toISOString();
     let count = 0;
 
-    const activeChannel = settings.shippingChannels?.find((c) => c.id === settings.activeShippingChannelId) || settings.shippingChannels?.[0];
-    const courierTitle = activeChannel?.name || 'Delhivery Surface Logistics';
+    const activeChannel = settings.activeShippingChannelId
+      ? settings.shippingChannels?.find(
+          (c) => c.id === settings.activeShippingChannelId && c.enabled !== false
+        )
+      : undefined;
+    const courierTitle =
+      activeChannel?.name ||
+      (activeChannel === undefined ? 'Manual Store Dispatch' : 'Delhivery Surface Logistics');
+    const dispatchMode: 'Surface' | 'Express' =
+      activeChannel?.shippingMode === 'Express' ? 'Express' : 'Surface';
+    const acceptedOrdersForApi: Order[] = [];
 
     setOrders((prev) =>
       prev.map((order) => {
@@ -5127,8 +5232,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           : `https://www.delhivery.com/track/package/${awbNumber}`;
 
         const originHub = (activeChannel?.warehouseName || settings.delhiverySettings?.warehouseName)
-          ? `${activeChannel?.warehouseName || settings.delhiverySettings?.warehouseName}, Meerut (${activeChannel?.pickupPincode || settings.delhiverySettings?.pickupPincode || '250002'})`
-          : 'REDMODE B2C, Meerut (250002)';
+          ? `${activeChannel?.warehouseName || settings.delhiverySettings?.warehouseName} (${activeChannel?.pickupPincode || settings.delhiverySettings?.pickupPincode || '250002'})`
+          : 'REDMODE B2C (250002)';
 
         const updatedOrder: Order = {
           ...order,
@@ -5150,15 +5255,22 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 status: 'RTD (Ready to Dispatch)',
                 location: originHub,
                 timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                note: `Order booked via active channel ${courierTitle}. AWB #${awbNumber} generated. Ready for pickup scan.`,
+                note: `Order accepted to RTD via ${courierTitle}. Manifesting shipment...`,
               },
             ],
           },
         };
+        acceptedOrdersForApi.push(updatedOrder);
         persistOrderUpdate(updatedOrder);
         return updatedOrder;
       })
     );
+
+    if (activeChannel?.provider === 'delhivery' && activeChannel.enabled !== false) {
+      acceptedOrdersForApi.forEach((ord) => {
+        manifestOrderOnDelhivery(ord, activeChannel, dispatchMode);
+      });
+    }
 
     addAuditLog(`Bulk accepted ${count} orders to RTD via active courier ${courierTitle}`, 'Order', orderIds.join(', '));
     orderIds.forEach((oid) => {
@@ -6180,49 +6292,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     // Invoke server-side Delhivery CMU shipment creation endpoint ONLY when Delhivery is the active enabled courier
     if (targetOrderRef && activeChannel && activeChannel.provider === 'delhivery' && activeChannel.enabled !== false) {
-      const adminToken =
-        sessionStorage.getItem('redmode_admin_token') ||
-        localStorage.getItem('redmode_admin_token') ||
-        '';
-      fetch('/api/delhivery/create-shipment', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
-        },
-        credentials: 'include',
-        body: JSON.stringify({
-          order: targetOrderRef,
-          mode,
-          apiToken: activeChannel?.apiKey || settings.delhiverySettings?.apiToken || '',
-          warehouseName: activeChannel?.warehouseName || settings.delhiverySettings?.warehouseName || 'REDMODE B2C',
-          pickupPincode: activeChannel?.pickupPincode || settings.delhiverySettings?.pickupPincode || '250002',
-        }),
-      })
-        .then((r) => r.json())
-        .then((res) => {
-          if (res?.success && res.waybill && res.waybill !== awbNumber) {
-            setOrders((prev) =>
-              prev.map((o) => {
-                if (o.id !== orderId) return o;
-                const synced: Order = {
-                  ...o,
-                  awb_number: res.waybill,
-                  shipmozo: o.shipmozo
-                    ? {
-                        ...o.shipmozo,
-                        awb: res.waybill,
-                        trackingUrl: `https://www.delhivery.com/track/package/${res.waybill}`,
-                      }
-                    : undefined,
-                };
-                persistOrderUpdate(synced);
-                return synced;
-              })
-            );
-          }
-        })
-        .catch(() => {});
+      manifestOrderOnDelhivery(targetOrderRef, activeChannel, mode);
     }
 
     return {

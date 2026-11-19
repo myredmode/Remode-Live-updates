@@ -558,10 +558,35 @@ export default async function handler(req, res) {
     }
   }
 
+  // In-memory serverless webhook log ring buffer (mirrors server.ts webhook-logs schema)
+  const gatewayWebhookLogs = globalThis.__redmodeWebhookLogs || (globalThis.__redmodeWebhookLogs = []);
+  const recordGatewayWebhookLog = (entry) => {
+    const item = {
+      id: `wh_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: new Date().toISOString(),
+      ...entry,
+    };
+    gatewayWebhookLogs.unshift(item);
+    if (gatewayWebhookLogs.length > 150) gatewayWebhookLogs.length = 150;
+    return item;
+  };
+
   if (pathStr === 'payment/razorpay/webhook' && req.method === 'POST') {
     const webhookSecret = (process.env.RAZORPAY_WEBHOOK_SECRET || '').trim();
     const signature = req.headers['x-razorpay-signature'];
+    const eventName = body?.event || 'razorpay.event';
+    const orderRef = body?.payload?.payment?.entity?.order_id || body?.payload?.payment?.entity?.id || '';
     if (!webhookSecret || !signature) {
+      recordGatewayWebhookLog({
+        source: 'Razorpay',
+        endpoint: '/api/payment/razorpay/webhook',
+        eventType: eventName,
+        referenceId: orderRef,
+        httpStatus: 400,
+        verified: false,
+        summary: 'Missing Razorpay webhook secret or signature header.',
+        payload: body || {},
+      });
       return res.status(400).json({
         success: false,
         message: 'Missing Razorpay webhook secret or signature header.',
@@ -572,11 +597,32 @@ export default async function handler(req, res) {
     const expectedSig = crypto.createHmac('sha256', webhookSecret).update(rawPayload).digest('hex');
 
     if (expectedSig !== signature) {
+      recordGatewayWebhookLog({
+        source: 'Razorpay',
+        endpoint: '/api/payment/razorpay/webhook',
+        eventType: eventName,
+        referenceId: orderRef,
+        httpStatus: 401,
+        verified: false,
+        summary: 'Invalid Razorpay webhook signature.',
+        payload: body || {},
+      });
       return res.status(401).json({
         success: false,
         message: 'Invalid Razorpay webhook signature.',
       });
     }
+
+    recordGatewayWebhookLog({
+      source: 'Razorpay',
+      endpoint: '/api/payment/razorpay/webhook',
+      eventType: eventName,
+      referenceId: orderRef,
+      httpStatus: 200,
+      verified: true,
+      summary: `Verified Razorpay webhook event "${eventName}".`,
+      payload: body || {},
+    });
 
     return res.status(200).json({
       success: true,
@@ -584,6 +630,68 @@ export default async function handler(req, res) {
       orderId: body?.payload?.payment?.entity?.order_id || null,
       paymentId: body?.payload?.payment?.entity?.id || null,
     });
+  }
+
+  if ((pathStr === 'payment/webhook' || pathStr === 'payment/paypal/webhook') && req.method === 'POST') {
+    const eventType = String(body.event_type || body.event || '').trim();
+    const resource = body.resource || {};
+    const refId = String(resource?.supplementary_data?.related_ids?.order_id || resource?.id || body?.id || '').trim();
+    if (!eventType) {
+      recordGatewayWebhookLog({
+        source: 'PayPal',
+        endpoint: `/api/${pathStr}`,
+        eventType: 'UNKNOWN',
+        referenceId: '',
+        httpStatus: 400,
+        verified: false,
+        summary: 'Missing event_type in PayPal webhook payload.',
+        payload: body,
+      });
+      return res.status(400).json({ success: false, message: 'Missing event_type in webhook payload.' });
+    }
+    recordGatewayWebhookLog({
+      source: 'PayPal',
+      endpoint: `/api/${pathStr}`,
+      eventType,
+      referenceId: refId,
+      httpStatus: 200,
+      verified: true,
+      summary: body.summary || `PayPal webhook "${eventType}" received.`,
+      payload: body,
+    });
+    return res.status(200).json({ success: true, source: 'PayPal', event: eventType, referenceId: refId });
+  }
+
+  if (pathStr === 'admin/webhook-logs') {
+    if (!requireAdminRole(['Super Admin'])) return;
+    if (req.method === 'DELETE') {
+      gatewayWebhookLogs.length = 0;
+      return res.status(200).json({ success: true, message: 'Webhook logs cleared.' });
+    }
+    const sourceFilter = String(req.query.source || 'All').trim();
+    const logs =
+      sourceFilter && sourceFilter !== 'All'
+        ? gatewayWebhookLogs.filter((l) => l.source.toLowerCase() === sourceFilter.toLowerCase())
+        : gatewayWebhookLogs;
+    return res.status(200).json({ success: true, logs });
+  }
+
+  if (pathStr === 'admin/webhook-logs/test' && req.method === 'POST') {
+    if (!requireAdminRole(['Super Admin'])) return;
+    const source = body?.source === 'PayPal' ? 'PayPal' : 'Delhivery';
+    const ref = source === 'PayPal' ? `PAYPAL_TEST_${Date.now()}` : `TEST${Math.floor(10000000 + Math.random() * 89999999)}`;
+    const log = recordGatewayWebhookLog({
+      source,
+      endpoint: source === 'PayPal' ? '/api/payment/webhook' : '/api/shipping/webhook',
+      eventType: source === 'PayPal' ? 'PAYMENT.CAPTURE.COMPLETED' : 'In Transit',
+      referenceId: ref,
+      httpStatus: 200,
+      verified: true,
+      isTest: true,
+      summary: `Simulated ${source} webhook event recorded.`,
+      payload: { simulated: true, source, referenceId: ref },
+    });
+    return res.status(200).json({ success: true, log });
   }
 
   if (pathStr === 'payment/razorpay/test-keys' && req.method === 'POST') {
@@ -1017,37 +1125,49 @@ export default async function handler(req, res) {
     if (!requireAdminRole(['Super Admin'])) return;
     const token = (req.query.token || body.token || process.env.DELHIVERY_API_TOKEN || '').trim();
     const pincode = String(req.query.pincode || body.pincode || '250002').replace(/\D/g, '') || '250002';
+    const isStaging = String(req.query.environment || body.environment || 'production').toLowerCase() === 'staging';
+    const baseHost = isStaging ? 'https://staging-express.delhivery.com' : 'https://track.delhivery.com';
 
     if (!token) {
       return res.status(400).json({
         success: false,
-        message: 'Delhivery API Token is not configured. Set DELHIVERY_API_TOKEN in Vercel Environment Variables.',
+        message: 'Delhivery API Token is not configured. Set DELHIVERY_API_TOKEN or enter token in Couriers & Logistics.',
       });
     }
 
     try {
-      const response = await fetch(
-        `https://track.delhivery.com/c/api/pin-codes/json/?filter_codes=${encodeURIComponent(pincode)}`,
-        {
-          headers: { Authorization: `Token ${token}`, 'Content-Type': 'application/json' },
-        }
-      );
+      const [response, kinkoRes] = await Promise.all([
+        fetch(`${baseHost}/c/api/pin-codes/json/?filter_codes=${encodeURIComponent(pincode)}`, {
+          headers: { Authorization: `Token ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' },
+        }),
+        fetch(
+          `${baseHost}/api/kinko/v1/invoice/charges/.json?md=S&ss=DTO&d_pin=${encodeURIComponent(pincode)}&o_pin=${encodeURIComponent(pincode)}&cgm=500`,
+          { headers: { Authorization: `Token ${token}`, Accept: 'application/json' } }
+        ).catch(() => null),
+      ]);
       if (!response.ok) {
         return res.status(response.status).json({
           success: false,
           message: `Delhivery API returned status ${response.status}`,
         });
       }
+      if (kinkoRes && (kinkoRes.status === 401 || kinkoRes.status === 403)) {
+        return res.status(kinkoRes.status).json({
+          success: false,
+          message: `Delhivery API Token rejected by ${baseHost} (HTTP ${kinkoRes.status}). Verify your ${isStaging ? 'Staging' : 'Production'} API Token.`,
+        });
+      }
       const data = await response.json().catch(() => ({}));
       const postalInfo = data?.delivery_codes?.[0]?.postal_code;
       return res.status(200).json({
         success: true,
+        environment: isStaging ? 'Staging' : 'Production',
         district: postalInfo?.district || 'Meerut',
         state: postalInfo?.state_code || 'UP',
         prepaid: postalInfo?.pre_paid === 'Y',
         cod: postalInfo?.cod === 'Y',
         pickup: postalInfo?.pickup === 'Y',
-        message: 'Connected to Delhivery API successfully.',
+        message: `Connected to Delhivery ${isStaging ? 'Staging' : 'Production'} API successfully!`,
       });
     } catch (err) {
       return res.status(500).json({ success: false, message: err.message });
@@ -1057,6 +1177,8 @@ export default async function handler(req, res) {
   if (pathStr === 'delhivery/fetch-waybill' && req.method === 'POST') {
     const token = (body.token || process.env.DELHIVERY_API_TOKEN || '').trim();
     const client = (body.client || process.env.DELHIVERY_CLIENT_NAME || 'Redmode').trim();
+    const isStaging = String(body.environment || 'production').toLowerCase() === 'staging';
+    const baseHost = isStaging ? 'https://staging-express.delhivery.com' : 'https://track.delhivery.com';
 
     if (!token) {
       return res.status(503).json({
@@ -1068,7 +1190,7 @@ export default async function handler(req, res) {
 
     try {
       const response = await fetch(
-        `https://track.delhivery.com/waybill/api/bulk/json/?count=1&client=${encodeURIComponent(client)}`,
+        `${baseHost}/waybill/api/bulk/json/?count=1&client=${encodeURIComponent(client)}`,
         {
           headers: { Authorization: `Token ${token}`, 'Content-Type': 'application/json' },
         }
@@ -1226,23 +1348,50 @@ export default async function handler(req, res) {
   }
 
   if (pathStr === 'shipping/webhook' && req.method === 'POST') {
-    const { awb, waybill, tracking_number, status = 'In Transit', location = 'Hub Scan', courier = 'Courier' } = body;
-    const finalAwb = String(awb || waybill || tracking_number || '').trim();
+    const nestedShipment = body.Shipment || body.shipment || null;
+    const nestedStatus = nestedShipment?.Status || nestedShipment?.status || null;
+    const { awb, waybill, tracking_number, status, location, courier } = body;
+    const finalAwb = String(
+      awb || waybill || tracking_number || nestedShipment?.AWB || nestedShipment?.awb || nestedShipment?.waybill || ''
+    ).trim();
+    const finalStatus = String(status || nestedStatus?.Status || nestedStatus?.status || 'In Transit').trim();
+    const finalLocation = String(location || nestedStatus?.StatusLocation || nestedStatus?.ScannedLocation || 'Hub Scan').trim();
+    const finalCourier = String(courier || (nestedShipment ? 'Delhivery' : 'Courier')).trim();
     if (!finalAwb) {
+      recordGatewayWebhookLog({
+        source: 'Delhivery',
+        endpoint: '/api/shipping/webhook',
+        eventType: finalStatus || 'MISSING_AWB',
+        referenceId: '',
+        httpStatus: 400,
+        verified: false,
+        summary: 'Rejected shipping webhook: AWB / Waybill number missing in payload.',
+        payload: body,
+      });
       return res.status(400).json({ success: false, message: 'AWB / Waybill number is required.' });
     }
     const timestamp = new Date().toLocaleString('en-IN');
     delhiveryScannedWaybills[finalAwb] = {
-      status,
-      location,
+      status: finalStatus,
+      location: finalLocation,
       timestamp,
-      note: `Webhook scan received from ${courier}`,
+      note: nestedStatus?.Instructions || `Webhook scan received from ${finalCourier}`,
     };
+    recordGatewayWebhookLog({
+      source: 'Delhivery',
+      endpoint: '/api/shipping/webhook',
+      eventType: finalStatus,
+      referenceId: finalAwb,
+      httpStatus: 200,
+      verified: true,
+      summary: `${finalCourier}: AWB #${finalAwb} updated to "${finalStatus}" at ${finalLocation}.`,
+      payload: body,
+    });
     return res.status(200).json({
       success: true,
       awb: finalAwb,
-      status,
-      message: `Webhook recorded status "${status}" for AWB #${finalAwb}`,
+      status: finalStatus,
+      message: `Webhook recorded status "${finalStatus}" for AWB #${finalAwb}`,
     });
   }
 
@@ -1264,14 +1413,27 @@ export default async function handler(req, res) {
     }
     if (provider === 'delhivery') {
       const cleanPin = String(pincode).replace(/\D/g, '') || '250002';
-      const baseHost = environment === 'staging' ? 'https://staging-express.delhivery.com' : 'https://track.delhivery.com';
-      const response = await fetch(`${baseHost}/c/api/pin-codes/json/?filter_codes=${cleanPin}`, {
-        headers: { Authorization: `Token ${token}`, Accept: 'application/json' },
-      });
+      const isStaging = environment === 'staging';
+      const baseHost = isStaging ? 'https://staging-express.delhivery.com' : 'https://track.delhivery.com';
+      const [response, kinkoRes] = await Promise.all([
+        fetch(`${baseHost}/c/api/pin-codes/json/?filter_codes=${cleanPin}`, {
+          headers: { Authorization: `Token ${token}`, Accept: 'application/json' },
+        }),
+        fetch(
+          `${baseHost}/api/kinko/v1/invoice/charges/.json?md=S&ss=DTO&d_pin=${cleanPin}&o_pin=${cleanPin}&cgm=500`,
+          { headers: { Authorization: `Token ${token}`, Accept: 'application/json' } }
+        ).catch(() => null),
+      ]);
       if (!response.ok) {
         return res.status(response.status).json({
           success: false,
           message: `Delhivery API returned HTTP ${response.status}. Check API Token.`,
+        });
+      }
+      if (kinkoRes && (kinkoRes.status === 401 || kinkoRes.status === 403)) {
+        return res.status(kinkoRes.status).json({
+          success: false,
+          message: `Delhivery API Token rejected by ${baseHost} (HTTP ${kinkoRes.status}). Make sure the token matches ${isStaging ? 'Staging' : 'Production'}.`,
         });
       }
       const data = await response.json().catch(() => ({}));
@@ -1282,14 +1444,18 @@ export default async function handler(req, res) {
           message: `No serviceability record returned for Pincode ${cleanPin}.`,
         });
       }
+      const kinkoData = kinkoRes && kinkoRes.ok ? await kinkoRes.json().catch(() => null) : null;
+      const rateAmt = Array.isArray(kinkoData) && kinkoData[0]?.total_amount ? kinkoData[0].total_amount : null;
       return res.status(200).json({
         success: true,
+        environment: isStaging ? 'Staging' : 'Production',
         district: postalInfo.district || 'Meerut',
         state: postalInfo.state_code || 'UP',
         pickup: postalInfo.pickup === 'Y',
         cod: postalInfo.cod === 'Y',
         prepaid: postalInfo.pre_paid === 'Y',
-        message: `Delhivery Direct API Connected! Warehouse "${warehouseName}" verified.`,
+        sampleCharge: rateAmt,
+        message: `Delhivery Direct API (${isStaging ? 'Staging' : 'Production'}) Authenticated! Warehouse "${warehouseName}" verified at ${cleanPin}${rateAmt ? ` (500g Est: ₹${rateAmt})` : ''}.`,
       });
     }
     if (provider === 'shiprocket') {
@@ -1340,6 +1506,8 @@ export default async function handler(req, res) {
   if (pathStr.startsWith('delhivery/track/')) {
     const awb = pathStr.replace('delhivery/track/', '').trim();
     const token = (req.query.token || process.env.DELHIVERY_API_TOKEN || '').trim();
+    const isStaging = String(req.query.environment || 'production').toLowerCase() === 'staging';
+    const baseHost = isStaging ? 'https://staging-express.delhivery.com' : 'https://track.delhivery.com';
     if (!awb) return res.status(400).json({ success: false, message: 'AWB required' });
 
     const localScan = delhiveryScannedWaybills[awb];
@@ -1370,7 +1538,7 @@ export default async function handler(req, res) {
 
     try {
       const response = await fetch(
-        `https://track.delhivery.com/api/v1/packages/json/?waybill=${encodeURIComponent(awb)}&token=${token}`
+        `${baseHost}/api/v1/packages/json/?waybill=${encodeURIComponent(awb)}&token=${token}`
       );
       const data = await response.json().catch(() => ({}));
       const shipment = data?.ShipmentData?.[0]?.Shipment;
@@ -1553,8 +1721,13 @@ export default async function handler(req, res) {
       order,
       mode = 'Surface',
       apiToken: bodyToken,
+      clientName = 'Redmode',
       warehouseName = 'REDMODE B2C',
       pickupPincode = '250002',
+      pickupAddress = '1807 Zakir Hussain Colony, Meerut, Uttar Pradesh',
+      pickupPhone = '7302797464',
+      environment = 'production',
+      officialWaybill = false,
     } = body;
     if (!order || !order.id) {
       return res.status(400).json({ success: false, message: 'Order payload is required.' });
@@ -1568,6 +1741,10 @@ export default async function handler(req, res) {
         message: 'Delhivery API Token not set on server; local AWB manifest retained.',
       });
     }
+    const isStaging = String(environment).toLowerCase() === 'staging';
+    const baseHost = isStaging ? 'https://staging-express.delhivery.com' : 'https://track.delhivery.com';
+    const cleanReturnPin = String(pickupPincode).replace(/\D/g, '').slice(0, 6) || '250002';
+    const cleanReturnPhone = String(pickupPhone).replace(/\D/g, '').slice(-10) || '7302797464';
     try {
       const cust = order.customer || {};
       const isCod = (order.paymentMode || '').toUpperCase() === 'COD';
@@ -1576,17 +1753,17 @@ export default async function handler(req, res) {
           {
             name: cust.name || 'Customer',
             add: [cust.house, cust.street, cust.landmark].filter(Boolean).join(', ') || 'Delivery Address',
-            pin: String(cust.pincode || '250002').replace(/\D/g, ''),
+            pin: String(cust.pincode || '250002').replace(/\D/g, '').slice(0, 6),
             city: cust.city || 'Meerut',
             state: cust.state || 'Uttar Pradesh',
             country: cust.country || 'India',
-            phone: String(cust.mobile || cust.phone || '').replace(/\D/g, '').slice(-10),
+            phone: String(cust.mobile || cust.phone || '').replace(/\D/g, '').slice(-10) || cleanReturnPhone,
             order: String(order.id).replace('#', ''),
             payment_mode: isCod ? 'COD' : 'Prepaid',
-            return_pin: String(pickupPincode).replace(/\D/g, '') || '250002',
+            return_pin: cleanReturnPin,
             return_city: 'Meerut',
-            return_phone: '7302797464',
-            return_add: '1807 Zakir Hussain Colony, Meerut, Uttar Pradesh',
+            return_phone: cleanReturnPhone,
+            return_add: pickupAddress,
             return_state: 'Uttar Pradesh',
             return_country: 'India',
             products_desc: (order.items || []).map((i) => `${i.name} (${i.size || 'Free'})`).join(', ') || 'Apparel',
@@ -1594,11 +1771,11 @@ export default async function handler(req, res) {
             cod_amount: isCod ? Number(order.total) || 0 : 0,
             order_date: order.createdAt || new Date().toISOString(),
             total_amount: Number(order.total) || 0,
-            seller_add: '1807 Zakir Hussain Colony, Meerut, Uttar Pradesh',
-            seller_name: 'REDMODE',
-            seller_inv: `RM-INV-${String(order.id).replace(/\D/g, '')}`,
+            seller_add: pickupAddress,
+            seller_name: clientName || 'REDMODE',
+            seller_inv: `RM-INV-${String(order.id).replace(/[^A-Za-z0-9]/g, '')}`,
             quantity: String((order.items || []).reduce((acc, it) => acc + (Number(it.quantity) || 1), 0)),
-            waybill: order.awb_number || '',
+            waybill: officialWaybill && order.awb_number ? String(order.awb_number) : '',
             shipment_width: String(order.final_package_width || 24),
             shipment_height: String(order.final_package_height || 4),
             weight: String(Math.round((Number(order.final_package_weight) || 0.35) * 1000)),
@@ -1608,15 +1785,15 @@ export default async function handler(req, res) {
         ],
         pickup_location: {
           name: warehouseName,
-          add: '1807 Zakir Hussain Colony',
+          add: pickupAddress,
           city: 'Meerut',
-          pin_code: Number(pickupPincode) || 250002,
+          pin_code: Number(cleanReturnPin) || 250002,
           country: 'India',
-          phone: '7302797464',
+          phone: cleanReturnPhone,
         },
       };
       const formBody = `format=json&data=${encodeURIComponent(JSON.stringify(shipmentPayload))}`;
-      const cmuRes = await fetch('https://track.delhivery.com/api/cmu/create.json', {
+      const cmuRes = await fetch(`${baseHost}/api/cmu/create.json`, {
         method: 'POST',
         headers: {
           Authorization: `Token ${token}`,
@@ -1627,20 +1804,93 @@ export default async function handler(req, res) {
       });
       const cmuData = await cmuRes.json().catch(() => ({}));
       const pkg = cmuData?.packages?.[0];
-      if (cmuRes.ok && pkg?.waybill) {
+      const pkgFailed = pkg?.status && String(pkg.status).toLowerCase() === 'fail';
+      if (cmuRes.ok && cmuData?.success !== false && pkg?.waybill && !pkgFailed) {
         return res.status(200).json({
           success: true,
           configured: true,
+          environment: isStaging ? 'staging' : 'production',
           waybill: pkg.waybill,
           status: pkg.status || 'Manifested',
           refnum: pkg.refnum,
         });
       }
-      return res.status(200).json({
-        success: true,
+      const errorReason =
+        (Array.isArray(pkg?.remarks) ? pkg.remarks.join('; ') : pkg?.remarks) ||
+        cmuData?.rmk ||
+        cmuData?.error ||
+        cmuData?.Error ||
+        (cmuData?.package_count === 0 ? 'Warehouse/Pickup Location name may not match Delhivery One exactly.' : '') ||
+        `Delhivery CMU API rejected shipment (HTTP ${cmuRes.status}).`;
+      return res.status(cmuRes.status >= 400 ? cmuRes.status : 400).json({
+        success: false,
         configured: true,
-        waybill: order.awb_number || null,
+        environment: isStaging ? 'staging' : 'production',
         delhiveryResponse: cmuData,
+        message: errorReason,
+      });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  if (pathStr === 'delhivery/schedule-pickup' && req.method === 'POST') {
+    if (!requireAdminRole(['Super Admin', 'Listing + Label Admin', 'Label Admin'])) return;
+    const {
+      pickupDate,
+      pickupTime = '14:00:00',
+      expectedPackageCount = 1,
+      warehouseName = 'REDMODE B2C',
+      apiToken: bodyToken,
+      environment = 'production',
+    } = body;
+    const token = (bodyToken || process.env.DELHIVERY_API_TOKEN || '').trim();
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: 'Delhivery API Token is required to schedule a courier pickup.',
+      });
+    }
+    const isStaging = String(environment).toLowerCase() === 'staging';
+    const baseHost = isStaging ? 'https://staging-express.delhivery.com' : 'https://track.delhivery.com';
+    const targetDate = pickupDate || new Date().toISOString().split('T')[0];
+    const pkgCount = Math.max(1, Number(expectedPackageCount) || 1);
+    try {
+      const pickupRes = await fetch(`${baseHost}/fm/request/new/`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Token ${token}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          pickup_time: pickupTime,
+          pickup_date: targetDate,
+          pickup_location: warehouseName,
+          expected_package_count: pkgCount,
+        }),
+      });
+      const data = await pickupRes.json().catch(() => ({}));
+      if (pickupRes.ok && (data?.pickup_id || data?.incoming_center_name || data?.pickup_date)) {
+        return res.status(200).json({
+          success: true,
+          environment: isStaging ? 'staging' : 'production',
+          pickupId: data.pickup_id || null,
+          incomingCenter: data.incoming_center_name || null,
+          pickupDate: data.pickup_date || targetDate,
+          pickupTime: data.pickup_time || pickupTime,
+          expectedPackageCount: pkgCount,
+          message: `Delhivery Pickup Scheduled (#${data.pickup_id || 'Confirmed'}) for ${data.pickup_date || targetDate} at "${warehouseName}".`,
+        });
+      }
+      return res.status(pickupRes.status >= 400 ? pickupRes.status : 400).json({
+        success: false,
+        delhiveryResponse: data,
+        message:
+          data?.data?.message ||
+          data?.error?.message ||
+          data?.message ||
+          `Delhivery rejected pickup request (HTTP ${pickupRes.status}).`,
       });
     } catch (err) {
       return res.status(500).json({ success: false, message: err.message });

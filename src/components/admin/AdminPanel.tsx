@@ -11,6 +11,7 @@ import { UniversalLogisticsPanel } from './UniversalLogisticsPanel';
 import { UniversalPaymentPanel } from './UniversalPaymentPanel';
 import { WhatsAppIntegrationPanel } from './WhatsAppIntegrationPanel';
 import { SmsIntegrationPanel } from './SmsIntegrationPanel';
+import { WebhookLogsPanel } from './WebhookLogsPanel';
 import { AdminSettingsView } from './AdminSettingsView';
 import { CustomDomainManager } from './CustomDomainManager';
 import { AnnouncementBarManager } from './AnnouncementBarManager';
@@ -629,7 +630,7 @@ export const AdminPanel: React.FC = () => {
   } | null>(null);
 
   // Integrations Sub-Tab (Courier Channels vs Payment Gateways vs WhatsApp API vs SMS/OTP)
-  const [integrationSubTab, setIntegrationSubTab] = useState<'couriers' | 'payments' | 'whatsapp' | 'sms'>('couriers');
+  const [integrationSubTab, setIntegrationSubTab] = useState<'couriers' | 'payments' | 'whatsapp' | 'sms' | 'webhooks'>('couriers');
   const [settingsSaveSuccess, setSettingsSaveSuccess] = useState<string | null>(null);
 
   // Order counts by status (Upcoming -> Confirmed -> RTD -> Shipped -> Delivered)
@@ -1839,6 +1840,21 @@ export const AdminPanel: React.FC = () => {
                         >
                           <Smartphone className="w-4 h-4 shrink-0 text-slate-900" />
                           {!sidebarCollapsed && <span>SMS &amp; OTP Service</span>}
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            setActiveTab('integrations');
+                            setIntegrationSubTab('webhooks');
+                          }}
+                          className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
+                            activeTab === 'integrations' && integrationSubTab === 'webhooks'
+                              ? 'bg-slate-100 text-slate-900 font-bold'
+                              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                          }`}
+                        >
+                          <Radio className="w-4 h-4 shrink-0 text-slate-900" />
+                          {!sidebarCollapsed && <span>Webhook Logs</span>}
                         </button>
                       </>
                     )}
@@ -4480,6 +4496,8 @@ export const AdminPanel: React.FC = () => {
                       ? 'Courier Channels'
                       : integrationSubTab === 'sms'
                       ? 'SMS & OTP Service Integrations'
+                      : integrationSubTab === 'webhooks'
+                      ? 'Incoming Webhook Logs'
                       : 'Meta WhatsApp'}
                   </h2>
                   <p className="text-xs text-slate-500 mt-0.5">
@@ -4489,6 +4507,8 @@ export const AdminPanel: React.FC = () => {
                       ? 'Connect and manage external logistics couriers for order shipping and delivery.'
                       : integrationSubTab === 'sms'
                       ? 'Configure 2Factor.in SMS and Meta WhatsApp Cloud OTP gateways for logins and COD verification.'
+                      : integrationSubTab === 'webhooks'
+                      ? 'Inspect real-time incoming callbacks from Delhivery and PayPal for live verification and debugging.'
                       : 'Connect and manage WhatsApp Business messaging API for automated customer alerts.'}
                   </p>
                 </div>
@@ -4535,6 +4555,13 @@ export const AdminPanel: React.FC = () => {
               {/* SUB-PANEL 4: SMS & TRANSACTIONAL OTP GATEWAYS */}
               {integrationSubTab === 'sms' && (
                 <SmsIntegrationPanel
+                  onSaveNotification={(msg) => setSettingsSaveSuccess(msg)}
+                />
+              )}
+
+              {/* SUB-PANEL 5: REAL-TIME WEBHOOK LOGS VIEWER */}
+              {integrationSubTab === 'webhooks' && (
+                <WebhookLogsPanel
                   onSaveNotification={(msg) => setSettingsSaveSuccess(msg)}
                 />
               )}
