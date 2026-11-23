@@ -1,0 +1,13 @@
+{
+  "name": "redmode-whatsapp-webhook",
+  "version": "2.0.0",
+  "description": "REDMODE Meta WhatsApp Cloud API Webhook Relay Service (Render)",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

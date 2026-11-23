@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { Order } from '../../types';
-import { Printer, X, FileText, Tag, Check, ArrowDownToLine } from 'lucide-react';
+import { Printer, X, FileText, Tag, ArrowDownToLine, AlertTriangle, Loader2 } from 'lucide-react';
+import { useStore } from '../../context/StoreContext';
+import { generateCode128Svg, getOrderAwbNumber, hasRealDelhiveryAwb } from '../../utils/barcode128';
 
 interface OrderPrintModalProps {
   order: Order | null;
@@ -8,7 +10,7 @@ interface OrderPrintModalProps {
   isOpen: boolean;
   onClose: () => void;
   initialTab?: 'invoice' | 'label' | 'both';
-  onLabelDownloaded?: (orderId: string) => void;
+  onLabelDownloaded?: (orderId: string, transitionedToRtd?: boolean) => void;
 }
 
 function numberToWordsIndian(num: number): string {
@@ -63,374 +65,78 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
   initialTab = 'invoice',
   onLabelDownloaded,
 }) => {
+  const { downloadShippingLabelForOrder } = useStore();
   const [activeTab, setActiveTab] = useState<'invoice' | 'label' | 'both'>(initialTab);
-  const [hasDispatchedTracking, setHasDispatchedTracking] = useState(false);
+  const [downloadedSuccess, setDownloadedSuccess] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadFeedback, setDownloadFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Sync activeTab when initialTab changes while opening
   React.useEffect(() => {
     if (isOpen && initialTab) {
       setActiveTab(initialTab);
+      setDownloadFeedback(null);
+      setDownloadedSuccess(false);
     }
-  }, [isOpen, initialTab]);
+  }, [isOpen, initialTab, order?.id]);
 
   const activeOrders = orders && orders.length > 0 ? orders : (order ? [order] : []);
   if (!isOpen || activeOrders.length === 0) return null;
   const targetOrder = activeOrders[0];
+  const eligibleLabelOrders = activeOrders.filter((o) => hasRealDelhiveryAwb(o));
+  const hasAnyRealAwb = eligibleLabelOrders.length > 0;
 
+  // CRITICAL: Preview or browser print dialog MUST NOT automatically trigger RTD.
+  // RTD is triggered strictly after an actual successful shipping label download action.
   const handlePrint = () => {
-    if (activeTab === 'label' || activeTab === 'both') {
-      activeOrders.forEach((o) => onLabelDownloaded?.(o.id));
-      setHasDispatchedTracking(true);
-    }
     window.print();
   };
 
-  const handleDownloadLabelFile = () => {
-    activeOrders.forEach((o) => onLabelDownloaded?.(o.id));
-    setHasDispatchedTracking(true);
-    const origin = window.location.origin;
-    const logoIconUrl = `${origin}/assets/aistudio/1_fdd0186c.jpg`;
-    const logoFullUrl = `${origin}/assets/aistudio/2_cc1df8cf.jpg`;
+  const handleDownloadLabelFile = async () => {
+    if (!hasAnyRealAwb) {
+      setDownloadFeedback({
+        type: 'error',
+        message: 'Real Delhivery AWB is not available yet. Generate the Delhivery AWB first — order remains Confirmed.',
+      });
+      return;
+    }
 
-    const labelsHtml = activeOrders
-      .map((ord) => {
-        const anyOrd = ord as any;
-        const ordNo = `#${ord.id.replace(/-/g, '').slice(-8).toUpperCase()}`;
-        const ordDate = new Date(ord.createdAt || Date.now()).toLocaleDateString('en-IN', {
-          day: '2-digit',
-          month: 'short',
-          year: 'numeric',
+    setIsDownloading(true);
+    setDownloadFeedback(null);
+    let successCount = 0;
+    let movedToRtdCount = 0;
+    let lastError = '';
+
+    try {
+      for (const ord of eligibleLabelOrders) {
+        const res = await downloadShippingLabelForOrder(ord.id);
+        if (res.success) {
+          successCount++;
+          if (res.transitionedToRtd) movedToRtdCount++;
+          onLabelDownloaded?.(ord.id, res.transitionedToRtd);
+        } else {
+          lastError = res.message;
+        }
+      }
+
+      if (successCount > 0) {
+        setDownloadedSuccess(true);
+        setDownloadFeedback({
+          type: 'success',
+          message:
+            movedToRtdCount > 0
+              ? `Downloaded ${successCount} shipping label(s). ${movedToRtdCount} Confirmed order(s) moved to RTD.`
+              : `Downloaded ${successCount} shipping label(s) successfully.`,
         });
-        const awb =
-          ord.shipmozo?.awb ||
-          anyOrd.shipment?.awb ||
-          ord.awb_number ||
-          `RM${ord.id.replace(/[^a-zA-Z0-9]/g, '').slice(-8).toUpperCase()}IN`;
-        const payStr = String(ord.paymentMode || anyOrd.paymentMethod || '');
-        const cod =
-          payStr.toLowerCase().includes('cod') ||
-          payStr.toLowerCase().includes('cash');
-        const cName = ord.customer?.name || anyOrd.shippingAddress?.name || 'Valued Customer';
-        const cMobile =
-          ord.customer?.phone ||
-          (ord.customer as any)?.mobile ||
-          anyOrd.shippingAddress?.mobile ||
-          anyOrd.shippingAddress?.phone ||
-          '+91 98765 43210';
-        const addrLine =
-          [
-            ord.customer?.house,
-            ord.customer?.address || ord.customer?.street,
-            ord.customer?.landmark,
-            anyOrd.shippingAddress?.house,
-            anyOrd.shippingAddress?.address || anyOrd.shippingAddress?.street,
-            anyOrd.shippingAddress?.landmark,
-          ]
-            .filter(Boolean)
-            .join(', ') || '14/2 MG Road, Civil Lines';
-        const cCity = ord.customer?.city || anyOrd.shippingAddress?.city || 'New Delhi';
-        const cState = ord.customer?.state || anyOrd.shippingAddress?.state || 'Delhi';
-        const cPin = ord.customer?.pincode || anyOrd.shippingAddress?.pincode || '110001';
-        const ordItems =
-          ord.items && ord.items.length > 0
-            ? ord.items
-            : [
-                {
-                  productId: 'p-1',
-                  name: 'RedMode Signature Ethnic Kurta Set',
-                  image: '',
-                  size: 'M',
-                  color: 'Crimson Red',
-                  quantity: 1,
-                  price: ord.total || 1499,
-                },
-              ];
-        const qty = ordItems.reduce((acc, it) => acc + (it.quantity || 1), 0);
-
-        return `
-          <div class="label-sheet">
-            <div class="hdr">
-              <div class="brand-wrap">
-                <div class="logo-crop">
-                  <img src="${logoFullUrl}" alt="REDMODE" class="logo-img" onerror="this.style.display='none'" />
-                </div>
-                <div class="brand-sub">WOMEN FASHION &amp; ETHNIC WEAR &bull; EXPRESS</div>
-              </div>
-              <div class="routing">
-                <div class="courier-badge">DELHIVERY SURFACE</div>
-                <div class="date-txt">${ordDate}</div>
-              </div>
-            </div>
-
-            <div class="barcode-box">
-              <div class="barcode-stripes"></div>
-              <div class="awb-txt">AWB: ${awb}</div>
-              <div class="order-ref">ORDER ID: ${ordNo}</div>
-            </div>
-
-            <div class="pay-box ${cod ? 'pay-cod' : 'pay-prepaid'}">
-              <div class="pay-mode">${cod ? '⚠ CASH ON DELIVERY (COD)' : '✓ PREPAID ORDER'}</div>
-              <div class="pay-amt">${cod ? `COLLECT CASH: ₹${ord.total}` : 'DO NOT COLLECT CASH (PAID)'}</div>
-            </div>
-
-            <div class="addr-box">
-              <div class="sec-label">SHIP TO / DELIVERY DESTINATION:</div>
-              <div class="cust-name">${cName}</div>
-              <div class="cust-addr">${addrLine}</div>
-              <div class="cust-addr">${cCity}, ${cState}</div>
-              <div class="pin-row">
-                <span class="pin-badge">PIN: ${cPin}</span>
-                <span class="ph-badge">PH: ${cMobile}</span>
-              </div>
-            </div>
-
-            <div class="items-box">
-              <div class="items-hdr">
-                <span>Order: ${ordNo}</span>
-                <span>Total Qty: ${qty} pcs</span>
-              </div>
-              <div class="items-list">
-                Items: ${ordItems.map((it) => `${it.name} (Size: ${it.size || 'M'}) x${it.quantity || 1}`).join(', ')}
-              </div>
-              <div class="items-meta">
-                <span>Weight: 0.45 Kg (Volumetric)</span>
-                <span>Dimensions: 25 x 20 x 4 cm</span>
-              </div>
-            </div>
-
-            <div class="rto-box">
-              <div class="rto-row">
-                <div>
-                  <div class="rto-title">IF UNDELIVERED, RETURN TO (RTO ORIGIN):</div>
-                  <div class="rto-name">REDMODE (RedMode Lifestyle &amp; Garments)</div>
-                  <div>1807 Zakir Hussain Colony, Meerut, Uttar Pradesh - 250002, India</div>
-                  <div class="rto-contact">Support: MyRedMode@gmail.com | +91 7302797464</div>
-                </div>
-                <div class="rto-emblem">
-                  <img src="${logoIconUrl}" alt="RM" />
-                </div>
-              </div>
-            </div>
-          </div>
-        `;
-      })
-      .join('');
-
-    const fullHtml = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>REDMODE Shipping Label - ${activeOrders[0].id}</title>
-  <style>
-    @page { size: 4in 6in; margin: 0; }
-    * { box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-      background: #f8fafc;
-      margin: 0;
-      padding: 16px;
-      color: #0f172a;
+      } else {
+        setDownloadFeedback({
+          type: 'error',
+          message: lastError || 'Shipping label download failed. Order remains Confirmed.',
+        });
+      }
+    } finally {
+      setIsDownloading(false);
     }
-    .toolbar {
-      max-width: 400px;
-      margin: 0 auto 14px auto;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      background: #0f172a;
-      color: #fff;
-      padding: 10px 14px;
-      border-radius: 10px;
-    }
-    .toolbar button {
-      background: #E52229;
-      color: #fff;
-      border: none;
-      padding: 7px 14px;
-      border-radius: 6px;
-      font-weight: 800;
-      font-size: 12px;
-      cursor: pointer;
-    }
-    .label-sheet {
-      background: #ffffff;
-      max-width: 400px;
-      margin: 0 auto 20px auto;
-      padding: 16px;
-      border: 2px solid #0f172a;
-      border-radius: 10px;
-      page-break-after: always;
-    }
-    .hdr {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      border-bottom: 2px solid #0f172a;
-      padding-bottom: 10px;
-      margin-bottom: 10px;
-    }
-    .logo-crop {
-      width: 165px;
-      height: 38px;
-      overflow: hidden;
-      display: flex;
-      align-items: center;
-      justify-content: flex-start;
-    }
-    .logo-img {
-      width: 210px;
-      height: 210px;
-      object-fit: cover;
-      margin-left: -18px;
-      mix-blend-mode: multiply;
-    }
-    .brand-sub {
-      font-size: 8.5px;
-      font-weight: 800;
-      color: #475569;
-      letter-spacing: 0.4px;
-      margin-top: 2px;
-    }
-    .routing {
-      text-align: right;
-      font-family: monospace;
-    }
-    .courier-badge {
-      background: #0f172a;
-      color: #fff;
-      font-size: 9px;
-      font-weight: 900;
-      padding: 3px 6px;
-      border-radius: 4px;
-      display: inline-block;
-    }
-    .date-txt {
-      font-size: 10px;
-      font-weight: 700;
-      color: #475569;
-      margin-top: 3px;
-    }
-    .barcode-box {
-      text-align: center;
-      padding: 8px;
-      background: #f8fafc;
-      border: 1px solid #cbd5e1;
-      border-radius: 6px;
-      margin-bottom: 10px;
-    }
-    .barcode-stripes {
-      height: 40px;
-      width: 88%;
-      margin: 0 auto 5px auto;
-      background: repeating-linear-gradient(90deg, #0f172a 0px, #0f172a 2px, transparent 2px, transparent 4px, #0f172a 4px, #0f172a 7px, transparent 7px, transparent 10px, #0f172a 10px, #0f172a 12px, transparent 12px, transparent 15px);
-    }
-    .awb-txt {
-      font-family: monospace;
-      font-size: 13px;
-      font-weight: 900;
-      letter-spacing: 1.5px;
-    }
-    .order-ref {
-      font-size: 9.5px;
-      font-weight: 700;
-      color: #475569;
-      margin-top: 2px;
-    }
-    .pay-box {
-      padding: 8px;
-      border-radius: 6px;
-      text-align: center;
-      margin-bottom: 10px;
-      border: 2px solid #0f172a;
-    }
-    .pay-cod { background: #fffbeb; border-color: #f59e0b; color: #78350f; }
-    .pay-prepaid { background: #ecfdf5; border-color: #059669; color: #064e3b; }
-    .pay-mode { font-size: 10px; font-weight: 800; letter-spacing: 0.5px; }
-    .pay-amt { font-size: 15px; font-weight: 900; margin-top: 2px; }
-    .addr-box {
-      padding: 10px;
-      border: 1px solid #cbd5e1;
-      border-radius: 6px;
-      background: #f8fafc;
-      margin-bottom: 10px;
-    }
-    .sec-label { font-size: 9px; font-weight: 900; color: #64748b; margin-bottom: 3px; }
-    .cust-name { font-size: 14px; font-weight: 900; color: #0f172a; margin-bottom: 2px; }
-    .cust-addr { font-size: 11.5px; font-weight: 500; color: #334155; line-height: 1.35; }
-    .pin-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-top: 6px;
-      padding-top: 6px;
-      border-top: 1px dashed #cbd5e1;
-    }
-    .pin-badge {
-      background: #0f172a;
-      color: #fff;
-      font-family: monospace;
-      font-weight: 900;
-      font-size: 13px;
-      padding: 3px 8px;
-      border-radius: 4px;
-    }
-    .ph-badge {
-      font-family: monospace;
-      font-weight: 800;
-      font-size: 11.5px;
-    }
-    .items-box {
-      padding: 8px;
-      border: 1px solid #e2e8f0;
-      border-radius: 6px;
-      font-size: 10px;
-      margin-bottom: 10px;
-    }
-    .items-hdr { display: flex; justify-content: space-between; font-weight: 800; margin-bottom: 3px; }
-    .items-list { color: #475569; margin-bottom: 4px; line-height: 1.3; }
-    .items-meta { display: flex; justify-content: space-between; color: #94a3b8; font-size: 9px; }
-    .rto-box {
-      border-top: 1.5px solid #cbd5e1;
-      padding-top: 8px;
-      font-size: 9px;
-      color: #475569;
-      line-height: 1.35;
-    }
-    .rto-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-    .rto-title { font-weight: 900; color: #0f172a; }
-    .rto-name { font-weight: 800; color: #1e293b; }
-    .rto-contact { font-family: monospace; color: #334155; }
-    .rto-emblem { width: 34px; height: 30px; overflow: hidden; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-    .rto-emblem img { width: 54px; height: 54px; object-fit: cover; mix-blend-mode: multiply; }
-    @media print {
-      body { background: #fff; padding: 0; }
-      .toolbar { display: none !important; }
-      .label-sheet { border: 2px solid #000; border-radius: 0; margin: 0 auto; box-shadow: none; }
-    }
-  </style>
-</head>
-<body>
-  <div class="toolbar">
-    <span style="font-size:12px;font-weight:700;">REDMODE Official 4x6 Thermal Label</span>
-    <button onclick="window.print()">Print / Save as PDF</button>
-  </div>
-  ${labelsHtml}
-</body>
-</html>`;
-
-    const blob = new Blob([fullHtml], { type: 'text/html;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    const fileSuffix =
-      activeOrders.length > 1
-        ? `BULK-${activeOrders.length}-ORDERS`
-        : targetOrder.id.replace(/[^a-zA-Z0-9]/g, '').slice(-8).toUpperCase();
-    a.download = `REDMODE-Shipping-Label-${fileSuffix}.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
   };
 
   const renderOrderDocuments = (ord: Order, orderIndex: number) => {
@@ -443,11 +149,11 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
       year: 'numeric',
     });
 
-    const awbNumber =
-      ord.shipmozo?.awb ||
-      anyOrd.shipment?.awb ||
-      ord.awb_number ||
-      `RM${ord.id.replace(/[^a-zA-Z0-9]/g, '').slice(-8).toUpperCase()}IN`;
+    const hasRealAwb = hasRealDelhiveryAwb(ord);
+    const awbNumber = hasRealAwb ? getOrderAwbNumber(ord) : '';
+    const barcodeDataUrl = hasRealAwb
+      ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(generateCode128Svg(awbNumber, { height: 56 }))}`
+      : '';
 
     const payStr = String(ord.paymentMode || anyOrd.paymentMethod || '');
     const isCod =
@@ -744,25 +450,30 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
               </div>
             </div>
 
-            {/* Routing Barcode */}
-            <div className="text-center my-2 p-2 bg-slate-50 border border-slate-300 rounded">
-              <div className="h-10 flex items-center justify-center gap-[3px] overflow-hidden px-4">
-                {[4, 2, 6, 1, 3, 5, 2, 4, 1, 7, 3, 2, 6, 4, 1, 5, 2, 6, 3, 1, 4, 2, 5, 1, 3, 6, 2, 4, 1, 5, 3].map(
-                  (h, i) => (
-                    <div
-                      key={i}
-                      className="bg-slate-900 rounded-2xs"
-                      style={{
-                        width: `${(i % 3) + 1.5}px`,
-                        height: `${28 + (h % 3) * 4}px`,
-                      }}
-                    />
-                  )
-                )}
-              </div>
-              <p className="font-mono font-bold text-xs tracking-widest text-slate-900 mt-1">
-                AWB: {awbNumber}
-              </p>
+            {/* Genuine Scannable ISO/IEC 15417 Code-128 Routing Barcode */}
+            <div className="text-center my-2 p-2.5 bg-white border border-slate-300 rounded">
+              {hasRealAwb && barcodeDataUrl ? (
+                <>
+                  <img
+                    src={barcodeDataUrl}
+                    alt={`Delhivery Code 128 Barcode ${awbNumber}`}
+                    className="h-14 w-full max-w-[290px] mx-auto object-contain"
+                  />
+                  <p className="font-mono font-bold text-xs tracking-widest text-slate-900 mt-1">
+                    AWB: {awbNumber}
+                  </p>
+                  {ord.delhiverySortCode && (
+                    <p className="font-mono text-[10px] font-bold text-slate-600 mt-0.5">
+                      SORT CODE: {ord.delhiverySortCode}
+                    </p>
+                  )}
+                </>
+              ) : (
+                <div className="py-3 px-2 bg-amber-50 border border-amber-200 rounded text-amber-900 text-[11px] font-semibold flex items-center justify-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>Real Delhivery AWB not generated yet. Generate AWB before downloading label.</span>
+                </div>
+              )}
             </div>
 
             {/* Big Payment Alert Box */}
@@ -908,11 +619,16 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
               <button
                 type="button"
                 onClick={handleDownloadLabelFile}
-                className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer active:scale-95"
-                title="Download 4x6 thermal shipping label with REDMODE logo"
+                disabled={isDownloading || !hasAnyRealAwb}
+                className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer active:scale-95"
+                title="Download scannable Delhivery shipping label (moves Confirmed order to RTD only after download succeeds)"
               >
-                <ArrowDownToLine className="w-3.5 h-3.5" />
-                <span>Download Label</span>
+                {isDownloading ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <ArrowDownToLine className="w-3.5 h-3.5" />
+                )}
+                <span>{isDownloading ? 'Downloading...' : 'Download Shipping Label'}</span>
               </button>
             )}
             <button
@@ -921,7 +637,7 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
               className="px-4 py-2 bg-[#E52229] hover:bg-red-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-2 shadow-sm cursor-pointer active:scale-95"
             >
               <Printer className="w-3.5 h-3.5" />
-              <span>Print Now</span>
+              <span>Print Preview</span>
             </button>
             <button
               type="button"
@@ -933,6 +649,26 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
           </div>
         </div>
 
+        {/* Download feedback banner */}
+        {downloadFeedback && (
+          <div
+            className={`px-4 py-2.5 text-xs font-semibold border-b flex items-center justify-between print:hidden ${
+              downloadFeedback.type === 'success'
+                ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                : 'bg-rose-50 text-rose-900 border-rose-200'
+            }`}
+          >
+            <span>{downloadFeedback.message}</span>
+            <button
+              type="button"
+              onClick={() => setDownloadFeedback(null)}
+              className="p-0.5 opacity-70 hover:opacity-100 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* Printable Paper Area */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-8 bg-slate-100/70 print:p-0 print:bg-white print:overflow-visible">
           <div className="max-w-3xl mx-auto space-y-8">
@@ -943,13 +679,27 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
         {/* Modal Bottom Print Button Footer (Hidden during Print) */}
         <div className="p-3 bg-white border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-500 shrink-0 print:hidden">
           <div className="flex items-center gap-2">
-            <span className={`inline-block w-2 h-2 rounded-full ${hasDispatchedTracking || targetOrder.labelDownloaded ? 'bg-blue-600' : 'bg-emerald-500'}`}></span>
-            {hasDispatchedTracking || targetOrder.labelDownloaded ? (
-              <span className="font-semibold text-blue-700">
-                ✓ Label printed &amp; Delhivery tracking update dispatched to customer (₹0 inside 24h window)
+            <span
+              className={`inline-block w-2 h-2 rounded-full ${
+                downloadedSuccess || targetOrder.labelDownloaded
+                  ? 'bg-indigo-600'
+                  : hasAnyRealAwb
+                  ? 'bg-emerald-500'
+                  : 'bg-amber-500'
+              }`}
+            ></span>
+            {downloadedSuccess || targetOrder.labelDownloaded ? (
+              <span className="font-semibold text-indigo-700">
+                ✓ Shipping label downloaded — Order moved to RTD (Ready to Dispatch)
+              </span>
+            ) : hasAnyRealAwb ? (
+              <span className="font-medium text-slate-700">
+                Preview only — Order stays Confirmed until you click &quot;Download Shipping Label&quot;.
               </span>
             ) : (
-              <span>Ready to print 4x6 thermal label or standard invoice</span>
+              <span className="font-semibold text-amber-700">
+                Real Delhivery AWB required before downloading shipping label.
+              </span>
             )}
           </div>
           <div className="flex items-center gap-2 self-end sm:self-auto">
@@ -964,10 +714,15 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
               <button
                 type="button"
                 onClick={handleDownloadLabelFile}
-                className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+                disabled={isDownloading || !hasAnyRealAwb}
+                className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
               >
-                <ArrowDownToLine className="w-3.5 h-3.5" />
-                <span>Download Label</span>
+                {isDownloading ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <ArrowDownToLine className="w-3.5 h-3.5" />
+                )}
+                <span>{isDownloading ? 'Downloading...' : 'Download Shipping Label'}</span>
               </button>
             )}
             <button
@@ -976,7 +731,7 @@ export const OrderPrintModal: React.FC<OrderPrintModalProps> = ({
               className="px-4 py-1.5 bg-[#E52229] hover:bg-red-700 text-white rounded-lg font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
             >
               <Printer className="w-3.5 h-3.5" />
-              <span>Print {activeTab === 'label' ? 'Label' : activeTab === 'invoice' ? 'Invoice' : 'Documents'}</span>
+              <span>Print {activeTab === 'label' ? 'Preview' : activeTab === 'invoice' ? 'Invoice' : 'Documents'}</span>
             </button>
           </div>
         </div>

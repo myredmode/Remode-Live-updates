@@ -16,7 +16,7 @@ import {
 export interface WebhookLogEntry {
   id: string;
   timestamp: string;
-  source: 'Delhivery' | 'PayPal' | 'Razorpay';
+  source: 'Delhivery' | 'PayPal' | 'Razorpay' | 'WhatsApp';
   endpoint: string;
   eventType: string;
   referenceId: string;
@@ -28,7 +28,7 @@ export interface WebhookLogEntry {
   payload: any;
 }
 
-type SourceFilter = 'All' | 'Delhivery' | 'PayPal' | 'Razorpay';
+type SourceFilter = 'All' | 'WhatsApp' | 'Delhivery' | 'PayPal' | 'Razorpay';
 
 interface WebhookLogsPanelProps {
   onSaveNotification?: (msg: string) => void;
@@ -163,6 +163,7 @@ export const WebhookLogsPanel: React.FC<WebhookLogsPanelProps> = ({ onSaveNotifi
 
   const counts = {
     All: logs.length,
+    WhatsApp: logs.filter((l) => l.source === 'WhatsApp').length,
     Delhivery: logs.filter((l) => l.source === 'Delhivery').length,
     PayPal: logs.filter((l) => l.source === 'PayPal').length,
     Razorpay: logs.filter((l) => l.source === 'Razorpay').length,
@@ -277,7 +278,7 @@ export const WebhookLogsPanel: React.FC<WebhookLogsPanelProps> = ({ onSaveNotifi
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 pb-3 border-b border-slate-100">
           {/* Source Filters */}
           <div className="flex flex-wrap items-center gap-1.5">
-            {(['All', 'Delhivery', 'PayPal', 'Razorpay'] as SourceFilter[]).map((src) => (
+            {(['All', 'WhatsApp', 'Delhivery', 'PayPal', 'Razorpay'] as SourceFilter[]).map((src) => (
               <button
                 key={src}
                 type="button"
@@ -408,7 +409,9 @@ export const WebhookLogsPanel: React.FC<WebhookLogsPanelProps> = ({ onSaveNotifi
                         <div className="flex flex-wrap items-center gap-2">
                           <span
                             className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide ${
-                              entry.source === 'Delhivery'
+                              entry.source === 'WhatsApp'
+                                ? 'bg-emerald-600 text-white'
+                                : entry.source === 'Delhivery'
                                 ? 'bg-slate-900 text-white'
                                 : entry.source === 'PayPal'
                                 ? 'bg-indigo-50 text-indigo-800 border border-indigo-200'

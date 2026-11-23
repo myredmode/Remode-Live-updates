@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useIpGeolocation } from '../hooks/useIpGeolocation';
 import { deleteSavedUploadedImage } from '../utils/userUploadedImages';
+import { getOrderAwbNumber, hasRealDelhiveryAwb } from '../utils/barcode128';
 import {
   Product,
   Category,
@@ -912,11 +913,35 @@ interface StoreContextType {
     orderId: string,
     method?: 'WhatsApp Reply' | 'Phone Call' | 'Admin Desk'
   ) => void;
+  confirmOrderManually: (
+    orderId: string,
+    note?: string
+  ) => Promise<{ success: boolean; alreadyConfirmed?: boolean; order?: Order; awb?: string; message: string }>;
+  cancelOrderAtomically: (
+    orderId: string,
+    reason?: string
+  ) => Promise<{ success: boolean; alreadyCancelled?: boolean; order?: Order; message: string }>;
+  retryOrderWhatsApp: (
+    orderId: string
+  ) => Promise<{ success: boolean; order?: Order; message: string }>;
+  markOrderForFollowUp: (
+    orderId: string,
+    flagged: boolean,
+    reason?: string
+  ) => Promise<{ success: boolean; order?: Order; message: string }>;
+  refreshOrdersFromServer: () => Promise<void>;
+  generateDelhiveryAwbForConfirmedOrder: (
+    orderIdOrOrder: string | Order,
+    mode?: 'Surface' | 'Express'
+  ) => Promise<{ success: boolean; awb?: string; alreadyExists?: boolean; message: string }>;
+  downloadShippingLabelForOrder: (
+    orderId: string
+  ) => Promise<{ success: boolean; transitionedToRtd: boolean; awb?: string; format?: string; message: string }>;
   bulkAcceptOrdersToRTD: (orderIds: string[]) => { successCount: number };
   bulkCancelOrders: (orderIds: string[], reason?: string) => { successCount: number };
   send23hReminder: (orderId: string) => void;
   triggerNightConfirmationNow: (orderId: string) => void;
-  markLabelDownloaded: (orderId: string) => void;
+  markLabelDownloaded: (orderId: string) => { transitionedToRtd: boolean; reason?: string };
   sendCustomerTrackingUpdate: (orderId: string) => void;
   sendDeliveredReviewRequest: (orderId: string) => void;
   updateOrderInternalNotes: (orderId: string, notes: string) => void;
@@ -2179,6 +2204,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   // Signed server challenge tokens for customer OTP verification
   const otpChallengeTokensRef = useRef<Record<string, string>>({});
+  const syncServerOrdersFnRef = useRef<(() => Promise<void>) | null>(null);
 
   // Track system deletions across Firestore so deleted items never resurrect on any client
   const [deletedIds, setDeletedIds] = useState<{
@@ -2452,7 +2478,21 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
       for (const inc of incoming) {
         if (inc && inc.id && !LEGACY_DEMO_ORDER_IDS.has(String(inc.id).trim())) {
-          map.set(inc.id, { ...(map.get(inc.id) || {}), ...inc });
+          const existing = map.get(inc.id);
+          if (!existing) {
+            map.set(inc.id, inc);
+          } else {
+            const exVer = Number(existing.syncVersion || 0);
+            const incVer = Number(inc.syncVersion || 0);
+            const exTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
+            const incTime = new Date(inc.updatedAt || inc.createdAt || 0).getTime();
+            if (incVer > exVer || (incVer === exVer && incTime >= exTime)) {
+              map.set(inc.id, { ...existing, ...inc });
+            } else {
+              // Keep newer authoritative state while picking up any missing telemetry fields
+              map.set(inc.id, { ...inc, ...existing });
+            }
+          }
         }
       }
       return Array.from(map.values()).sort(
@@ -2460,14 +2500,93 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       );
     };
 
-    fetch('/api/orders')
-      .then((r) => r.json())
-      .then((res) => {
+    const syncServerOrdersToStateAndFirestore = async (force = false) => {
+      if (!force && typeof document !== 'undefined' && document.hidden) return;
+      try {
+        const r = await fetch('/api/orders');
+        const res = await r.json();
         if (res?.success && Array.isArray(res.orders) && !isCancelled) {
-          setOrders((prev) => mergeOrders(prev, res.orders));
+          const serverOrders: Order[] = res.orders.filter(
+            (o: any) => o && o.id && !LEGACY_DEMO_ORDER_IDS.has(String(o.id).trim())
+          );
+          setOrders((prev) => {
+            const prevById = new Map<string, Order>(prev.map((o) => [o.id, o]));
+            const merged = mergeOrders(prev, serverOrders);
+
+            // Mirror only genuine server webhook/scheduler/admin transitions into Cloud Firestore
+            for (const srvOrd of serverOrders) {
+              const prevOrd = prevById.get(srvOrd.id);
+              const srvVer = Number(srvOrd.syncVersion || 0);
+              const prevVer = Number(prevOrd?.syncVersion || 0);
+              const statusChanged =
+                !prevOrd ||
+                prevOrd.orderStatus !== srvOrd.orderStatus ||
+                prevOrd.customerConfirmed !== srvOrd.customerConfirmed ||
+                prevOrd.confirmationMethod !== srvOrd.confirmationMethod ||
+                prevOrd.awb_number !== srvOrd.awb_number ||
+                prevOrd.reminder23hSent !== srvOrd.reminder23hSent ||
+                prevOrd.needsManualFollowUp !== srvOrd.needsManualFollowUp ||
+                prevOrd.whatsappStatus !== srvOrd.whatsappStatus ||
+                prevOrd.whatsappDeliveryStatus !== srvOrd.whatsappDeliveryStatus ||
+                prevOrd.pickedUpAt !== srvOrd.pickedUpAt ||
+                prevOrd.deliveredAt !== srvOrd.deliveredAt ||
+                srvVer > prevVer;
+
+              if (statusChanged) {
+                const orderDocId = srvOrd.id.replace(/[^a-zA-Z0-9_-]/g, '') || `ord_${Date.now()}`;
+                const needsFirestoreStockSync =
+                  srvOrd.orderStatus === 'Cancelled' &&
+                  (srvOrd.cancellationSource === 'whatsapp_customer' || srvOrd.cancellationSource === 'admin') &&
+                  srvOrd.inventoryRestored === true &&
+                  !srvOrd.firestoreInventoryRestored &&
+                  !prevOrd?.firestoreInventoryRestored;
+
+                if (needsFirestoreStockSync) {
+                  // Atomically mirror server-side CANCEL stock restoration to Cloud Firestore once only
+                  restoreOrderInventory({ ...srvOrd, inventoryRestored: false });
+                  const syncedOrd: Order = { ...srvOrd, firestoreInventoryRestored: true };
+                  setDoc(doc(db, 'orders', orderDocId), cleanForFirestore(syncedOrd), { merge: true }).catch(
+                    () => {}
+                  );
+                  fetch('/api/orders', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(syncedOrd),
+                  }).catch(() => {});
+                } else {
+                  setDoc(doc(db, 'orders', orderDocId), cleanForFirestore(srvOrd), { merge: true }).catch(
+                    () => {}
+                  );
+                }
+              }
+            }
+
+            return merged;
+          });
         }
-      })
-      .catch(() => {});
+      } catch {}
+    };
+
+    syncServerOrdersFnRef.current = () => syncServerOrdersToStateAndFirestore(true);
+
+    void syncServerOrdersToStateAndFirestore(true);
+    const pollTimer = setInterval(() => {
+      void syncServerOrdersToStateAndFirestore(false);
+    }, 15000);
+    const onFocusSync = () => {
+      void syncServerOrdersToStateAndFirestore(true);
+    };
+    const onVisibilitySync = () => {
+      if (typeof document !== 'undefined' && !document.hidden) {
+        void syncServerOrdersToStateAndFirestore(true);
+      }
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', onFocusSync);
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibilitySync);
+    }
 
     try {
       unsubscribe = onSnapshot(
@@ -2492,6 +2611,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     return () => {
       isCancelled = true;
+      clearInterval(pollTimer);
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', onFocusSync);
+      }
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibilitySync);
+      }
       if (unsubscribe) unsubscribe();
     };
   }, []);
@@ -3572,7 +3698,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     const activeChannel = settings.shippingChannels?.find((c) => c.id === settings.activeShippingChannelId) || settings.shippingChannels?.[0];
     const defaultCourierTitle = activeChannel?.name || 'Delhivery Direct B2C';
+    const waCfg = settings.whatsappSettings;
+    const requiresConfirmation =
+      safePaymentMode === 'COD'
+        ? waCfg?.confirmCodOrders !== false
+        : waCfg?.confirmPrepaidOrders !== false;
 
+    const nowIso = new Date().toISOString();
+    const waAutomationActive = waCfg?.enabled !== false && waCfg?.orderConfirmationEnabled !== false;
     const newOrder: Order = {
       id: orderNumber,
       customer,
@@ -3585,31 +3718,28 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       paymentMode: safePaymentMode,
       paymentStatus: isInternationalOrder && paymentStatus === 'Pending' && safePaymentMode === 'Prepaid' ? 'Paid' : paymentStatus,
       orderStatus: 'NEW',
-      codVerificationStatus: safePaymentMode === 'COD' ? 'UNVERIFIED' : 'CONFIRMED',
+      codVerificationStatus: requiresConfirmation ? 'UNVERIFIED' : 'CONFIRMED',
       customerConfirmed: false,
+      needsManualFollowUp: requiresConfirmation && !waAutomationActive,
+      manualFollowUpReason:
+        requiresConfirmation && !waAutomationActive
+          ? 'WhatsApp automation is OFF — ready for manual confirmation.'
+          : undefined,
+      inventoryRestored: false,
+      reminder23hSent: false,
+      whatsappStatus: requiresConfirmation ? 'Pending' : undefined,
+      whatsappDeliveryStatus: requiresConfirmation ? 'queued' : undefined,
+      confirmationTask: requiresConfirmation
+        ? {
+            status: waAutomationActive ? 'pending' : 'automation_off',
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          }
+        : undefined,
       selected_courier_name: defaultCourierTitle,
-      confirmationSentAt: (() => {
-        const now = new Date();
-        const mins = now.getHours() * 60 + now.getMinutes();
-        if (mins >= 600 && mins <= 1260) {
-          return now.toISOString();
-        }
-        return undefined;
-      })(),
-      scheduledConfirmationTime: (() => {
-        const now = new Date();
-        const mins = now.getHours() * 60 + now.getMinutes();
-        if (mins >= 600 && mins <= 1260) {
-          return undefined;
-        }
-        const sched = new Date(now);
-        if (mins > 1260) {
-          sched.setDate(sched.getDate() + 1);
-        }
-        sched.setHours(10, 0, 0, 0);
-        return sched.toISOString();
-      })(),
-      createdAt: new Date().toISOString(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      syncVersion: 1,
       final_package_weight: parcel.final_package_weight,
       final_package_length: parcel.final_package_length,
       final_package_width: parcel.final_package_width,
@@ -3658,16 +3788,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       })
     );
 
-    // Save order locally and sync to backend & Firestore via atomic transaction
-    setOrders((prev) => [newOrder, ...prev]);
-    fetch('/api/orders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newOrder),
-    }).catch(() => {});
-
+    // DATABASE-FIRST ORDER CREATION:
+    // 1. Save immediately in local state and Cloud Firestore (never dependent on Meta WhatsApp API)
     const orderDocId = newOrder.id.replace(/[^a-zA-Z0-9_-]/g, '') || `ord_${Date.now()}`;
-    runTransaction(db, async (transaction) => {
+    setOrders((prev) => [newOrder, ...prev]);
+
+    const firestorePersistPromise = runTransaction(db, async (transaction) => {
       const uniqueProdIds = Array.from(new Set(cartSnapshot.map((c) => c.productId)));
       const prodSnaps = await Promise.all(
         uniqueProdIds.map((pid) => transaction.get(doc(db, 'products', pid)))
@@ -3722,9 +3848,26 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       transaction.set(doc(db, 'orders', orderDocId), cleanForFirestore(newOrder), { merge: true });
     }).catch(() => {
       // Fallback order write if product docs were not yet seeded in Firestore
-      setDoc(doc(db, 'orders', orderDocId), cleanForFirestore(newOrder), { merge: true }).catch(() => {});
+      return setDoc(doc(db, 'orders', orderDocId), cleanForFirestore(newOrder), { merge: true }).catch(() => {});
     });
 
+    // 2. Non-blocking backend persistence + optional WhatsApp confirmation task (Meta API outage never blocks checkout)
+    void firestorePersistPromise.finally(() => {
+      fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newOrder),
+      })
+        .then((r) => r.json())
+        .then((res) => {
+          if (res?.success && res.order) {
+            const enrichedOrder: Order = res.order;
+            setOrders((prev) => prev.map((o) => (o.id === enrichedOrder.id ? { ...o, ...enrichedOrder } : o)));
+            setDoc(doc(db, 'orders', orderDocId), cleanForFirestore(enrichedOrder), { merge: true }).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    });
     // Increment coupon usedCount if a coupon was applied
     if (appliedCoupon) {
       setCoupons((prev) =>
@@ -5034,16 +5177,259 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     addAuditLog(`COD Verification set to ${status} by ${verifiedBy}`, 'Order', orderId, oldStatus, status);
   };
 
+  const inFlightDelhiveryOrdersRef = useRef<Set<string>>(new Set());
+  const transitioningRtdOrdersRef = useRef<Set<string>>(new Set());
+
+  const getActiveDelhiveryChannel = (): ShippingChannelConfig | undefined => {
+    const active = settings.activeShippingChannelId
+      ? settings.shippingChannels?.find((c) => c.id === settings.activeShippingChannelId && c.enabled !== false)
+      : undefined;
+    if (active?.provider === 'delhivery') return active;
+    return settings.shippingChannels?.find((c) => c.provider === 'delhivery' && c.enabled !== false);
+  };
+
+  /**
+   * Automatically creates a real Delhivery CMU shipment and saves the genuine AWB against a Confirmed order.
+   * CRITICAL: NEVER moves the order to RTD — order strictly remains Confirmed until the shipping label is actually downloaded.
+   */
+  const generateDelhiveryAwbForConfirmedOrder = async (
+    orderIdOrOrder: string | Order,
+    modeOverride?: 'Surface' | 'Express'
+  ): Promise<{ success: boolean; awb?: string; alreadyExists?: boolean; message: string }> => {
+    const targetOrder =
+      typeof orderIdOrOrder === 'string'
+        ? orders.find((o) => o.id === orderIdOrOrder)
+        : orderIdOrOrder;
+
+    if (!targetOrder) {
+      return { success: false, message: 'Order not found.' };
+    }
+
+    const rawStatus = String(targetOrder.orderStatus || '').toLowerCase();
+    const isOrderConfirmed =
+      targetOrder.customerConfirmed === true ||
+      targetOrder.codVerificationStatus === 'CONFIRMED' ||
+      rawStatus === 'confirmed' ||
+      rawStatus === 'rtd' ||
+      rawStatus.includes('ready to ship') ||
+      rawStatus.includes('ready to dispatch');
+
+    if (!isOrderConfirmed || rawStatus.includes('cancel') || rawStatus.includes('expire')) {
+      return {
+        success: false,
+        message: 'Order must be Confirmed by customer before creating a Delhivery shipment.',
+      };
+    }
+
+    // 1. Prevent duplicate shipment creation if a real Delhivery AWB already exists
+    if (hasRealDelhiveryAwb(targetOrder)) {
+      const existingAwb = getOrderAwbNumber(targetOrder);
+      return {
+        success: true,
+        awb: existingAwb,
+        alreadyExists: true,
+        message: `Real Delhivery AWB #${existingAwb} is already assigned to this order.`,
+      };
+    }
+
+    const normId = String(targetOrder.id).trim().replace(/^#/, '');
+    if (inFlightDelhiveryOrdersRef.current.has(normId)) {
+      return {
+        success: false,
+        message: 'Delhivery AWB generation is already in progress for this order.',
+      };
+    }
+
+    const delhiveryChannel = getActiveDelhiveryChannel();
+    const dCfg = settings.delhiverySettings;
+    const mode: 'Surface' | 'Express' =
+      modeOverride ||
+      (delhiveryChannel?.shippingMode === 'Express' || dCfg?.defaultShippingMode === 'Express'
+        ? 'Express'
+        : 'Surface');
+    const courierTitle = delhiveryChannel?.name || 'Delhivery Direct B2C';
+    const warehouseName = delhiveryChannel?.warehouseName || dCfg?.warehouseName || 'REDMODE B2C';
+    const pickupPincode = delhiveryChannel?.pickupPincode || dCfg?.pickupPincode || '250002';
+
+    inFlightDelhiveryOrdersRef.current.add(normId);
+
+    // Mark creating state while strictly preserving Confirmed status
+    setOrders((prev) =>
+      prev.map((o) =>
+        o.id === targetOrder.id
+          ? {
+              ...o,
+              delhiveryShipmentStatus: 'creating',
+              delhiveryShipmentError: undefined,
+            }
+          : o
+      )
+    );
+
+    const adminToken =
+      sessionStorage.getItem('redmode_admin_token') ||
+      localStorage.getItem('redmode_admin_token') ||
+      '';
+
+    try {
+      const response = await fetch('/api/delhivery/create-shipment', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          order: targetOrder,
+          mode,
+          officialWaybill: false,
+          apiToken: delhiveryChannel?.apiKey || dCfg?.apiToken || '',
+          clientName: delhiveryChannel?.clientId || dCfg?.clientName || 'Redmode',
+          warehouseName,
+          pickupPincode,
+          pickupAddress: delhiveryChannel?.pickupAddress || dCfg?.pickupAddress || '',
+          pickupPhone: delhiveryChannel?.pickupPhone || dCfg?.pickupPhone || '7302797464',
+          environment: delhiveryChannel?.environment || dCfg?.environment || 'production',
+        }),
+      });
+
+      const res = await response.json().catch(() => null);
+      if (response.ok && res?.success && res.waybill && res.configured !== false) {
+        const realWaybill = String(res.waybill).trim();
+        const nowIso = new Date().toISOString();
+        const trackingUrl = delhiveryChannel?.trackingUrlTemplate
+          ? delhiveryChannel.trackingUrlTemplate.replace('{{awb}}', realWaybill)
+          : `https://www.delhivery.com/track/package/${realWaybill}`;
+
+        setOrders((prev) =>
+          prev.map((o) => {
+            if (o.id !== targetOrder.id) return o;
+            // CRITICAL: Preserve current orderStatus (remains Confirmed — NEVER auto-transition to RTD here!)
+            const synced: Order = {
+              ...o,
+              awb_number: realWaybill,
+              awbSource: 'delhivery_live',
+              delhiveryShipmentStatus: 'created',
+              delhiveryShipmentError: undefined,
+              delhiverySortCode: res.sortCode || o.delhiverySortCode,
+              delhiveryCreatedAt: o.delhiveryCreatedAt || nowIso,
+              delhiveryRefNum: res.refnum || o.delhiveryRefNum,
+              selected_courier_name: courierTitle,
+              shipment_status: o.shipment_status === 'RTD' ? 'RTD' : 'Manifested',
+              label_url_or_data: `/api/shipping/label/${encodeURIComponent(realWaybill)}`,
+              shipmozo: {
+                courier: courierTitle,
+                awb: realWaybill,
+                trackingUrl,
+                status: o.shipmozo?.status === 'RTD' ? 'RTD' : 'Manifested',
+                labelGenerated: true,
+                shippedAt: o.shipmozo?.shippedAt,
+                history: [
+                  {
+                    status: 'Delhivery CMU Manifested',
+                    location: `${warehouseName} (${pickupPincode})`,
+                    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                    note: `Real Delhivery Waybill #${realWaybill} generated (${res.environment || 'production'}). Awaiting admin label download before RTD.`,
+                  },
+                  ...(o.shipmozo?.history || []),
+                ],
+              },
+              activityLog: [
+                {
+                  id: `act-awb-${Date.now()}`,
+                  timestamp: nowIso,
+                  title: 'Real Delhivery AWB Generated',
+                  description: `Official Waybill #${realWaybill} saved against Confirmed order. Download shipping label to move to RTD.`,
+                  source: 'delhivery',
+                },
+                ...(o.activityLog || []),
+              ],
+            };
+            persistOrderUpdate(synced);
+            return synced;
+          })
+        );
+
+        if (!res.alreadyExists) {
+          addAuditLog(
+            `Real Delhivery AWB #${realWaybill} generated (order remains Confirmed pending label download)`,
+            'Order',
+            targetOrder.id
+          );
+          logAdminActivity({
+            adminId: currentAdminUser.id,
+            adminName: currentAdminUser.name,
+            role: currentAdminUser.role,
+            action: `Generated real Delhivery AWB #${realWaybill} for Confirmed Order #${targetOrder.id}`,
+            type: 'awb_generation',
+            target: targetOrder.id,
+          });
+        }
+
+        return {
+          success: true,
+          awb: realWaybill,
+          alreadyExists: Boolean(res.alreadyExists),
+          message: `Real Delhivery AWB #${realWaybill} generated. Download shipping label to move order to RTD.`,
+        };
+      }
+
+      const errMsg =
+        res?.message ||
+        `Delhivery shipment creation failed (HTTP ${response.status}). Order remains Confirmed without AWB.`;
+
+      setOrders((prev) =>
+        prev.map((o) => {
+          if (o.id !== targetOrder.id) return o;
+          const failedOrder: Order = {
+            ...o,
+            delhiveryShipmentStatus: 'failed',
+            delhiveryShipmentError: errMsg,
+          };
+          persistOrderUpdate(failedOrder);
+          return failedOrder;
+        })
+      );
+
+      return { success: false, message: errMsg };
+    } catch (err: any) {
+      const errMsg = err?.message || 'Network error while generating Delhivery AWB.';
+      setOrders((prev) =>
+        prev.map((o) => {
+          if (o.id !== targetOrder.id) return o;
+          const failedOrder: Order = {
+            ...o,
+            delhiveryShipmentStatus: 'failed',
+            delhiveryShipmentError: errMsg,
+          };
+          persistOrderUpdate(failedOrder);
+          return failedOrder;
+        })
+      );
+      return { success: false, message: errMsg };
+    } finally {
+      inFlightDelhiveryOrdersRef.current.delete(normId);
+    }
+  };
+
   const confirmCustomerOrder = (
     orderId: string,
     method: 'WhatsApp Reply' | 'Phone Call' | 'Admin Desk' = 'WhatsApp Reply'
   ) => {
     const nowIso = new Date().toISOString();
+    const existingTarget = orders.find((o) => o.id === orderId);
+    let confirmedSnapshot: Order | null = null;
+
     setOrders((prev) => {
       const target = prev.find((o) => o.id === orderId);
       if (!target) return prev;
 
-      const wasExpired = target.isExpired || target.orderStatus === 'Expired' || target.orderStatus === 'Cancelled' || (target.orderStatus as any) === 'CANCELLED';
+      const wasExpired =
+        target.isExpired ||
+        target.orderStatus === 'Expired' ||
+        target.orderStatus === 'Cancelled' ||
+        (target.orderStatus as any) === 'CANCELLED';
+
       const updatedOrder: Order = {
         ...target,
         customerConfirmed: true,
@@ -5058,30 +5444,373 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         expiredAt: undefined,
         confirmationAckSent: true,
         confirmationAckSentAt: nowIso,
-        // Bring reactivated late order right into today's active series & timestamp
         createdAt: wasExpired ? nowIso : target.createdAt,
         reactivatedAt: wasExpired ? nowIso : target.reactivatedAt,
       };
+      confirmedSnapshot = updatedOrder;
 
-      // Persist confirmed/reactivated order to Backend & Cloud Firestore
+      // Persist confirmed/reactivated order to Backend & Cloud Firestore (remains Confirmed, NOT RTD)
       persistOrderUpdate(updatedOrder);
 
-      // Move confirmed/reactivated order to the top with today's active queue
       const remaining = prev.filter((o) => o.id !== orderId);
       return [updatedOrder, ...remaining];
     });
+
     addAuditLog(
       method === 'Phone Call'
-        ? `Order confirmed via Phone Call by admin. Moved from Cancelled to Confirmed queue.`
-        : `Customer order confirmed via ${method} & auto-confirmation msg dispatched`,
+        ? `Order confirmed via Phone Call by admin. Moved to Confirmed queue & queued real Delhivery AWB creation.`
+        : `Customer order confirmed via ${method}. Order moved to Confirmed & queued real Delhivery AWB creation.`,
       'Order',
       orderId,
       'Pending',
       'Confirmed'
     );
+
+    // Automatically create real Delhivery shipment & obtain AWB while strictly keeping order in Confirmed
+    const orderForShipment =
+      confirmedSnapshot ||
+      (existingTarget
+        ? {
+            ...existingTarget,
+            customerConfirmed: true,
+            customerConfirmedAt: nowIso,
+            codVerificationStatus: 'CONFIRMED' as const,
+            orderStatus: 'Confirmed' as OrderStatus,
+          }
+        : null);
+
+    if (orderForShipment && !hasRealDelhiveryAwb(orderForShipment)) {
+      void generateDelhiveryAwbForConfirmedOrder(orderForShipment);
+    }
   };
 
-  // Helper to generate official format AWB for active logistics carrier
+  const getAdminAuthHeaders = (): Record<string, string> => {
+    const token =
+      sessionStorage.getItem('redmode_admin_token') ||
+      localStorage.getItem('redmode_admin_token') ||
+      '';
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  };
+
+  const refreshOrdersFromServer = async (): Promise<void> => {
+    if (syncServerOrdersFnRef.current) {
+      await syncServerOrdersFnRef.current();
+    }
+  };
+
+  /**
+   * HYBRID MANUAL CONFIRMATION (100% independent of Meta WhatsApp API)
+   * Executes the backend atomic confirmOrderAtomically() endpoint so manual confirmation
+   * and WhatsApp YES share one atomic guard & never create duplicate Delhivery AWBs.
+   */
+  const confirmOrderManually = async (
+    orderId: string,
+    note?: string
+  ): Promise<{ success: boolean; alreadyConfirmed?: boolean; order?: Order; awb?: string; message: string }> => {
+    const target = orders.find((o) => o.id === orderId);
+    try {
+      const res = await fetch(`/api/admin/orders/${encodeURIComponent(orderId)}/confirm-manual`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAdminAuthHeaders(),
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          adminConfirmedCustomerContact: true,
+          note: note?.trim() || '',
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success) {
+        const updatedOrder: Order | undefined = data.order;
+        if (updatedOrder) {
+          setOrders((prev) => {
+            const exists = prev.some((o) => o.id === updatedOrder.id);
+            if (!exists) return [updatedOrder, ...prev];
+            return prev.map((o) => (o.id === updatedOrder.id ? { ...o, ...updatedOrder } : o));
+          });
+          const orderDocId = updatedOrder.id.replace(/[^a-zA-Z0-9_-]/g, '') || `ord_${Date.now()}`;
+          setDoc(doc(db, 'orders', orderDocId), cleanForFirestore(updatedOrder), { merge: true }).catch(() => {});
+        }
+        addAuditLog(
+          data.alreadyConfirmed
+            ? `Manual confirmation skipped — order already confirmed.`
+            : `Order manually confirmed by admin${note ? ` (${note.trim()})` : ''}. Moved to Confirmed${
+                data.awb ? ` with real Delhivery AWB #${data.awb}` : ''
+              }.`,
+          'Order',
+          orderId,
+          target?.orderStatus || 'NEW',
+          'Confirmed'
+        );
+        return {
+          success: true,
+          alreadyConfirmed: Boolean(data.alreadyConfirmed),
+          order: updatedOrder,
+          awb: data.awb || updatedOrder?.awb_number,
+          message:
+            data.message ||
+            (data.alreadyConfirmed
+              ? `Order ${orderId} was already confirmed.`
+              : `Order ${orderId} manually confirmed.`),
+        };
+      }
+      return {
+        success: false,
+        message: data?.message || `Unable to confirm order ${orderId} (HTTP ${res.status}).`,
+      };
+    } catch {
+      // Offline / backend unreachable continuity fallback: persist directly to Firestore + trigger AWB
+      if (!target) {
+        return { success: false, message: `Order ${orderId} not found.` };
+      }
+      if (target.customerConfirmed || String(target.orderStatus || '').toLowerCase() === 'confirmed') {
+        return {
+          success: true,
+          alreadyConfirmed: true,
+          order: target,
+          awb: getOrderAwbNumber(target) || undefined,
+          message: `Order ${orderId} is already confirmed.`,
+        };
+      }
+      const nowIso = new Date().toISOString();
+      const updatedOrder: Order = {
+        ...target,
+        orderStatus: 'Confirmed',
+        customerConfirmed: true,
+        customerConfirmedAt: nowIso,
+        confirmationMethod: 'Manual',
+        confirmedByAdminId: currentAdminUser?.id || 'admin',
+        confirmedByAdminName: currentAdminUser?.name || 'Admin',
+        codVerificationStatus: 'CONFIRMED',
+        codVerifiedBy: `Manual (${currentAdminUser?.name || 'Admin'})`,
+        needsManualFollowUp: false,
+        isExpired: false,
+        updatedAt: nowIso,
+        syncVersion: (target.syncVersion || 1) + 1,
+        internalNotes: note?.trim()
+          ? `${target.internalNotes ? `${target.internalNotes}\n` : ''}[Manual Confirm] ${note.trim()}`
+          : target.internalNotes,
+      };
+      setOrders((prev) => prev.map((o) => (o.id === orderId ? updatedOrder : o)));
+      persistOrderUpdate(updatedOrder);
+      addAuditLog(
+        `Order manually confirmed by ${currentAdminUser?.name || 'Admin'}. Moved to Confirmed.`,
+        'Order',
+        orderId,
+        target.orderStatus,
+        'Confirmed'
+      );
+      let awb: string | undefined;
+      if (!hasRealDelhiveryAwb(updatedOrder)) {
+        const shipRes = await generateDelhiveryAwbForConfirmedOrder(updatedOrder);
+        awb = shipRes.awb;
+      }
+      return {
+        success: true,
+        order: updatedOrder,
+        awb,
+        message: awb
+          ? `Order ${orderId} manually confirmed with Delhivery AWB #${awb}. Download Shipping Label to move to RTD.`
+          : `Order ${orderId} manually confirmed.`,
+      };
+    }
+  };
+
+  /**
+   * HYBRID ATOMIC CANCELLATION (Shared atomic guard + once-only stock restoration)
+   */
+  const cancelOrderAtomically = async (
+    orderId: string,
+    reason = 'Admin cancelled order'
+  ): Promise<{ success: boolean; alreadyCancelled?: boolean; order?: Order; message: string }> => {
+    const target = orders.find((o) => o.id === orderId);
+    try {
+      const res = await fetch(`/api/admin/orders/${encodeURIComponent(orderId)}/cancel`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAdminAuthHeaders(),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ reason }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success) {
+        const updatedOrder: Order | undefined = data.order;
+        if (updatedOrder) {
+          const shouldRestoreFsStock =
+            updatedOrder.inventoryRestored === true &&
+            !updatedOrder.firestoreInventoryRestored &&
+            !target?.firestoreInventoryRestored;
+          if (shouldRestoreFsStock) {
+            restoreOrderInventory({ ...updatedOrder, inventoryRestored: false });
+          }
+          const syncedOrder: Order = shouldRestoreFsStock
+            ? { ...updatedOrder, firestoreInventoryRestored: true }
+            : updatedOrder;
+          setOrders((prev) => prev.map((o) => (o.id === syncedOrder.id ? { ...o, ...syncedOrder } : o)));
+          const orderDocId = syncedOrder.id.replace(/[^a-zA-Z0-9_-]/g, '') || `ord_${Date.now()}`;
+          setDoc(doc(db, 'orders', orderDocId), cleanForFirestore(syncedOrder), { merge: true }).catch(() => {});
+          if (shouldRestoreFsStock) {
+            fetch('/api/orders', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(syncedOrder),
+            }).catch(() => {});
+          }
+        }
+        addAuditLog(
+          data.alreadyCancelled
+            ? `Cancel skipped — order already cancelled.`
+            : `Order cancelled by admin (${reason}). Stock restored atomically once.`,
+          'Order',
+          orderId,
+          target?.orderStatus || 'NEW',
+          'Cancelled'
+        );
+        return {
+          success: true,
+          alreadyCancelled: Boolean(data.alreadyCancelled),
+          order: updatedOrder,
+          message: data.message || `Order ${orderId} cancelled.`,
+        };
+      }
+      return {
+        success: false,
+        message: data?.message || `Unable to cancel order ${orderId} (HTTP ${res.status}).`,
+      };
+    } catch {
+      if (!target) return { success: false, message: `Order ${orderId} not found.` };
+      if (target.orderStatus === 'Cancelled') {
+        return { success: true, alreadyCancelled: true, order: target, message: `Order ${orderId} is already cancelled.` };
+      }
+      const nowIso = new Date().toISOString();
+      if (!target.inventoryRestored) {
+        restoreOrderInventory(target);
+      }
+      const updatedOrder: Order = {
+        ...target,
+        orderStatus: 'Cancelled',
+        customerConfirmed: false,
+        needsManualFollowUp: false,
+        cancelledAt: nowIso,
+        cancelledByAdminId: currentAdminUser?.id || 'admin',
+        cancelledByAdminName: currentAdminUser?.name || 'Admin',
+        cancellationSource: 'admin',
+        cancellationReason: reason,
+        inventoryRestored: true,
+        firestoreInventoryRestored: true,
+        updatedAt: nowIso,
+        syncVersion: (target.syncVersion || 1) + 1,
+      };
+      setOrders((prev) => prev.map((o) => (o.id === orderId ? updatedOrder : o)));
+      persistOrderUpdate(updatedOrder);
+      addAuditLog(`Order cancelled by admin (${reason}).`, 'Order', orderId, target.orderStatus, 'Cancelled');
+      return { success: true, order: updatedOrder, message: `Order ${orderId} cancelled and stock restored.` };
+    }
+  };
+
+  /**
+   * RETRY WHATSAPP CONFIRMATION (Safe resend for Upcoming orders)
+   */
+  const retryOrderWhatsApp = async (
+    orderId: string
+  ): Promise<{ success: boolean; order?: Order; message: string }> => {
+    try {
+      const res = await fetch(`/api/admin/orders/${encodeURIComponent(orderId)}/retry-whatsapp`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAdminAuthHeaders(),
+        },
+        credentials: 'include',
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => null);
+      if (data?.order) {
+        const updatedOrder: Order = data.order;
+        setOrders((prev) => prev.map((o) => (o.id === updatedOrder.id ? { ...o, ...updatedOrder } : o)));
+        const orderDocId = updatedOrder.id.replace(/[^a-zA-Z0-9_-]/g, '') || `ord_${Date.now()}`;
+        setDoc(doc(db, 'orders', orderDocId), cleanForFirestore(updatedOrder), { merge: true }).catch(() => {});
+      }
+      return {
+        success: Boolean(res.ok && data?.success),
+        order: data?.order,
+        message:
+          data?.message ||
+          (res.ok && data?.success
+            ? `WhatsApp confirmation resent for ${orderId}.`
+            : `WhatsApp retry failed for ${orderId}. You can confirm manually instead.`),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: `Network error retrying WhatsApp (${err?.message || 'offline'}). Use Confirm Manually instead.`,
+      };
+    }
+  };
+
+  /**
+   * MARK / UNMARK ORDER FOR MANUAL FOLLOW-UP
+   */
+  const markOrderForFollowUp = async (
+    orderId: string,
+    flagged: boolean,
+    reason?: string
+  ): Promise<{ success: boolean; order?: Order; message: string }> => {
+    try {
+      const res = await fetch(`/api/admin/orders/${encodeURIComponent(orderId)}/mark-followup`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAdminAuthHeaders(),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ flagged, reason: reason || '' }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success && data.order) {
+        const updatedOrder: Order = data.order;
+        setOrders((prev) => prev.map((o) => (o.id === updatedOrder.id ? { ...o, ...updatedOrder } : o)));
+        const orderDocId = updatedOrder.id.replace(/[^a-zA-Z0-9_-]/g, '') || `ord_${Date.now()}`;
+        setDoc(doc(db, 'orders', orderDocId), cleanForFirestore(updatedOrder), { merge: true }).catch(() => {});
+        return {
+          success: true,
+          order: updatedOrder,
+          message:
+            data.message ||
+            (flagged ? `Order ${orderId} marked for manual follow-up.` : `Follow-up cleared for ${orderId}.`),
+        };
+      }
+      return {
+        success: false,
+        message: data?.message || `Unable to update follow-up status for ${orderId}.`,
+      };
+    } catch {
+      const target = orders.find((o) => o.id === orderId);
+      if (!target) return { success: false, message: `Order ${orderId} not found.` };
+      const nowIso = new Date().toISOString();
+      const updatedOrder: Order = {
+        ...target,
+        needsManualFollowUp: flagged,
+        manualFollowUpFlaggedAt: flagged ? nowIso : undefined,
+        manualFollowUpReason: flagged ? reason || 'Marked for manual follow-up by admin' : undefined,
+        updatedAt: nowIso,
+        syncVersion: (target.syncVersion || 1) + 1,
+      };
+      setOrders((prev) => prev.map((o) => (o.id === orderId ? updatedOrder : o)));
+      persistOrderUpdate(updatedOrder);
+      return {
+        success: true,
+        order: updatedOrder,
+        message: flagged ? `Order ${orderId} marked for manual follow-up.` : `Follow-up cleared for ${orderId}.`,
+      };
+    }
+  };
+
+  // Helper to generate official format AWB for non-Delhivery carriers only
   const generateAwbForChannel = (channel?: ShippingChannelConfig): string => {
     if (!channel) {
       return `606696${Math.floor(10000000 + Math.random() * 90000000)}`;
@@ -5111,177 +5840,26 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const manifestOrderOnDelhivery = (
     targetOrder: Order,
-    activeChannel?: ShippingChannelConfig,
+    _activeChannel?: ShippingChannelConfig,
     mode: 'Surface' | 'Express' = 'Surface'
   ) => {
-    if (!targetOrder || !activeChannel || activeChannel.provider !== 'delhivery' || activeChannel.enabled === false) {
-      return;
-    }
-    const adminToken =
-      sessionStorage.getItem('redmode_admin_token') ||
-      localStorage.getItem('redmode_admin_token') ||
-      '';
-    const dCfg = settings.delhiverySettings;
-    fetch('/api/delhivery/create-shipment', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
-      },
-      credentials: 'include',
-      body: JSON.stringify({
-        order: targetOrder,
-        mode,
-        officialWaybill: false,
-        apiToken: activeChannel.apiKey || dCfg?.apiToken || '',
-        clientName: activeChannel.clientId || dCfg?.clientName || 'Redmode',
-        warehouseName: activeChannel.warehouseName || dCfg?.warehouseName || 'REDMODE B2C',
-        pickupPincode: activeChannel.pickupPincode || dCfg?.pickupPincode || '250002',
-        pickupAddress: activeChannel.pickupAddress || dCfg?.pickupAddress || '',
-        pickupPhone: activeChannel.pickupPhone || dCfg?.pickupPhone || '7302797464',
-        environment: activeChannel.environment || dCfg?.environment || 'production',
-      }),
-    })
-      .then(async (r) => {
-        const res = await r.json().catch(() => null);
-        return { ok: r.ok, res };
-      })
-      .then(({ ok, res }) => {
-        if (ok && res?.success && res.waybill && res.configured !== false) {
-          setOrders((prev) =>
-            prev.map((o) => {
-              if (o.id !== targetOrder.id) return o;
-              const synced: Order = {
-                ...o,
-                awb_number: res.waybill,
-                label_url_or_data: `/api/shipping/label/${encodeURIComponent(res.waybill)}`,
-                shipmozo: o.shipmozo
-                  ? {
-                      ...o.shipmozo,
-                      awb: res.waybill,
-                      trackingUrl: `https://www.delhivery.com/track/package/${res.waybill}`,
-                      history: [
-                        {
-                          status: 'Delhivery CMU Manifested',
-                          location: activeChannel.warehouseName || 'Delhivery Hub',
-                          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                          note: `Official Delhivery Waybill #${res.waybill} allocated via CMU API (${res.environment || 'production'}).`,
-                        },
-                        ...(o.shipmozo.history || []),
-                      ],
-                    }
-                  : undefined,
-              };
-              persistOrderUpdate(synced);
-              return synced;
-            })
-          );
-        } else if (res && res.configured !== false && (!ok || res.success === false)) {
-          const errMsg = res.message || 'Delhivery CMU rejected shipment manifestation.';
-          setOrders((prev) =>
-            prev.map((o) => {
-              if (o.id !== targetOrder.id || !o.shipmozo) return o;
-              const updatedErr: Order = {
-                ...o,
-                shipmozo: {
-                  ...o.shipmozo,
-                  history: [
-                    {
-                      status: 'Delhivery API Sync Attention',
-                      location: activeChannel.warehouseName || 'REDMODE Hub',
-                      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                      note: errMsg,
-                    },
-                    ...(o.shipmozo.history || []),
-                  ],
-                },
-              };
-              persistOrderUpdate(updatedErr);
-              return updatedErr;
-            })
-          );
-        }
-      })
-      .catch(() => {});
+    void generateDelhiveryAwbForConfirmedOrder(targetOrder, mode);
   };
 
+  /**
+   * Safeguarded legacy bulk RTD helper:
+   * Enforces strict workflow — Confirmed orders CANNOT enter RTD unless a real Delhivery AWB exists
+   * AND the shipping label has actually been downloaded.
+   */
   const bulkAcceptOrdersToRTD = (orderIds: string[]): { successCount: number } => {
     if (!orderIds || !orderIds.length) return { successCount: 0 };
-    const nowIso = new Date().toISOString();
     let count = 0;
-
-    const activeChannel = settings.activeShippingChannelId
-      ? settings.shippingChannels?.find(
-          (c) => c.id === settings.activeShippingChannelId && c.enabled !== false
-        )
-      : undefined;
-    const courierTitle =
-      activeChannel?.name ||
-      (activeChannel === undefined ? 'Manual Store Dispatch' : 'Delhivery Surface Logistics');
-    const dispatchMode: 'Surface' | 'Express' =
-      activeChannel?.shippingMode === 'Express' ? 'Express' : 'Surface';
-    const acceptedOrdersForApi: Order[] = [];
-
-    setOrders((prev) =>
-      prev.map((order) => {
-        if (!orderIds.includes(order.id)) return order;
-        count++;
-        const awbNumber = order.awb_number || generateAwbForChannel(activeChannel);
-        const trackingUrl = activeChannel?.trackingUrlTemplate
-          ? activeChannel.trackingUrlTemplate.replace('{{awb}}', awbNumber)
-          : `https://www.delhivery.com/track/package/${awbNumber}`;
-
-        const originHub = (activeChannel?.warehouseName || settings.delhiverySettings?.warehouseName)
-          ? `${activeChannel?.warehouseName || settings.delhiverySettings?.warehouseName} (${activeChannel?.pickupPincode || settings.delhiverySettings?.pickupPincode || '250002'})`
-          : 'REDMODE B2C (250002)';
-
-        const updatedOrder: Order = {
-          ...order,
-          orderStatus: 'RTD',
-          acceptedAt: nowIso,
-          rtdAt: nowIso,
-          awb_number: awbNumber,
-          selected_courier_name: courierTitle,
-          shipment_status: 'RTD',
-          shipmozo: order.shipmozo || {
-            courier: courierTitle,
-            awb: awbNumber,
-            trackingUrl,
-            status: 'RTD',
-            labelGenerated: true,
-            shippedAt: nowIso,
-            history: [
-              {
-                status: 'RTD (Ready to Dispatch)',
-                location: originHub,
-                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                note: `Order accepted to RTD via ${courierTitle}. Manifesting shipment...`,
-              },
-            ],
-          },
-        };
-        acceptedOrdersForApi.push(updatedOrder);
-        persistOrderUpdate(updatedOrder);
-        return updatedOrder;
-      })
-    );
-
-    if (activeChannel?.provider === 'delhivery' && activeChannel.enabled !== false) {
-      acceptedOrdersForApi.forEach((ord) => {
-        manifestOrderOnDelhivery(ord, activeChannel, dispatchMode);
-      });
-    }
-
-    addAuditLog(`Bulk accepted ${count} orders to RTD via active courier ${courierTitle}`, 'Order', orderIds.join(', '));
     orderIds.forEach((oid) => {
-      logAdminActivity({
-        adminId: currentAdminUser.id,
-        adminName: currentAdminUser.name,
-        role: currentAdminUser.role,
-        action: `Generated AWB for Order #${oid}`,
-        type: 'awb_generation',
-        target: oid,
-      });
+      const target = orders.find((o) => o.id === oid);
+      if (target && target.labelDownloaded && hasRealDelhiveryAwb(target)) {
+        const res = markLabelDownloaded(oid);
+        if (res.transitionedToRtd) count++;
+      }
     });
     return { successCount: count };
   };
@@ -5331,38 +5909,304 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const triggerNightConfirmationNow = (orderId: string) => {
-    setOrders((prev) =>
-      prev.map((o) => {
-        if (o.id !== orderId) return o;
-        const updated: Order = {
-          ...o,
-          confirmationSentAt: new Date().toISOString(),
-          scheduledConfirmationTime: undefined,
-        };
-        persistOrderUpdate(updated);
-        return updated;
+    const adminToken =
+      sessionStorage.getItem('redmode_admin_token') ||
+      localStorage.getItem('redmode_admin_token') ||
+      '';
+    fetch(`/api/admin/whatsapp/send-confirmation/${encodeURIComponent(orderId)}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
+      },
+      credentials: 'include',
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data?.order) {
+          const updated: Order = data.order;
+          setOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, ...updated } : o)));
+          persistOrderUpdate(updated);
+        }
       })
-    );
-    addAuditLog(`Scheduled 10:00 AM Confirmation WhatsApp triggered for order`, 'Order', orderId);
+      .catch(() => {});
+    addAuditLog(`Scheduled 10:00 AM Confirmation WhatsApp triggered manually for order`, 'Order', orderId);
   };
 
-  const markLabelDownloaded = (orderId: string) => {
-    setOrders((prev) =>
-      prev.map((o) => {
-        if (o.id !== orderId) return o;
-        const updated: Order = {
-          ...o,
-          labelDownloaded: true,
-          labelDownloadedAt: new Date().toISOString(),
-          trackingSentToCustomer: true,
-          trackingSentAt: new Date().toISOString(),
-          orderStatus: 'Ready to Ship',
+  const markLabelDownloaded = (orderId: string): { transitionedToRtd: boolean; reason?: string } => {
+    const target = orders.find((o) => o.id === orderId);
+    if (!target) return { transitionedToRtd: false, reason: 'Order not found.' };
+    if (!hasRealDelhiveryAwb(target)) {
+      return { transitionedToRtd: false, reason: 'Real Delhivery AWB is required before transitioning to RTD.' };
+    }
+
+    const rawStatus = String(target.orderStatus || '').toLowerCase();
+    const isAlreadyRtdOrBeyond =
+      rawStatus === 'rtd' ||
+      rawStatus.includes('ready to ship') ||
+      rawStatus.includes('ready to dispatch') ||
+      rawStatus === 'booked' ||
+      rawStatus.includes('transit') ||
+      rawStatus.includes('shipped') ||
+      rawStatus.includes('out for delivery') ||
+      rawStatus.includes('picked up') ||
+      rawStatus.includes('deliver') ||
+      rawStatus === 'completed';
+
+    const isCancelled = rawStatus.includes('cancel') || rawStatus.includes('expire') || target.isExpired === true;
+    const isConfirmed =
+      target.customerConfirmed === true ||
+      target.codVerificationStatus === 'CONFIRMED' ||
+      rawStatus === 'confirmed';
+
+    if (isCancelled || (!isConfirmed && !isAlreadyRtdOrBeyond)) {
+      return { transitionedToRtd: false, reason: 'Only Confirmed orders can transition to RTD upon label download.' };
+    }
+
+    // Prevent duplicate status transitions if already in RTD or later stage
+    if (isAlreadyRtdOrBeyond) {
+      if (!target.labelDownloaded) {
+        const nowIso = new Date().toISOString();
+        setOrders((prev) =>
+          prev.map((o) => {
+            if (o.id !== orderId) return o;
+            const updated: Order = {
+              ...o,
+              labelDownloaded: true,
+              labelDownloadedAt: o.labelDownloadedAt || nowIso,
+            };
+            persistOrderUpdate(updated);
+            return updated;
+          })
+        );
+      }
+      return { transitionedToRtd: false, reason: 'Order is already in RTD or a later dispatch stage.' };
+    }
+
+    const normId = String(orderId).trim().replace(/^#/, '');
+    if (transitioningRtdOrdersRef.current.has(normId)) {
+      return { transitionedToRtd: false, reason: 'Status transition already in progress.' };
+    }
+
+    transitioningRtdOrdersRef.current.add(normId);
+    const nowIso = new Date().toISOString();
+    const awbNumber = getOrderAwbNumber(target);
+
+    try {
+      setOrders((prev) =>
+        prev.map((o) => {
+          if (o.id !== orderId) return o;
+          const currentRaw = String(o.orderStatus || '').toLowerCase();
+          if (
+            currentRaw === 'rtd' ||
+            currentRaw.includes('ready to ship') ||
+            currentRaw.includes('ready to dispatch') ||
+            currentRaw.includes('transit') ||
+            currentRaw.includes('shipped') ||
+            currentRaw.includes('deliver') ||
+            currentRaw === 'completed'
+          ) {
+            return o;
+          }
+          const updated: Order = {
+            ...o,
+            labelDownloaded: true,
+            labelDownloadedAt: nowIso,
+            acceptedAt: o.acceptedAt || nowIso,
+            rtdAt: nowIso,
+            orderStatus: 'RTD',
+            shipment_status: 'RTD',
+            shipmozo: o.shipmozo
+              ? {
+                  ...o.shipmozo,
+                  status: 'RTD',
+                  labelGenerated: true,
+                  shippedAt: o.shipmozo.shippedAt || nowIso,
+                  history: [
+                    {
+                      status: 'RTD (Ready to Dispatch)',
+                      location: settings.delhiverySettings?.warehouseName || 'REDMODE B2C',
+                      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                      note: `Shipping label downloaded for AWB #${awbNumber}. Order automatically moved from Confirmed to RTD.`,
+                    },
+                    ...(o.shipmozo.history || []),
+                  ],
+                }
+              : undefined,
+            activityLog: [
+              {
+                id: `act-rtd-${Date.now()}`,
+                timestamp: nowIso,
+                title: 'Shipping Label Downloaded → RTD',
+                description: `Admin downloaded Delhivery shipping label (AWB #${awbNumber}). Order moved from Confirmed to RTD.`,
+                source: 'admin',
+              },
+              ...(o.activityLog || []),
+            ],
+          };
+          persistOrderUpdate(updated);
+          return updated;
+        })
+      );
+
+      addAuditLog(
+        `Shipping label downloaded (AWB #${awbNumber}) — Order automatically moved from Confirmed to RTD`,
+        'Order',
+        orderId,
+        'Confirmed',
+        'RTD'
+      );
+      return { transitionedToRtd: true };
+    } finally {
+      setTimeout(() => {
+        transitioningRtdOrdersRef.current.delete(normId);
+      }, 1000);
+    }
+  };
+
+  /**
+   * Downloads the actual scannable Delhivery shipping label (official PDF or Code-128 4x6 thermal file).
+   * CRITICAL: Transitions Confirmed -> RTD ONLY AFTER the download succeeds with valid file bytes.
+   * If download fails, order strictly remains Confirmed.
+   */
+  const downloadShippingLabelForOrder = async (
+    orderId: string
+  ): Promise<{ success: boolean; transitionedToRtd: boolean; awb?: string; format?: string; message: string }> => {
+    const order = orders.find((o) => o.id === orderId);
+    if (!order) {
+      return { success: false, transitionedToRtd: false, message: 'Order not found.' };
+    }
+
+    const rawStatus = String(order.orderStatus || '').toLowerCase();
+    const isCancelled = rawStatus.includes('cancel') || rawStatus.includes('expire') || order.isExpired === true;
+    const isConfirmedOrLater =
+      order.customerConfirmed === true ||
+      order.codVerificationStatus === 'CONFIRMED' ||
+      rawStatus === 'confirmed' ||
+      rawStatus === 'rtd' ||
+      rawStatus.includes('ready to ship') ||
+      rawStatus.includes('ready to dispatch') ||
+      rawStatus.includes('transit') ||
+      rawStatus.includes('shipped') ||
+      rawStatus.includes('deliver') ||
+      rawStatus === 'completed';
+
+    if (!isConfirmedOrLater || isCancelled) {
+      return {
+        success: false,
+        transitionedToRtd: false,
+        message: 'Shipping labels can only be downloaded after customer confirmation.',
+      };
+    }
+
+    if (!hasRealDelhiveryAwb(order)) {
+      return {
+        success: false,
+        transitionedToRtd: false,
+        message: 'A real Delhivery AWB has not been generated for this order yet. Generate the Delhivery AWB first.',
+      };
+    }
+
+    const awb = getOrderAwbNumber(order);
+    const delhiveryChannel = getActiveDelhiveryChannel();
+    const dCfg = settings.delhiverySettings;
+    const adminToken =
+      sessionStorage.getItem('redmode_admin_token') ||
+      localStorage.getItem('redmode_admin_token') ||
+      '';
+
+    try {
+      const res = await fetch('/api/delhivery/download-label', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          order,
+          awb,
+          apiToken: delhiveryChannel?.apiKey || dCfg?.apiToken || '',
+          clientName: delhiveryChannel?.clientId || dCfg?.clientName || 'Redmode',
+          warehouseName: delhiveryChannel?.warehouseName || dCfg?.warehouseName || 'REDMODE B2C',
+          pickupPincode: delhiveryChannel?.pickupPincode || dCfg?.pickupPincode || '250002',
+          pickupAddress: delhiveryChannel?.pickupAddress || dCfg?.pickupAddress || '',
+          pickupPhone: delhiveryChannel?.pickupPhone || dCfg?.pickupPhone || '7302797464',
+          environment: delhiveryChannel?.environment || dCfg?.environment || 'production',
+          shippingMode: delhiveryChannel?.shippingMode || dCfg?.defaultShippingMode || 'Surface',
+        }),
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => null);
+        return {
+          success: false,
+          transitionedToRtd: false,
+          awb,
+          message:
+            errJson?.message ||
+            `Failed to generate/download shipping label (HTTP ${res.status}). Order remains in current status.`,
         };
-        persistOrderUpdate(updated);
-        return updated;
-      })
-    );
-    addAuditLog(`Shipping label downloaded & order moved to RTD (Ready to Dispatch)`, 'Order', orderId);
+      }
+
+      const blob = await res.blob();
+      if (!blob || blob.size < 200) {
+        return {
+          success: false,
+          transitionedToRtd: false,
+          awb,
+          message: 'Downloaded label file was empty or invalid. Order status was not changed.',
+        };
+      }
+
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      const format = res.headers.get('x-label-format') || (contentType.includes('pdf') ? 'delhivery_official_pdf' : 'delhivery_thermal_code128');
+      const ext = contentType.includes('pdf') ? 'pdf' : 'html';
+      const safeOrderSlug = order.id.replace(/[^a-zA-Z0-9]/g, '').slice(-8).toUpperCase();
+      const safeAwbSlug = awb.replace(/[^a-zA-Z0-9_-]/g, '');
+      const fileName = `Delhivery-Label-${safeOrderSlug}-${safeAwbSlug}.${ext}`;
+
+      // Trigger real browser file download
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
+
+      // ONLY AFTER successful download action: transition Confirmed -> RTD (idempotent, never duplicates)
+      const transition = markLabelDownloaded(order.id);
+
+      logAdminActivity({
+        adminId: currentAdminUser.id,
+        adminName: currentAdminUser.name,
+        role: currentAdminUser.role,
+        action: transition.transitionedToRtd
+          ? `Downloaded Delhivery Label (AWB #${awb}) & moved Order #${order.id} to RTD`
+          : `Re-downloaded Delhivery Label (AWB #${awb}) for Order #${order.id}`,
+        type: 'label_print',
+        target: order.id,
+      });
+
+      return {
+        success: true,
+        transitionedToRtd: transition.transitionedToRtd,
+        awb,
+        format,
+        message: transition.transitionedToRtd
+          ? `Shipping label downloaded (AWB #${awb}). Order #${order.id} automatically moved to RTD!`
+          : `Shipping label downloaded (AWB #${awb}).`,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        transitionedToRtd: false,
+        awb,
+        message: `Label download failed: ${err?.message || 'Network error'}. Order remains Confirmed.`,
+      };
+    }
   };
 
   const sendCustomerTrackingUpdate = (orderId: string) => {
@@ -6501,6 +7345,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const isDeleting = Boolean(newWhatsApp.__delete);
       const { __delete: _ignored, ...cleanFields } = newWhatsApp as any;
       const current = prev.whatsappSettings || INITIAL_SETTINGS.whatsappSettings!;
+      const wasEnabled = current.enabled !== false;
+      const nextEnabled = isDeleting
+        ? false
+        : cleanFields.enabled !== undefined
+        ? Boolean(cleanFields.enabled)
+        : wasEnabled;
       const mergedWhatsApp: WhatsAppSettings = isDeleting
         ? {
             ...current,
@@ -6515,6 +7365,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         : {
             ...current,
             ...cleanFields,
+            enabled: nextEnabled,
+            automationEnabledAt:
+              !wasEnabled && nextEnabled
+                ? new Date().toISOString()
+                : cleanFields.automationEnabledAt || current.automationEnabledAt,
             accessToken: cleanIntegrationCredential(
               cleanFields.accessToken !== undefined ? cleanFields.accessToken : current.accessToken
             ),
@@ -7555,6 +8410,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         updateOrderPaymentStatus,
         updateCodVerificationStatus,
         confirmCustomerOrder,
+        confirmOrderManually,
+        cancelOrderAtomically,
+        retryOrderWhatsApp,
+        markOrderForFollowUp,
+        refreshOrdersFromServer,
+        generateDelhiveryAwbForConfirmedOrder,
+        downloadShippingLabelForOrder,
         bulkAcceptOrdersToRTD,
         bulkCancelOrders,
         send23hReminder,

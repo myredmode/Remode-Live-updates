@@ -172,6 +172,337 @@ function verifySignedOtpChallengeToken(
   return { valid: false, reason: 'Invalid OTP code.', sessionId: payload.s || '' };
 }
 
+const SERVER_CODE128_PATTERNS: readonly string[] = [
+  '212222', '222122', '222221', '121223', '121322', '131222', '122213', '122312', '132212', '221213',
+  '221312', '231212', '112232', '122132', '122231', '113222', '123122', '123221', '223211', '221132',
+  '221231', '213212', '223112', '312131', '311222', '321122', '321221', '312212', '322112', '322211',
+  '212123', '212321', '232121', '111323', '131123', '131321', '112313', '132113', '132311', '211313',
+  '231113', '231311', '112133', '112331', '132131', '113123', '113321', '133121', '313121', '211331',
+  '231131', '213113', '213311', '213131', '311123', '311321', '331121', '312113', '312311', '332111',
+  '314111', '221411', '431111', '111224', '111422', '121124', '121421', '141122', '141221', '112214',
+  '112412', '122114', '122411', '142112', '142211', '241211', '221114', '413111', '241112', '134111',
+  '111242', '121142', '121241', '114212', '124112', '124211', '411212', '421112', '421211', '212141',
+  '214121', '412121', '111143', '111341', '131141', '114113', '114311', '411113', '411311', '113141',
+  '114131', '311141', '411131', '211412', '211214', '211232', '2331112',
+];
+
+function escapeLabelHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function generateServerCode128Svg(rawText: string, height = 58): string {
+  const clean = String(rawText || '').trim().replace(/[^\x20-\x7E]/g, '');
+  if (!clean) return '';
+  const codes: number[] = [];
+  const isEvenDigits = /^\d+$/.test(clean) && clean.length >= 4 && clean.length % 2 === 0;
+  if (isEvenDigits) {
+    codes.push(105);
+    for (let i = 0; i < clean.length; i += 2) {
+      codes.push(parseInt(clean.slice(i, i + 2), 10));
+    }
+  } else {
+    codes.push(104);
+    for (let i = 0; i < clean.length; i++) {
+      const val = clean.charCodeAt(i) - 32;
+      if (val >= 0 && val <= 95) codes.push(val);
+    }
+  }
+  let checksum = codes[0];
+  for (let i = 1; i < codes.length; i++) checksum += codes[i] * i;
+  codes.push(checksum % 103);
+  codes.push(106);
+
+  const moduleWidth = 2;
+  const quietZone = 10;
+  let cursor = quietZone;
+  const rects: string[] = [];
+  for (const code of codes) {
+    const pattern = SERVER_CODE128_PATTERNS[code];
+    if (!pattern) continue;
+    for (let i = 0; i < pattern.length; i++) {
+      const w = Number(pattern[i]);
+      if (i % 2 === 0) {
+        rects.push(`<rect x="${cursor * moduleWidth}" y="0" width="${w * moduleWidth}" height="${height}" fill="#000000" />`);
+      }
+      cursor += w;
+    }
+  }
+  const totalWidth = (cursor + quietZone) * moduleWidth;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalWidth} ${height}" width="100%" height="${height}" preserveAspectRatio="xMidYMid meet" shape-rendering="crispEdges"><rect x="0" y="0" width="${totalWidth}" height="${height}" fill="#ffffff" />${rects.join('')}</svg>`;
+}
+
+function isSafeDelhiveryLabelUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host.startsWith('127.') ||
+      host.startsWith('10.') ||
+      host.startsWith('192.168.') ||
+      host.startsWith('169.254.') ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+    ) {
+      return false;
+    }
+    return (
+      host.endsWith('.delhivery.com') ||
+      host === 'delhivery.com' ||
+      host.endsWith('.amazonaws.com') ||
+      host.endsWith('.cloudfront.net') ||
+      host.endsWith('.googleapis.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isPlaceholderAwbValue(awb: string, awbSource?: string): boolean {
+  const clean = String(awb || '').trim();
+  if (!clean || clean.length < 8) return true;
+  if (clean.startsWith('RM') && clean.endsWith('IN')) return true;
+  if (awbSource === 'manual') return true;
+  if (/^606696\d{8}$/.test(clean) && awbSource !== 'delhivery_live') return true;
+  return false;
+}
+
+function buildDelhiveryThermalLabelHtml(params: {
+  awb: string;
+  orderId: string;
+  customerName: string;
+  address: string;
+  city: string;
+  state: string;
+  pincode: string;
+  phone: string;
+  shippingMode: string;
+  paymentMode: string;
+  codAmount: number;
+  totalAmount: number;
+  itemsSummary: string;
+  totalQty: number;
+  weightKg: number;
+  dimensionsText: string;
+  sortCode?: string;
+  officialBarcodeImage?: string;
+  warehouseName: string;
+  pickupAddress: string;
+  pickupPincode: string;
+  pickupPhone: string;
+  clientName: string;
+  orderDateText: string;
+  autoPrint?: boolean;
+}): string {
+  const isCod = params.paymentMode.toUpperCase() === 'COD';
+  const barcodeSvg = generateServerCode128Svg(params.awb, 62);
+  const safeOfficialBarcode =
+    params.officialBarcodeImage && /^data:image\/(png|jpeg|jpg|webp|svg\+xml);base64,/i.test(params.officialBarcodeImage)
+      ? `<img src="${params.officialBarcodeImage}" alt="Delhivery Official Barcode" style="max-width:100%;height:62px;object-fit:contain;display:block;margin:0 auto 6px auto;" />`
+      : barcodeSvg;
+  const orderBarcodeSvg = generateServerCode128Svg(params.orderId.replace(/[^A-Za-z0-9-]/g, ''), 30);
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Delhivery Shipping Label - ${escapeLabelHtml(params.awb)}</title>
+  <style>
+    @page { size: 4in 6in; margin: 0; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      margin: 0;
+      padding: 12px;
+      background: #f8fafc;
+      color: #000;
+    }
+    .toolbar {
+      max-width: 392px;
+      margin: 0 auto 12px auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #0f172a;
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .toolbar button {
+      background: #E52229;
+      color: #fff;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .sheet {
+      background: #fff;
+      max-width: 392px;
+      margin: 0 auto;
+      padding: 12px;
+      border: 2px solid #000;
+    }
+    .hdr {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 2px solid #000;
+      padding-bottom: 8px;
+      margin-bottom: 8px;
+    }
+    .brand { font-size: 17px; font-weight: 900; letter-spacing: 0.8px; }
+    .brand-sub { font-size: 9px; font-weight: 700; color: #333; margin-top: 2px; }
+    .routing { text-align: right; }
+    .logo-del { font-size: 15px; font-weight: 900; color: #E52229; letter-spacing: 0.5px; }
+    .sort-code { font-size: 16px; font-weight: 900; font-family: monospace; margin-top: 2px; }
+    .awb-box {
+      text-align: center;
+      border-bottom: 2px solid #000;
+      padding: 8px 4px 10px 4px;
+      margin-bottom: 8px;
+      background: #fff;
+    }
+    .awb-num { font-size: 17px; font-weight: 900; letter-spacing: 2px; font-family: monospace; margin-top: 4px; }
+    .order-ref { font-size: 10px; font-weight: 800; margin-top: 2px; color: #111; }
+    .pay-box {
+      border: 2px solid #000;
+      padding: 7px 8px;
+      text-align: center;
+      margin-bottom: 8px;
+      background: ${isCod ? '#fffbeb' : '#ecfdf5'};
+    }
+    .pay-mode { font-size: 10px; font-weight: 900; letter-spacing: 0.6px; }
+    .pay-amt { font-size: 15px; font-weight: 900; margin-top: 2px; }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border-bottom: 1.5px solid #000;
+      padding-bottom: 6px;
+      margin-bottom: 8px;
+      font-size: 10.5px;
+      line-height: 1.4;
+    }
+    .consignee {
+      border-bottom: 2px solid #000;
+      padding-bottom: 8px;
+      margin-bottom: 8px;
+    }
+    .sec-title { font-size: 9.5px; font-weight: 900; text-transform: uppercase; color: #222; margin-bottom: 3px; }
+    .name { font-size: 14px; font-weight: 900; margin-bottom: 2px; }
+    .addr { font-size: 11px; line-height: 1.38; }
+    .pin-line {
+      margin-top: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 900;
+      font-family: monospace;
+    }
+    .pin-pill { background: #000; color: #fff; padding: 2px 7px; }
+    .items {
+      border-bottom: 1.5px dashed #000;
+      padding-bottom: 7px;
+      margin-bottom: 7px;
+      font-size: 10px;
+      line-height: 1.35;
+    }
+    .shipper {
+      font-size: 9.5px;
+      line-height: 1.35;
+      border-bottom: 1.5px solid #000;
+      padding-bottom: 7px;
+      margin-bottom: 6px;
+    }
+    .footer { font-size: 8.5px; text-align: center; color: #333; font-weight: 700; }
+    @media print {
+      body { background: #fff; padding: 0; }
+      .toolbar { display: none !important; }
+      .sheet { border: 2px solid #000; margin: 0 auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <span>Delhivery 4x6 Thermal Label • AWB ${escapeLabelHtml(params.awb)}</span>
+    <button type="button" onclick="window.print()">Print 4x6 Label</button>
+  </div>
+  <div class="sheet">
+    <div class="hdr">
+      <div>
+        <div class="brand">REDMODE</div>
+        <div class="brand-sub">WOMEN ETHNIC WEAR &bull; ${escapeLabelHtml(params.shippingMode.toUpperCase())}</div>
+      </div>
+      <div class="routing">
+        <div class="logo-del">DELHIVERY</div>
+        <div class="sort-code">${escapeLabelHtml(params.sortCode || `PIN/${params.pincode}`)}</div>
+      </div>
+    </div>
+
+    <div class="awb-box">
+      ${safeOfficialBarcode}
+      <div class="awb-num">${escapeLabelHtml(params.awb)}</div>
+      <div class="order-ref">ORDER ID: ${escapeLabelHtml(params.orderId)} &bull; DATE: ${escapeLabelHtml(params.orderDateText)}</div>
+    </div>
+
+    <div class="pay-box">
+      <div class="pay-mode">${isCod ? 'CASH ON DELIVERY (COD)' : 'PREPAID SHIPMENT'}</div>
+      <div class="pay-amt">${isCod ? `COLLECT CASH: ₹${Math.round(params.codAmount).toLocaleString('en-IN')}` : 'DO NOT COLLECT CASH (PAID)'}</div>
+    </div>
+
+    <div class="meta-grid">
+      <div>
+        <strong>MODE:</strong> ${escapeLabelHtml(params.shippingMode)}<br />
+        <strong>WEIGHT:</strong> ${escapeLabelHtml(params.weightKg.toFixed(2))} KG
+      </div>
+      <div style="text-align:right;">
+        <strong>DIMS:</strong> ${escapeLabelHtml(params.dimensionsText)}<br />
+        <strong>TOTAL QTY:</strong> ${escapeLabelHtml(params.totalQty)} pcs
+      </div>
+    </div>
+
+    <div class="consignee">
+      <div class="sec-title">SHIP TO (CONSIGNEE):</div>
+      <div class="name">${escapeLabelHtml(params.customerName)}</div>
+      <div class="addr">${escapeLabelHtml(params.address)}</div>
+      <div class="addr">${escapeLabelHtml(params.city)}${params.state ? `, ${escapeLabelHtml(params.state)}` : ''}</div>
+      <div class="pin-line">
+        <span class="pin-pill">PIN: ${escapeLabelHtml(params.pincode)}</span>
+        <span>PH: ${escapeLabelHtml(params.phone)}</span>
+      </div>
+    </div>
+
+    <div class="items">
+      <div class="sec-title">SKU / ITEM SUMMARY:</div>
+      <div>${escapeLabelHtml(params.itemsSummary)}</div>
+      <div style="margin-top:4px;max-width:200px;">${orderBarcodeSvg}</div>
+    </div>
+
+    <div class="shipper">
+      <div class="sec-title">RETURN / PICKUP WAREHOUSE (RTO ORIGIN):</div>
+      <strong>${escapeLabelHtml(params.warehouseName)} (Client: ${escapeLabelHtml(params.clientName)})</strong><br />
+      ${escapeLabelHtml(params.pickupAddress)} - ${escapeLabelHtml(params.pickupPincode)}<br />
+      Contact: ${escapeLabelHtml(params.pickupPhone)} | myredmode@gmail.com
+    </div>
+
+    <div class="footer">
+      Official REDMODE &times; Delhivery B2C Scannable Code-128 Dispatch Label
+    </div>
+  </div>
+  ${params.autoPrint ? '<script>window.onload=function(){setTimeout(function(){window.print();},350);};</script>' : ''}
+</body>
+</html>`;
+}
+
 async function startServer() {
   const app = express();
   
@@ -198,7 +529,14 @@ async function startServer() {
     }
   }
 
-  app.use(express.json({ limit: '25mb' }));
+  app.use(
+    express.json({
+      limit: '25mb',
+      verify: (req: any, _res, buf) => {
+        req.rawBody = buf;
+      },
+    })
+  );
   app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
   // Ensure public/uploads directory exists and is statically served
@@ -502,7 +840,9 @@ async function startServer() {
   });
 
   // Persistent Server-Side Data Store (/data/products.json & /data/orders.json)
-  const dataDir = path.join(__dirname, 'data');
+  const dataDir = process.env.REDMODE_DATA_DIR
+    ? path.resolve(process.env.REDMODE_DATA_DIR)
+    : path.join(__dirname, 'data');
   if (!fs.existsSync(dataDir)) {
     try {
       fs.mkdirSync(dataDir, { recursive: true });
@@ -548,9 +888,15 @@ async function startServer() {
     return [];
   };
 
+  const writeJsonAtomic = (targetPath: string, data: any) => {
+    const tmpPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf-8');
+    fs.renameSync(tmpPath, targetPath);
+  };
+
   const writeServerProducts = (list: any[]) => {
     try {
-      fs.writeFileSync(productsDbPath, JSON.stringify(list, null, 2), 'utf-8');
+      writeJsonAtomic(productsDbPath, list);
     } catch (e) {
       console.error('Failed writing products.json:', e);
     }
@@ -568,7 +914,7 @@ async function startServer() {
 
   const writeServerOrders = (list: any[]) => {
     try {
-      fs.writeFileSync(ordersDbPath, JSON.stringify(list, null, 2), 'utf-8');
+      writeJsonAtomic(ordersDbPath, list);
     } catch (e) {
       console.error('Failed writing orders.json:', e);
     }
@@ -619,7 +965,7 @@ async function startServer() {
   interface WebhookLogEntry {
     id: string;
     timestamp: string;
-    source: 'Delhivery' | 'PayPal' | 'Razorpay';
+    source: 'Delhivery' | 'PayPal' | 'Razorpay' | 'WhatsApp';
     endpoint: string;
     eventType: string;
     referenceId: string;
@@ -643,7 +989,7 @@ async function startServer() {
 
   const writeWebhookLogs = (logs: WebhookLogEntry[]) => {
     try {
-      fs.writeFileSync(webhookLogsDbPath, JSON.stringify(logs.slice(0, 150), null, 2), 'utf-8');
+      writeJsonAtomic(webhookLogsDbPath, logs.slice(0, 150));
     } catch (e) {
       console.error('Failed writing webhook-logs.json:', e);
     }
@@ -659,6 +1005,9 @@ async function startServer() {
       'paypal-cert-url',
       'x-razorpay-event-id',
       'x-delhivery-event',
+      'x-redmode-relay-source',
+      'x-redmode-relay-timestamp',
+      'x-redmode-relay-event-id',
     ];
     const out: Record<string, string> = {};
     for (const key of safeKeys) {
@@ -671,6 +1020,12 @@ async function startServer() {
     }
     if (headers['x-razorpay-signature']) {
       out['x-razorpay-signature'] = '[present]';
+    }
+    if (headers['x-hub-signature-256']) {
+      out['x-hub-signature-256'] = '[present]';
+    }
+    if (headers['x-redmode-relay-signature']) {
+      out['x-redmode-relay-signature'] = '[present]';
     }
     return out;
   };
@@ -822,6 +1177,13 @@ async function startServer() {
             (prev.whatsappIntegrationDeleted ? '' : cleanCred(prev.whatsappSettings?.accessToken)),
         };
       }
+    }
+
+    if (next.whatsappAppSecret !== undefined || prev.whatsappAppSecret !== undefined) {
+      merged.whatsappAppSecret = cleanCred(next.whatsappAppSecret) || cleanCred(prev.whatsappAppSecret);
+    }
+    if (next.redmodeRelaySecret !== undefined || prev.redmodeRelaySecret !== undefined) {
+      merged.redmodeRelaySecret = cleanCred(next.redmodeRelaySecret) || cleanCred(prev.redmodeRelaySecret);
     }
 
     if (next.smsSettings && Array.isArray(next.smsSettings.gateways)) {
@@ -1014,10 +1376,30 @@ async function startServer() {
         : 'production';
 
     const customBase = String(overrides?.apiBaseUrl || fallbackCh?.apiBaseUrl || '').trim();
+    const allowLocalTest = process.env.ALLOW_LOCAL_TEST_ENDPOINTS === 'true';
+    const isAllowedDelhiveryBase = (candidate: string): boolean => {
+      try {
+        const parsed = new URL(candidate);
+        if (allowLocalTest && parsed.protocol === 'http:' && (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost')) {
+          return true;
+        }
+        return (
+          parsed.protocol === 'https:' &&
+          (parsed.hostname === 'track.delhivery.com' ||
+            parsed.hostname === 'staging-express.delhivery.com' ||
+            parsed.hostname.endsWith('.delhivery.com'))
+        );
+      } catch {
+        return false;
+      }
+    };
+    const testDelhiveryOverride = allowLocalTest ? String(process.env.DELHIVERY_TEST_BASE_URL || '').trim() : '';
     const baseUrl =
-      environment === 'staging'
+      testDelhiveryOverride && isAllowedDelhiveryBase(testDelhiveryOverride)
+        ? testDelhiveryOverride.replace(/\/+$/, '')
+        : environment === 'staging'
         ? 'https://staging-express.delhivery.com'
-        : customBase.startsWith('http') && !customBase.includes('staging-express')
+        : customBase && !customBase.includes('staging-express') && isAllowedDelhiveryBase(customBase)
         ? customBase.replace(/\/+$/, '')
         : 'https://track.delhivery.com';
 
@@ -1205,26 +1587,109 @@ async function startServer() {
     }
   });
 
-  // Permanent Orders CRUD API Endpoints
+  // Permanent Orders CRUD API Endpoints (with Phase 2 Automatic WhatsApp Order Confirmation Trigger)
   app.get('/api/orders', (_req: Request, res: Response) => {
     return res.json({ success: true, orders: readServerOrders() });
   });
 
-  app.post('/api/orders', (req: Request, res: Response) => {
+  app.post('/api/orders', async (req: Request, res: Response) => {
     try {
-      const order = req.body?.order || req.body;
-      if (!order || !order.id) {
+      const incoming = req.body?.order || req.body;
+      if (!incoming || !incoming.id) {
         return res.status(400).json({ success: false, message: 'Valid order payload required.' });
       }
       const existing = readServerOrders();
-      const idx = existing.findIndex((o) => o.id === order.id);
+      const idx = existing.findIndex((o) => o.id === incoming.id);
+      const isNewOrder = idx < 0;
+      const nowIso = new Date().toISOString();
+
+      let savedOrder: any;
       if (idx >= 0) {
-        existing[idx] = { ...existing[idx], ...order };
+        const prevOrder = existing[idx];
+        // Never allow stale client payload to regress authoritative webhook/manual confirmation transitions
+        const prevSync = Number(prevOrder.syncVersion || 0);
+        const incSync = Number(incoming.syncVersion || 0);
+        const merged = {
+          ...prevOrder,
+          ...incoming,
+          // Preserve authoritative confirmation & webhook flags unless explicitly updated
+          customerConfirmed: Boolean(prevOrder.customerConfirmed || incoming.customerConfirmed),
+          customerConfirmedAt: prevOrder.customerConfirmedAt || incoming.customerConfirmedAt,
+          confirmationMethod: prevOrder.confirmationMethod || incoming.confirmationMethod,
+          confirmedByAdminId: prevOrder.confirmedByAdminId || incoming.confirmedByAdminId,
+          confirmedByAdminName: prevOrder.confirmedByAdminName || incoming.confirmedByAdminName,
+          whatsappMessageId: incoming.whatsappMessageId || prevOrder.whatsappMessageId,
+          whatsappReminderMessageId: incoming.whatsappReminderMessageId || prevOrder.whatsappReminderMessageId,
+          whatsappProcessedMessageIds: Array.from(
+            new Set([
+              ...(Array.isArray(prevOrder.whatsappProcessedMessageIds) ? prevOrder.whatsappProcessedMessageIds : []),
+              ...(Array.isArray(incoming.whatsappProcessedMessageIds) ? incoming.whatsappProcessedMessageIds : []),
+            ])
+          ),
+          inventoryRestored: Boolean(prevOrder.inventoryRestored || incoming.inventoryRestored),
+          inventoryRestoredAt: prevOrder.inventoryRestoredAt || incoming.inventoryRestoredAt,
+          reminder23hSent: Boolean(prevOrder.reminder23hSent || incoming.reminder23hSent),
+          reminder23hSentAt: prevOrder.reminder23hSentAt || incoming.reminder23hSentAt,
+          updatedAt: nowIso,
+          syncVersion: Math.max(prevSync, incSync) + 1,
+        };
+        existing[idx] = merged;
+        savedOrder = merged;
       } else {
-        existing.unshift(order);
+        const waPolicy = getEffectiveWhatsAppPolicy();
+        const mode = String(incoming.paymentMode || 'COD').toUpperCase() === 'PREPAID' ? 'Prepaid' : 'COD';
+        const requiresConfirmation = mode === 'COD' ? waPolicy.confirmCodOrders : waPolicy.confirmPrepaidOrders;
+
+        savedOrder = {
+          ...incoming,
+          paymentMode: mode,
+          orderStatus: requiresConfirmation ? 'NEW' : incoming.orderStatus || 'NEW',
+          customerConfirmed: requiresConfirmation ? false : Boolean(incoming.customerConfirmed),
+          codVerificationStatus: requiresConfirmation ? 'UNVERIFIED' : incoming.codVerificationStatus || 'UNVERIFIED',
+          whatsappStatus: requiresConfirmation ? 'Pending' : incoming.whatsappStatus,
+          needsManualFollowUp: false,
+          inventoryRestored: false,
+          reminder23hSent: false,
+          confirmationTask: {
+            status: requiresConfirmation ? 'pending' : 'confirmed',
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          },
+          createdAt: incoming.createdAt || nowIso,
+          updatedAt: nowIso,
+          syncVersion: 1,
+        };
+        existing.unshift(savedOrder);
       }
+
+      // DATABASE-FIRST: Persist order to authoritative store BEFORE any external WhatsApp API call
       writeServerOrders(existing);
-      return res.json({ success: true, order });
+
+      if (isNewOrder) {
+        recordConfirmationAuditLog({
+          orderId: savedOrder.id,
+          eventType: 'ORDER_CREATED_UPCOMING',
+          previousStatus: 'NONE',
+          newStatus: 'Upcoming',
+          confirmationMethod: 'System',
+          notes: `Order saved (${savedOrder.paymentMode}, Rs ${Math.round(Number(savedOrder.total || 0))}). Confirmation task created.`,
+        });
+
+        // Trigger automatic WhatsApp confirmation best-effort (never blocks or deletes order on Meta failure)
+        const waResult = await triggerOrderConfirmationWhatsApp(savedOrder, {
+          forceNowOverride: Boolean(req.body?.forceSendNow),
+          mockTransport: undefined,
+        }).catch((err: any) => ({
+          status: 'failed',
+          error: err?.message || 'WhatsApp trigger failed',
+        }));
+
+        // Reload latest persisted version after WhatsApp metadata update
+        const refreshed = readServerOrders().find((o) => o.id === savedOrder.id) || savedOrder;
+        return res.json({ success: true, order: refreshed, whatsappAutomation: waResult });
+      }
+
+      return res.json({ success: true, order: savedOrder });
     } catch (err: any) {
       return res.status(500).json({ success: false, message: err.message || 'Failed to save order.' });
     }
@@ -1255,7 +1720,37 @@ async function startServer() {
   app.post('/api/admin/integrations-config', requireSuperAdmin, (req: Request, res: Response) => {
     try {
       const existing = readServerIntegrations();
+      const prevWaEnabled = existing?.whatsappSettings?.enabled !== false && existing?.whatsappIntegrationDeleted !== true;
       const merged = mergeIntegrationsConfigPreservingSecrets(existing, req.body || {});
+      const nextWaEnabled = merged?.whatsappSettings?.enabled !== false && merged?.whatsappIntegrationDeleted !== true;
+      const nowIso = new Date().toISOString();
+
+      // Track exact timestamp when WhatsApp Automation transitions OFF -> ON so old orders are never resent blindly
+      if (!prevWaEnabled && nextWaEnabled) {
+        merged.whatsappSettings = {
+          ...(merged.whatsappSettings || {}),
+          automationEnabledAt: nowIso,
+        };
+      }
+      if (prevWaEnabled !== nextWaEnabled) {
+        const adminUser = (req as any).adminUser;
+        recordConfirmationAuditLog({
+          orderId: 'SYSTEM',
+          eventType: nextWaEnabled ? 'WHATSAPP_AUTOMATION_ENABLED' : 'WHATSAPP_AUTOMATION_DISABLED',
+          previousStatus: prevWaEnabled ? 'ON' : 'OFF',
+          newStatus: nextWaEnabled ? 'ON' : 'OFF',
+          confirmationMethod: 'Manual',
+          adminId: adminUser?.uid || 'admin',
+          adminName: adminUser?.name || 'Admin',
+          notes: nextWaEnabled
+            ? 'WhatsApp Automation turned ON. Only new/eligible pending tasks will be processed; historical orders will not be resent blindly.'
+            : 'WhatsApp Automation turned OFF. Checkout, database, manual confirmation, and Delhivery remain fully operational.',
+        });
+      }
+
+      // Invalidate cached WhatsApp health probe whenever settings change
+      waHealthCache = null;
+
       writeServerIntegrations(merged);
       if (merged.smsSettings) {
         dynamicSmsConfig = merged.smsSettings;
@@ -2393,133 +2888,75 @@ async function startServer() {
     }
   });
 
-  // Standard shipping label printable view (Official Delhivery 4x6 Thermal Format)
-  app.get('/api/shipping/label/:awb', (req: Request, res: Response) => {
-    const awb = req.params.awb || '60669610000011';
-    const orderId = (req.query.orderId as string) || 'ORD-REDMODE-LIVE';
-    const customer = (req.query.name as string) || 'Valued Customer';
-    const address = (req.query.address as string) || 'Customer Delivery Address';
-    const phone = (req.query.phone as string) || '+91 98XXXXXXXX';
-    const pin = (req.query.pin as string) || '110001';
-    const mode = (req.query.mode as string) || 'DELHIVERY SURFACE';
-    const payMode = (req.query.pay as string) || 'COD';
-    const amount = (req.query.amt as string) || '₹1,499';
+  // Standard shipping label printable view (Authenticated, Official Scannable Code-128 4x6 Thermal Format)
+  app.get('/api/shipping/label/:awb', requireStaffOrAdmin, (req: Request, res: Response) => {
+    const awb = String(req.params.awb || '').trim();
+    if (!awb || isPlaceholderAwbValue(awb)) {
+      return res.status(400).json({
+        success: false,
+        message: 'A valid live Delhivery AWB number is required to render a shipping label.',
+      });
+    }
 
-    const html = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <title>Delhivery Shipping Label - ${awb}</title>
-        <style>
-          @page { size: 4in 6in; margin: 0; }
-          * { box-sizing: border-box; }
-          body { 
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; 
-            padding: 14px; 
-            max-width: 384px; 
-            margin: 0 auto; 
-            border: 2px solid #000;
-            color: #000;
-            background: #fff;
-          }
-          .hdr { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #000; padding-bottom: 8px; margin-bottom: 8px; }
-          .logo-crop { width: 155px; height: 36px; overflow: hidden; display: flex; align-items: center; justify-content: flex-start; }
-          .logo-img { width: 200px; height: 200px; object-fit: cover; margin-left: -16px; mix-blend-mode: multiply; }
-          .logo-del { font-size: 15px; font-weight: 900; color: #E52229; letter-spacing: 0.5px; }
-          .routing { text-align: right; }
-          .sort-code { font-size: 20px; font-weight: 900; font-family: monospace; }
-          .awb-box { text-align: center; border-bottom: 2px solid #000; padding: 10px 0; margin-bottom: 8px; }
-          .barcode-bars { 
-            display: inline-block; 
-            letter-spacing: 3px; 
-            font-size: 32px; 
-            font-family: 'Libre Barcode 128', monospace, sans-serif; 
-            line-height: 1;
-            height: 48px;
-            background: repeating-linear-gradient(90deg, #000 0px, #000 2px, #fff 2px, #fff 4px, #000 4px, #000 7px, #fff 7px, #fff 9px);
-            width: 85%;
-            margin: 0 auto 6px auto;
-          }
-          .awb-num { font-size: 18px; font-weight: 900; letter-spacing: 2px; font-family: monospace; }
-          .meta-grid { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1.5px solid #000; padding-bottom: 6px; margin-bottom: 8px; font-size: 11px; }
-          .consignee { border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 8px; }
-          .sec-title { font-size: 10px; font-weight: 800; text-transform: uppercase; color: #333; margin-bottom: 3px; }
-          .name { font-size: 14px; font-weight: 800; margin-bottom: 2px; }
-          .addr { font-size: 11px; line-height: 1.4; }
-          .shipper { font-size: 10px; line-height: 1.4; border-bottom: 1px dashed #000; padding-bottom: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-          .rto-emblem { width: 34px; height: 30px; overflow: hidden; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-          .rto-emblem img { width: 52px; height: 52px; object-fit: cover; mix-blend-mode: multiply; }
-          .pay-pill { display: inline-block; background: #000; color: #fff; font-weight: 900; font-size: 13px; padding: 3px 8px; border-radius: 3px; }
-          .footer { font-size: 9px; text-align: center; color: #444; }
-        </style>
-      </head>
-      <body>
-        <div class="hdr">
-          <div>
-            <div class="logo-crop">
-              <img src="/assets/aistudio/2_cc1df8cf.jpg" alt="REDMODE" class="logo-img" />
-            </div>
-            <div style="font-size:9px; font-weight:800; color:#555; letter-spacing:0.4px;">WOMEN ETHNIC WEAR &bull; EXPRESS</div>
-          </div>
-          <div class="routing">
-            <div class="logo-del">DELHIVERY</div>
-            <div class="sort-code">MEE / PCK</div>
-          </div>
-        </div>
+    const dCfg = getEffectiveDelhiveryConfig();
+    const storedOrders = readServerOrders();
+    const matchedOrder = storedOrders.find(
+      (o: any) =>
+        String(o?.awb_number || '').trim() === awb ||
+        String(o?.shipmozo?.awb || '').trim() === awb
+    );
 
-        <div class="awb-box">
-          <div class="barcode-bars"></div>
-          <div class="awb-num">AWB: ${awb}</div>
-          <div style="font-size:10px; font-weight:700; margin-top:3px;">ORDER REF: ${orderId}</div>
-        </div>
+    const cust = matchedOrder?.customer || {};
+    const orderId = String(matchedOrder?.id || req.query.orderId || 'ORD-REDMODE').trim();
+    const customerName = String(cust.name || req.query.name || 'Customer').trim();
+    const address = String(
+      [cust.house, cust.address || cust.street, cust.landmark].filter(Boolean).join(', ') ||
+        req.query.address ||
+        'Delivery Address'
+    ).trim();
+    const city = String(cust.city || req.query.city || '').trim();
+    const state = String(cust.state || req.query.state || '').trim();
+    const pincode = String(cust.pincode || req.query.pin || '').trim() || '110001';
+    const phone = String(cust.phone || cust.mobile || req.query.phone || '').trim();
+    const shippingMode = String(req.query.mode || 'Delhivery Surface').trim();
+    const paymentMode = String(matchedOrder?.paymentMode || req.query.pay || 'COD').trim();
+    const totalAmount = Number(matchedOrder?.total || String(req.query.amt || '0').replace(/[^0-9.]/g, '') || 0);
+    const items = Array.isArray(matchedOrder?.items) ? matchedOrder.items : [];
+    const itemsSummary =
+      items.length > 0
+        ? items.map((it: any) => `${it.name || 'Apparel'} (${it.size || 'Free'}) x${it.quantity || 1}`).join(', ')
+        : 'RedMode Apparel';
+    const totalQty = items.reduce((acc: number, it: any) => acc + (Number(it.quantity) || 1), 0) || 1;
+    const weightKg = Number(matchedOrder?.final_package_weight || matchedOrder?.final_package_weight_kg || 0.45);
+    const dims = `${Number(matchedOrder?.final_package_length || 25)} x ${Number(matchedOrder?.final_package_width || 20)} x ${Number(matchedOrder?.final_package_height || 4)} cm`;
 
-        <div class="meta-grid">
-          <div>
-            <strong>MODE:</strong> ${mode}<br>
-            <strong>DATE:</strong> ${new Date().toLocaleDateString('en-IN')}<br>
-            <strong>WT:</strong> 0.65 KG
-          </div>
-          <div style="text-align:right;">
-            <strong>PAYMENT:</strong> <span class="pay-pill">${payMode}</span><br>
-            <strong style="font-size:13px;">COLLECT: ${amount}</strong>
-          </div>
-        </div>
-
-        <div class="consignee">
-          <div class="sec-title">SHIP TO (CONSIGNEE):</div>
-          <div class="name">${customer}</div>
-          <div class="addr">${address}</div>
-          <div style="margin-top:4px; font-size:12px; font-weight:800;">
-            PIN: ${pin} | PH: ${phone}
-          </div>
-        </div>
-
-        <div class="shipper">
-          <div>
-            <div class="sec-title">RETURN / PICKUP WAREHOUSE (ORIGIN):</div>
-            <strong>REDMODE B2C (Client: Redmode)</strong><br>
-            1807, Zakir Hussain Colony, Near Madina Masjid,<br>
-            Meerut, Uttar Pradesh, India - 250002<br>
-            Contact: +91 73027 97464 | myredmode@gmail.com
-          </div>
-          <div class="rto-emblem">
-            <img src="/assets/aistudio/1_fdd0186c.jpg" alt="REDMODE" />
-          </div>
-        </div>
-
-        <div class="footer">
-          Official REDMODE &times; Delhivery B2C Thermal Dispatch Label • Non-Negotiable
-        </div>
-        <script>
-          window.onload = function() {
-            setTimeout(function() { window.print(); }, 400);
-          };
-        </script>
-      </body>
-      </html>
-    `;
-    res.setHeader('Content-Type', 'text/html');
+    const html = buildDelhiveryThermalLabelHtml({
+      awb,
+      orderId,
+      customerName,
+      address,
+      city,
+      state,
+      pincode,
+      phone,
+      shippingMode,
+      paymentMode,
+      codAmount: paymentMode.toUpperCase() === 'COD' ? totalAmount : 0,
+      totalAmount,
+      itemsSummary,
+      totalQty,
+      weightKg,
+      dimensionsText: dims,
+      sortCode: matchedOrder?.delhiverySortCode || undefined,
+      warehouseName: dCfg.warehouseName || 'REDMODE B2C',
+      pickupAddress: dCfg.pickupAddress || '1807, Zakir Hussain Colony, Near Madina Masjid, Meerut, Uttar Pradesh, India',
+      pickupPincode: dCfg.pickupPincode || '250002',
+      pickupPhone: dCfg.pickupPhone || '+91 73027 97464',
+      clientName: dCfg.clientName || 'Redmode',
+      orderDateText: new Date(matchedOrder?.createdAt || Date.now()).toLocaleDateString('en-IN'),
+      autoPrint: true,
+    });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(html);
   });
 
@@ -2671,6 +3108,2113 @@ async function startServer() {
     }
   });
 
+  // ==========================================
+  // PHASE 2: WHATSAPP ORDER CONFIRMATION AUTOMATION ENGINE
+  // ==========================================
+  interface WhatsAppMessageLogRecord {
+    id: string;
+    wamid?: string;
+    orderId: string;
+    customerName?: string;
+    customerPhone: string;
+    messageType:
+      | 'order_confirmation'
+      | 'reminder_23h'
+      | 'confirm_ack'
+      | 'cancel_ack'
+      | 'dispatch_tracking'
+      | 'test'
+      | 'inbound_reply';
+    direction: 'outbound' | 'inbound';
+    templateName?: string;
+    status: 'scheduled' | 'sent' | 'delivered' | 'read' | 'failed' | 'received';
+    sentAt: string;
+    deliveredAt?: string;
+    readAt?: string;
+    failedAt?: string;
+    scheduledFor?: string;
+    customerReply?: string;
+    replyAction?: 'YES' | 'CANCEL' | 'OTHER';
+    errorCode?: string;
+    errorMessage?: string;
+    retryCount: number;
+    maxRetries: number;
+    retryStatus: 'none' | 'scheduled' | 'retrying' | 'exhausted' | 'succeeded';
+    nextRetryAt?: string;
+    payloadSummary?: string;
+    updatedAt: string;
+  }
+
+  interface ProcessedWhatsAppEventsState {
+    messages: Record<string, string>;
+    statuses: Record<string, string>;
+    remindersSent: Record<string, string>;
+    confirmationsSent: Record<string, string>;
+  }
+
+  interface ConfirmationAuditLogRecord {
+    id: string;
+    orderId: string;
+    eventType: string;
+    previousStatus: string;
+    newStatus: string;
+    confirmationMethod?: 'WhatsApp' | 'Manual' | 'System';
+    adminId?: string;
+    adminName?: string;
+    whatsappMessageId?: string;
+    timestamp: string;
+    errorDetails?: string;
+    notes?: string;
+  }
+
+  const whatsappLogsDbPath = path.join(dataDir, 'whatsapp-logs.json');
+  const whatsappProcessedDbPath = path.join(dataDir, 'whatsapp-processed-events.json');
+  const confirmationAuditLogsDbPath = path.join(dataDir, 'confirmation-audit-logs.json');
+  const waConfirmationInFlight = new Set<string>();
+  const waConfirmAtomicLock = new Set<string>();
+  const waCancelAtomicLock = new Set<string>();
+  const waReminderInFlight = new Set<string>();
+  const waStockRestoreInFlight = new Set<string>();
+  const waReplyInFlight = new Set<string>();
+  let waSchedulerTickRunning = false;
+  let waHealthCache: {
+    status: 'Connected' | 'Disconnected' | 'Authentication Error' | 'Temporarily Unavailable';
+    automationEnabled: boolean;
+    checkedAt: string;
+    expiresAtMs: number;
+    reason?: string;
+    verifiedName?: string;
+    displayPhoneNumber?: string;
+    httpStatus?: number;
+  } | null = null;
+
+  function readConfirmationAuditLogs(): ConfirmationAuditLogRecord[] {
+    try {
+      if (fs.existsSync(confirmationAuditLogsDbPath)) {
+        const parsed = JSON.parse(fs.readFileSync(confirmationAuditLogsDbPath, 'utf-8'));
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {}
+    return [];
+  }
+
+  function recordConfirmationAuditLog(
+    entry: Omit<ConfirmationAuditLogRecord, 'id' | 'timestamp'> & { timestamp?: string }
+  ): ConfirmationAuditLogRecord {
+    const safeError = entry.errorDetails
+      ? String(entry.errorDetails)
+          .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
+          .replace(/EAA[A-Za-z0-9]+/g, '[REDACTED_TOKEN]')
+          .slice(0, 400)
+      : undefined;
+
+    const record: ConfirmationAuditLogRecord = {
+      id: `caud_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: entry.timestamp || new Date().toISOString(),
+      orderId: String(entry.orderId || 'UNKNOWN'),
+      eventType: String(entry.eventType || 'EVENT'),
+      previousStatus: String(entry.previousStatus || ''),
+      newStatus: String(entry.newStatus || ''),
+      confirmationMethod: entry.confirmationMethod,
+      adminId: entry.adminId,
+      adminName: entry.adminName,
+      whatsappMessageId: entry.whatsappMessageId,
+      errorDetails: safeError,
+      notes: entry.notes ? String(entry.notes).slice(0, 400) : undefined,
+    };
+
+    try {
+      const existing = readConfirmationAuditLogs();
+      writeJsonAtomic(confirmationAuditLogsDbPath, [record, ...existing].slice(0, 1000));
+    } catch (e) {
+      console.error('Failed writing confirmation-audit-logs.json:', e);
+    }
+    return record;
+  }
+
+  const normalizeWaOrderId = (orderId: string): string =>
+    String(orderId || '').trim().replace(/^#/, '').toUpperCase();
+
+  const normalizeIndianPhoneForWa = (raw?: string): string => {
+    const digits = String(raw || '').replace(/\D/g, '');
+    if (digits.length === 10) return `91${digits}`;
+    if (digits.length > 10 && digits.startsWith('91')) return digits.slice(0, 12);
+    return digits;
+  };
+
+  function readWhatsAppLogs(): WhatsAppMessageLogRecord[] {
+    try {
+      if (fs.existsSync(whatsappLogsDbPath)) {
+        const parsed = JSON.parse(fs.readFileSync(whatsappLogsDbPath, 'utf-8'));
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {}
+    return [];
+  }
+
+  function writeWhatsAppLogs(logs: WhatsAppMessageLogRecord[]) {
+    try {
+      writeJsonAtomic(whatsappLogsDbPath, logs.slice(0, 1000));
+    } catch (e) {
+      console.error('Failed writing whatsapp-logs.json:', e);
+    }
+  }
+
+  function upsertWhatsAppLog(entry: WhatsAppMessageLogRecord): WhatsAppMessageLogRecord {
+    const logs = readWhatsAppLogs();
+    const idx = logs.findIndex(
+      (l) => l.id === entry.id || (entry.wamid && l.wamid && l.wamid === entry.wamid && l.direction === entry.direction)
+    );
+    if (idx >= 0) {
+      logs[idx] = { ...logs[idx], ...entry, updatedAt: new Date().toISOString() };
+      writeWhatsAppLogs(logs);
+      return logs[idx];
+    }
+    const created = { ...entry, updatedAt: entry.updatedAt || new Date().toISOString() };
+    writeWhatsAppLogs([created, ...logs]);
+    return created;
+  }
+
+  function readProcessedWhatsAppEvents(): ProcessedWhatsAppEventsState {
+    try {
+      if (fs.existsSync(whatsappProcessedDbPath)) {
+        const parsed = JSON.parse(fs.readFileSync(whatsappProcessedDbPath, 'utf-8'));
+        if (parsed && typeof parsed === 'object') {
+          return {
+            messages: parsed.messages && typeof parsed.messages === 'object' ? parsed.messages : {},
+            statuses: parsed.statuses && typeof parsed.statuses === 'object' ? parsed.statuses : {},
+            remindersSent: parsed.remindersSent && typeof parsed.remindersSent === 'object' ? parsed.remindersSent : {},
+            confirmationsSent:
+              parsed.confirmationsSent && typeof parsed.confirmationsSent === 'object' ? parsed.confirmationsSent : {},
+          };
+        }
+      }
+    } catch {}
+    return { messages: {}, statuses: {}, remindersSent: {}, confirmationsSent: {} };
+  }
+
+  function writeProcessedWhatsAppEvents(state: ProcessedWhatsAppEventsState) {
+    try {
+      const trimMap = (obj: Record<string, string>, maxEntries = 2000): Record<string, string> => {
+        const entries = Object.entries(obj);
+        if (entries.length <= maxEntries) return obj;
+        return Object.fromEntries(entries.slice(-maxEntries));
+      };
+      writeJsonAtomic(whatsappProcessedDbPath, {
+        messages: trimMap(state.messages),
+        statuses: trimMap(state.statuses),
+        remindersSent: trimMap(state.remindersSent),
+        confirmationsSent: trimMap(state.confirmationsSent),
+      });
+    } catch (e) {
+      console.error('Failed writing whatsapp-processed-events.json:', e);
+    }
+  }
+
+  function getEffectiveWhatsAppPolicy() {
+    const cfg = readServerIntegrations();
+    const waCfg = cfg.whatsappSettings || {};
+    const isDeleted = cfg.whatsappIntegrationDeleted === true;
+    return {
+      enabled: !isDeleted && waCfg.enabled !== false,
+      orderConfirmationEnabled: !isDeleted && waCfg.orderConfirmationEnabled !== false,
+      reminder23hEnabled: !isDeleted && waCfg.reminder23hEnabled !== false,
+      confirmCodOrders: waCfg.confirmCodOrders !== false,
+      confirmPrepaidOrders: waCfg.confirmPrepaidOrders !== false,
+      respectSendingWindow: waCfg.respectSendingWindow !== false,
+      sendingWindowStartHour:
+        typeof waCfg.sendingWindowStartHour === 'number' ? waCfg.sendingWindowStartHour : 10,
+      sendingWindowEndHour:
+        typeof waCfg.sendingWindowEndHour === 'number' ? waCfg.sendingWindowEndHour : 21,
+      reminderDelayHours:
+        typeof waCfg.reminderDelayHours === 'number' && waCfg.reminderDelayHours > 0
+          ? waCfg.reminderDelayHours
+          : 23,
+      manualFollowUpHours:
+        typeof waCfg.manualFollowUpHours === 'number' && waCfg.manualFollowUpHours > 0
+          ? waCfg.manualFollowUpHours
+          : 26,
+      confirmationTemplateName: (
+        waCfg.confirmationTemplateName ||
+        process.env.WHATSAPP_CONFIRMATION_TEMPLATE ||
+        'redmode_order_confirmation'
+      ).trim(),
+      reminderTemplateName: (
+        waCfg.reminderTemplateName ||
+        process.env.WHATSAPP_REMINDER_TEMPLATE ||
+        'redmode_order_reminder_23h'
+      ).trim(),
+      templateLanguageCode: (
+        waCfg.templateLanguageCode ||
+        process.env.WHATSAPP_TEMPLATE_LANGUAGE ||
+        'en'
+      ).trim(),
+      apiEndpoint: (() => {
+        const rawEndpoint = String(
+          (process.env.ALLOW_LOCAL_TEST_ENDPOINTS === 'true' && process.env.WHATSAPP_TEST_API_ENDPOINT) ||
+            waCfg.apiEndpoint ||
+            'https://graph.facebook.com/v21.0'
+        )
+          .trim()
+          .replace(/\/+$/, '');
+        try {
+          const parsed = new URL(rawEndpoint);
+          if (
+            process.env.ALLOW_LOCAL_TEST_ENDPOINTS === 'true' &&
+            parsed.protocol === 'http:' &&
+            (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost')
+          ) {
+            return rawEndpoint;
+          }
+          if (parsed.protocol === 'https:' && parsed.hostname === 'graph.facebook.com') {
+            return rawEndpoint;
+          }
+        } catch {}
+        return 'https://graph.facebook.com/v21.0';
+      })(),
+      verifyToken: (
+        process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ||
+        process.env.WHATSAPP_VERIFY_TOKEN ||
+        waCfg.webhookVerifyToken ||
+        'redmode_wa_verify_2026'
+      ).trim(),
+      appSecret: (
+        process.env.WHATSAPP_APP_SECRET ||
+        process.env.META_APP_SECRET ||
+        cfg.whatsappAppSecret ||
+        ''
+      ).trim(),
+      relaySecret: (
+        process.env.REDMODE_RELAY_SECRET ||
+        cfg.redmodeRelaySecret ||
+        ''
+      ).trim(),
+    };
+  }
+
+  /**
+   * Computes whether `nowDate` falls within the configured IST (Asia/Kolkata, UTC+5:30) sending window.
+   * Outside 10:00 AM - 9:00 PM IST, returns the exact next 10:00 AM IST ISO timestamp.
+   */
+  function evaluateIstSendingWindow(
+    nowDate = new Date(),
+    startHour = 10,
+    endHour = 21
+  ): { withinWindow: boolean; istHour: number; istMinute: number; scheduledForIso?: string } {
+    const IST_OFFSET_MS = 330 * 60 * 1000;
+    const istMs = nowDate.getTime() + IST_OFFSET_MS;
+    const istDate = new Date(istMs);
+    const istHour = istDate.getUTCHours();
+    const istMinute = istDate.getUTCMinutes();
+
+    if (istHour >= startHour && istHour < endHour) {
+      return { withinWindow: true, istHour, istMinute };
+    }
+
+    const nextIst = new Date(istMs);
+    if (istHour >= endHour) {
+      nextIst.setUTCDate(nextIst.getUTCDate() + 1);
+    }
+    nextIst.setUTCHours(startHour, 0, 0, 0);
+    const scheduledUtcMs = nextIst.getTime() - IST_OFFSET_MS;
+    return {
+      withinWindow: false,
+      istHour,
+      istMinute,
+      scheduledForIso: new Date(scheduledUtcMs).toISOString(),
+    };
+  }
+
+  function buildOrderSummaryVariables(order: any) {
+    const customerName = String(order?.customer?.name || 'Customer').trim().slice(0, 80);
+    const orderId = String(order?.id || '').trim();
+    const items = Array.isArray(order?.items) ? order.items : [];
+    const itemsSummary =
+      items
+        .map((it: any) => {
+          const name = String(it?.name || 'Product').trim();
+          const size = String(it?.size || 'Standard').trim();
+          const qty = Math.max(1, Number(it?.quantity || 1));
+          return `${name} (Size: ${size} x ${qty})`;
+        })
+        .join(', ')
+        .slice(0, 500) || 'RedMode Item (x1)';
+    const paymentMode = String(order?.paymentMode || 'COD').trim();
+    const amount = `Rs ${Math.round(Number(order?.total || 0)).toLocaleString('en-IN')}`;
+    const addrParts = [
+      order?.customer?.house,
+      order?.customer?.address,
+      order?.customer?.street,
+      order?.customer?.landmark,
+      order?.customer?.city,
+      order?.customer?.state,
+      order?.customer?.pincode,
+    ]
+      .map((p) => String(p || '').trim())
+      .filter(Boolean);
+    const deliveryAddress = (addrParts.join(', ') || 'Registered Address').slice(0, 300);
+
+    return {
+      customerName,
+      orderId,
+      itemsSummary,
+      paymentMode,
+      amount,
+      deliveryAddress,
+    };
+  }
+
+  function buildOrderUtilityTemplateComponents(order: any) {
+    const vars = buildOrderSummaryVariables(order);
+    const cleanOrderId = String(order?.id || '').trim();
+    return {
+      vars,
+      components: [
+        {
+          type: 'body',
+          parameters: [
+            { type: 'text', text: vars.customerName },
+            { type: 'text', text: vars.orderId },
+            { type: 'text', text: vars.itemsSummary },
+            { type: 'text', text: vars.paymentMode },
+            { type: 'text', text: vars.amount },
+            { type: 'text', text: vars.deliveryAddress },
+          ],
+        },
+        {
+          type: 'button',
+          sub_type: 'quick_reply',
+          index: '0',
+          parameters: [{ type: 'payload', payload: `CONFIRM_ORDER::${cleanOrderId}` }],
+        },
+        {
+          type: 'button',
+          sub_type: 'quick_reply',
+          index: '1',
+          parameters: [{ type: 'payload', payload: `CANCEL_ORDER::${cleanOrderId}` }],
+        },
+      ],
+    };
+  }
+
+  function computeRetryBackoffIso(retryCount: number): string {
+    const minutesSchedule = [2, 10, 30];
+    const mins = minutesSchedule[Math.min(retryCount, minutesSchedule.length - 1)] || 30;
+    return new Date(Date.now() + mins * 60 * 1000).toISOString();
+  }
+
+  function appendOrderActivity(order: any, title: string, description: string, source: 'whatsapp' | 'system' | 'admin' | 'customer' = 'whatsapp') {
+    const prevLog = Array.isArray(order.activityLog) ? order.activityLog : [];
+    return [
+      {
+        id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: new Date().toISOString(),
+        title,
+        description,
+        source,
+      },
+      ...prevLog,
+    ].slice(0, 60);
+  }
+
+  async function dispatchWhatsAppUtilityTemplate(params: {
+    order: any;
+    messageType: 'order_confirmation' | 'reminder_23h';
+    existingLogId?: string;
+    retryCount?: number;
+  }): Promise<{
+    success: boolean;
+    wamid?: string;
+    log: WhatsAppMessageLogRecord;
+    error?: string;
+    errorCode?: string;
+  }> {
+    const { order, messageType, existingLogId } = params;
+    const retryCount = params.retryCount || 0;
+    const maxRetries = 3;
+    const nowIso = new Date().toISOString();
+    const policy = getEffectiveWhatsAppPolicy();
+    const creds = getEffectiveWhatsAppCreds();
+    const templateName =
+      messageType === 'reminder_23h' ? policy.reminderTemplateName : policy.confirmationTemplateName;
+    const rawPhone = order?.customer?.mobile || order?.customer?.phone || '';
+    const formattedTo = normalizeIndianPhoneForWa(rawPhone);
+    const { vars, components } = buildOrderUtilityTemplateComponents(order);
+    const payloadSummary = `${vars.orderId} | ${vars.customerName} | ${vars.itemsSummary} | ${vars.paymentMode} ${vars.amount} | ${vars.deliveryAddress}`;
+    const logId = existingLogId || `walog_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+    if (!policy.enabled) {
+      const log = upsertWhatsAppLog({
+        id: logId,
+        orderId: order.id,
+        customerName: vars.customerName,
+        customerPhone: formattedTo || rawPhone,
+        messageType,
+        direction: 'outbound',
+        templateName,
+        status: 'failed',
+        sentAt: nowIso,
+        failedAt: nowIso,
+        errorCode: 'INTEGRATION_DISABLED',
+        errorMessage: 'Meta WhatsApp Cloud API integration is deactivated.',
+        retryCount,
+        maxRetries,
+        retryStatus: 'none',
+        payloadSummary,
+        updatedAt: nowIso,
+      });
+      return { success: false, log, error: log.errorMessage, errorCode: log.errorCode };
+    }
+
+    if (!formattedTo || formattedTo.length < 10) {
+      const log = upsertWhatsAppLog({
+        id: logId,
+        orderId: order.id,
+        customerName: vars.customerName,
+        customerPhone: rawPhone || 'Missing',
+        messageType,
+        direction: 'outbound',
+        templateName,
+        status: 'failed',
+        sentAt: nowIso,
+        failedAt: nowIso,
+        errorCode: 'INVALID_PHONE',
+        errorMessage: 'Valid customer phone number is required for WhatsApp delivery.',
+        retryCount,
+        maxRetries,
+        retryStatus: 'exhausted',
+        payloadSummary,
+        updatedAt: nowIso,
+      });
+      return { success: false, log, error: log.errorMessage, errorCode: log.errorCode };
+    }
+
+    if (!creds.token || !creds.phoneNumberId) {
+      const nextRetryCount = retryCount + 1;
+      const canRetry = nextRetryCount < maxRetries;
+      const log = upsertWhatsAppLog({
+        id: logId,
+        orderId: order.id,
+        customerName: vars.customerName,
+        customerPhone: formattedTo,
+        messageType,
+        direction: 'outbound',
+        templateName,
+        status: 'failed',
+        sentAt: nowIso,
+        failedAt: nowIso,
+        errorCode: 'MISSING_CREDENTIALS',
+        errorMessage: 'WhatsApp Cloud API Access Token or Phone Number ID is not configured.',
+        retryCount: nextRetryCount,
+        maxRetries,
+        retryStatus: canRetry ? 'scheduled' : 'exhausted',
+        nextRetryAt: canRetry ? computeRetryBackoffIso(retryCount) : undefined,
+        payloadSummary,
+        updatedAt: nowIso,
+      });
+      return { success: false, log, error: log.errorMessage, errorCode: log.errorCode };
+    }
+
+    const requestBody = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: formattedTo,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: policy.templateLanguageCode || 'en' },
+        components,
+      },
+    };
+
+    try {
+      const metaEndpoint = `${policy.apiEndpoint}/${creds.phoneNumberId}/messages`;
+      const metaRes = await fetch(metaEndpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${creds.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
+      const metaData: any = await metaRes.json().catch(() => ({}));
+      const wamid = metaData?.messages?.[0]?.id;
+
+      if (!metaRes.ok || !wamid) {
+        const errCode = String(metaData?.error?.code || metaRes.status || 'META_API_ERROR');
+        const errMsg =
+          metaData?.error?.error_user_msg ||
+          metaData?.error?.message ||
+          `Meta WhatsApp API returned HTTP ${metaRes.status}`;
+        const nextRetryCount = retryCount + 1;
+        const canRetry = nextRetryCount < maxRetries && metaRes.status !== 400;
+        const log = upsertWhatsAppLog({
+          id: logId,
+          orderId: order.id,
+          customerName: vars.customerName,
+          customerPhone: formattedTo,
+          messageType,
+          direction: 'outbound',
+          templateName,
+          status: 'failed',
+          sentAt: nowIso,
+          failedAt: nowIso,
+          errorCode: errCode,
+          errorMessage: errMsg,
+          retryCount: nextRetryCount,
+          maxRetries,
+          retryStatus: canRetry ? 'scheduled' : 'exhausted',
+          nextRetryAt: canRetry ? computeRetryBackoffIso(retryCount) : undefined,
+          payloadSummary,
+          updatedAt: nowIso,
+        });
+        return { success: false, log, error: errMsg, errorCode: errCode };
+      }
+
+      const log = upsertWhatsAppLog({
+        id: logId,
+        wamid,
+        orderId: order.id,
+        customerName: vars.customerName,
+        customerPhone: formattedTo,
+        messageType,
+        direction: 'outbound',
+        templateName,
+        status: 'sent',
+        sentAt: nowIso,
+        errorCode: undefined,
+        errorMessage: undefined,
+        retryCount,
+        maxRetries,
+        retryStatus: retryCount > 0 ? 'succeeded' : 'none',
+        nextRetryAt: undefined,
+        payloadSummary,
+        updatedAt: nowIso,
+      });
+
+      return { success: true, wamid, log };
+    } catch (err: any) {
+      const nextRetryCount = retryCount + 1;
+      const canRetry = nextRetryCount < maxRetries;
+      const errMsg = err?.message || 'Network failure contacting Meta WhatsApp Cloud API.';
+      const log = upsertWhatsAppLog({
+        id: logId,
+        orderId: order.id,
+        customerName: vars.customerName,
+        customerPhone: formattedTo,
+        messageType,
+        direction: 'outbound',
+        templateName,
+        status: 'failed',
+        sentAt: nowIso,
+        failedAt: nowIso,
+        errorCode: 'NETWORK_ERROR',
+        errorMessage: errMsg,
+        retryCount: nextRetryCount,
+        maxRetries,
+        retryStatus: canRetry ? 'scheduled' : 'exhausted',
+        nextRetryAt: canRetry ? computeRetryBackoffIso(retryCount) : undefined,
+        payloadSummary,
+        updatedAt: nowIso,
+      });
+      return { success: false, log, error: errMsg, errorCode: 'NETWORK_ERROR' };
+    }
+  }
+
+  async function dispatchWhatsAppSessionText(params: {
+    order: any;
+    messageType: 'confirm_ack' | 'cancel_ack';
+    textBody: string;
+  }) {
+    const { order, messageType, textBody } = params;
+    const nowIso = new Date().toISOString();
+    const policy = getEffectiveWhatsAppPolicy();
+    const creds = getEffectiveWhatsAppCreds();
+    const rawPhone = order?.customer?.mobile || order?.customer?.phone || '';
+    const formattedTo = normalizeIndianPhoneForWa(rawPhone);
+    const logId = `walog_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+    if (!policy.enabled || !creds.token || !creds.phoneNumberId || !formattedTo) {
+      return upsertWhatsAppLog({
+        id: logId,
+        orderId: order.id,
+        customerName: order?.customer?.name || 'Customer',
+        customerPhone: formattedTo || rawPhone,
+        messageType,
+        direction: 'outbound',
+        status: 'failed',
+        sentAt: nowIso,
+        failedAt: nowIso,
+        errorCode: !policy.enabled ? 'INTEGRATION_DISABLED' : 'MISSING_CREDENTIALS',
+        errorMessage: !policy.enabled
+          ? 'WhatsApp integration is disabled.'
+          : 'WhatsApp credentials missing for acknowledgement message.',
+        retryCount: 0,
+        maxRetries: 2,
+        retryStatus: 'none',
+        payloadSummary: textBody.slice(0, 240),
+        updatedAt: nowIso,
+      });
+    }
+
+    try {
+      const metaRes = await fetch(`${policy.apiEndpoint}/${creds.phoneNumberId}/messages`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${creds.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: formattedTo,
+          type: 'text',
+          text: { preview_url: false, body: textBody },
+        }),
+      });
+      const metaData: any = await metaRes.json().catch(() => ({}));
+      const wamid = metaData?.messages?.[0]?.id;
+
+      if (!metaRes.ok || !wamid) {
+        return upsertWhatsAppLog({
+          id: logId,
+          orderId: order.id,
+          customerName: order?.customer?.name || 'Customer',
+          customerPhone: formattedTo,
+          messageType,
+          direction: 'outbound',
+          status: 'failed',
+          sentAt: nowIso,
+          failedAt: nowIso,
+          errorCode: String(metaData?.error?.code || metaRes.status),
+          errorMessage: metaData?.error?.message || `Meta API HTTP ${metaRes.status}`,
+          retryCount: 1,
+          maxRetries: 2,
+          retryStatus: 'scheduled',
+          nextRetryAt: computeRetryBackoffIso(0),
+          payloadSummary: textBody.slice(0, 240),
+          updatedAt: nowIso,
+        });
+      }
+
+      return upsertWhatsAppLog({
+        id: logId,
+        wamid,
+        orderId: order.id,
+        customerName: order?.customer?.name || 'Customer',
+        customerPhone: formattedTo,
+        messageType,
+        direction: 'outbound',
+        status: 'sent',
+        sentAt: nowIso,
+        retryCount: 0,
+        maxRetries: 2,
+        retryStatus: 'none',
+        payloadSummary: textBody.slice(0, 240),
+        updatedAt: nowIso,
+      });
+    } catch (err: any) {
+      return upsertWhatsAppLog({
+        id: logId,
+        orderId: order.id,
+        customerName: order?.customer?.name || 'Customer',
+        customerPhone: formattedTo,
+        messageType,
+        direction: 'outbound',
+        status: 'failed',
+        sentAt: nowIso,
+        failedAt: nowIso,
+        errorCode: 'NETWORK_ERROR',
+        errorMessage: err?.message || 'Failed sending acknowledgement message.',
+        retryCount: 1,
+        maxRetries: 2,
+        retryStatus: 'scheduled',
+        nextRetryAt: computeRetryBackoffIso(0),
+        payloadSummary: textBody.slice(0, 240),
+        updatedAt: nowIso,
+      });
+    }
+  }
+
+  function updateServerOrderById(orderId: string, mutator: (prev: any) => any): any | null {
+    const norm = normalizeWaOrderId(orderId);
+    const list = readServerOrders();
+    const idx = list.findIndex((o) => normalizeWaOrderId(o?.id) === norm);
+    if (idx < 0) return null;
+    const prev = list[idx];
+    const next = mutator(prev);
+    if (!next) return prev;
+    list[idx] = {
+      ...next,
+      updatedAt: new Date().toISOString(),
+      syncVersion: Number(prev.syncVersion || 0) + 1,
+    };
+    writeServerOrders(list);
+    return list[idx];
+  }
+
+  /**
+   * Automatically triggers or schedules the initial WhatsApp Utility Template confirmation for a new order.
+   * Respects 10 AM - 9 PM IST window when configured and prevents duplicate sends.
+   */
+  async function triggerOrderConfirmationWhatsApp(
+    order: any,
+    options?: { forceNowOverride?: boolean; allowRetryOverride?: boolean; nowDate?: Date; mockTransport?: any }
+  ) {
+    const normId = normalizeWaOrderId(order?.id);
+    if (!normId || waConfirmationInFlight.has(normId)) {
+      return { status: 'skipped_in_flight' };
+    }
+    const nowDate = options?.nowDate || new Date();
+    const nowIso = nowDate.toISOString();
+    const policy = getEffectiveWhatsAppPolicy();
+
+    // Never send confirmation for an already confirmed or cancelled order
+    const rawSt = String(order?.orderStatus || '').toLowerCase();
+    if (
+      order?.customerConfirmed === true ||
+      rawSt === 'confirmed' ||
+      rawSt === 'rtd' ||
+      rawSt.includes('cancel') ||
+      rawSt.includes('transit') ||
+      rawSt.includes('deliver') ||
+      rawSt === 'completed'
+    ) {
+      return { status: 'skipped_terminal_state' };
+    }
+
+    if (!policy.enabled || !policy.orderConfirmationEnabled) {
+      // Automation is OFF: save order cleanly in Upcoming for manual confirmation (never block checkout or DB)
+      updateServerOrderById(order.id, (prev) => ({
+        ...prev,
+        whatsappStatus: 'Pending',
+        needsManualFollowUp: true,
+        manualFollowUpFlaggedAt: prev.manualFollowUpFlaggedAt || nowIso,
+        manualFollowUpReason: 'WhatsApp Automation is OFF — ready for manual confirmation.',
+        confirmationTask: {
+          status: 'automation_off',
+          createdAt: prev.confirmationTask?.createdAt || nowIso,
+          updatedAt: nowIso,
+        },
+        activityLog: appendOrderActivity(
+          prev,
+          'WhatsApp Automation OFF — Queued for Manual Confirmation',
+          'Order saved safely in Upcoming. WhatsApp automation is disabled, so admin can confirm manually anytime.',
+          'system'
+        ),
+      }));
+      recordConfirmationAuditLog({
+        orderId: order.id,
+        eventType: 'ORDER_CREATED_AUTOMATION_OFF',
+        previousStatus: 'Upcoming',
+        newStatus: 'Upcoming',
+        confirmationMethod: 'System',
+        notes: 'WhatsApp Automation is OFF; order placed in manual confirmation queue.',
+      });
+      return { status: 'skipped_disabled' };
+    }
+
+    const mode = String(order?.paymentMode || 'COD').toUpperCase() === 'PREPAID' ? 'Prepaid' : 'COD';
+    const policyApplies = mode === 'COD' ? policy.confirmCodOrders : policy.confirmPrepaidOrders;
+    if (!policyApplies) {
+      return { status: 'skipped_policy' };
+    }
+
+    const processed = readProcessedWhatsAppEvents();
+    if (!options?.allowRetryOverride && (processed.confirmationsSent[normId] || order?.confirmationSentAt)) {
+      return { status: 'already_sent' };
+    }
+
+    waConfirmationInFlight.add(normId);
+    try {
+      const windowCheck =
+        policy.respectSendingWindow && !options?.forceNowOverride
+          ? evaluateIstSendingWindow(nowDate, policy.sendingWindowStartHour, policy.sendingWindowEndHour)
+          : { withinWindow: true, istHour: 12, istMinute: 0 };
+
+      if (!windowCheck.withinWindow && windowCheck.scheduledForIso) {
+        const vars = buildOrderSummaryVariables(order);
+        const formattedTo = normalizeIndianPhoneForWa(order?.customer?.mobile || order?.customer?.phone || '');
+        upsertWhatsAppLog({
+          id: `walog_sched_${normId}`,
+          orderId: order.id,
+          customerName: vars.customerName,
+          customerPhone: formattedTo,
+          messageType: 'order_confirmation',
+          direction: 'outbound',
+          templateName: policy.confirmationTemplateName,
+          status: 'scheduled',
+          sentAt: nowIso,
+          scheduledFor: windowCheck.scheduledForIso,
+          retryCount: 0,
+          maxRetries: 3,
+          retryStatus: 'none',
+          payloadSummary: `Scheduled for ${windowCheck.scheduledForIso} (10 AM - 9 PM IST window) | ${vars.orderId}`,
+          updatedAt: nowIso,
+        });
+
+        updateServerOrderById(order.id, (prev) => ({
+          ...prev,
+          whatsappStatus: 'Scheduled',
+          whatsappDeliveryStatus: 'scheduled',
+          scheduledConfirmationTime: windowCheck.scheduledForIso,
+          confirmationSentAt: undefined,
+          confirmationTask: {
+            status: 'scheduled',
+            createdAt: prev.confirmationTask?.createdAt || nowIso,
+            updatedAt: nowIso,
+          },
+          activityLog: appendOrderActivity(
+            prev,
+            'WhatsApp Confirmation Scheduled (10 AM IST)',
+            `Order placed outside 10 AM – 9 PM IST window. Automated confirmation queued for ${windowCheck.scheduledForIso}.`,
+            'whatsapp'
+          ),
+        }));
+
+        recordConfirmationAuditLog({
+          orderId: order.id,
+          eventType: 'WHATSAPP_CONFIRMATION_SCHEDULED',
+          previousStatus: 'Upcoming',
+          newStatus: 'Upcoming',
+          confirmationMethod: 'WhatsApp',
+          notes: `Scheduled for ${windowCheck.scheduledForIso} (outside 10 AM - 9 PM IST window).`,
+        });
+
+        return { status: 'scheduled', scheduledFor: windowCheck.scheduledForIso };
+      }
+
+      const sendResult = await dispatchWhatsAppUtilityTemplate({
+        order,
+        messageType: 'order_confirmation',
+      });
+
+      if (sendResult.success && sendResult.wamid) {
+        const latestProcessed = readProcessedWhatsAppEvents();
+        latestProcessed.confirmationsSent[normId] = nowIso;
+        writeProcessedWhatsAppEvents(latestProcessed);
+
+        updateServerOrderById(order.id, (prev) => ({
+          ...prev,
+          whatsappStatus: 'Sent',
+          whatsappDeliveryStatus: 'sent',
+          whatsappMessageId: sendResult.wamid,
+          whatsappSentAt: nowIso,
+          confirmationSentAt: nowIso,
+          scheduledConfirmationTime: undefined,
+          whatsappError: undefined,
+          needsManualFollowUp: false,
+          manualFollowUpReason: undefined,
+          confirmationTask: {
+            status: 'sent',
+            createdAt: prev.confirmationTask?.createdAt || nowIso,
+            updatedAt: nowIso,
+            lastAttemptAt: nowIso,
+            method: 'WhatsApp',
+          },
+          activityLog: appendOrderActivity(
+            prev,
+            'WhatsApp Confirmation Sent',
+            `Approved Utility Template (${policy.confirmationTemplateName}) sent with YES/CANCEL buttons (WAMID: ${sendResult.wamid}).`,
+            'whatsapp'
+          ),
+        }));
+
+        recordConfirmationAuditLog({
+          orderId: order.id,
+          eventType: 'WHATSAPP_CONFIRMATION_SENT',
+          previousStatus: 'Upcoming',
+          newStatus: 'Upcoming',
+          confirmationMethod: 'WhatsApp',
+          whatsappMessageId: sendResult.wamid,
+          notes: `Utility template ${policy.confirmationTemplateName} sent.`,
+        });
+
+        return { status: 'sent', wamid: sendResult.wamid, logId: sendResult.log.id };
+      }
+
+      // Meta API failure: keep order safely in Upcoming, mark Failed, add to Manual Follow-Up queue
+      const failureReason = sendResult.error || 'WhatsApp confirmation delivery failed.';
+      updateServerOrderById(order.id, (prev) => ({
+        ...prev,
+        orderStatus: prev.orderStatus === 'NEW' || !prev.orderStatus ? 'NEW' : prev.orderStatus,
+        whatsappStatus: 'Failed',
+        whatsappDeliveryStatus: 'failed',
+        whatsappError: failureReason,
+        needsManualFollowUp: true,
+        manualFollowUpFlaggedAt: nowIso,
+        manualFollowUpReason: failureReason,
+        confirmationTask: {
+          status: 'failed',
+          createdAt: prev.confirmationTask?.createdAt || nowIso,
+          updatedAt: nowIso,
+          lastAttemptAt: nowIso,
+          failureReason,
+        },
+        activityLog: appendOrderActivity(
+          prev,
+          'WhatsApp Confirmation Failed — Added to Manual Follow-Up',
+          `Meta Cloud API delivery failed (${sendResult.errorCode || 'ERR'}): ${failureReason}. Order remains safely in Upcoming for manual confirmation or retry.`,
+          'whatsapp'
+        ),
+      }));
+
+      recordConfirmationAuditLog({
+        orderId: order.id,
+        eventType: 'WHATSAPP_CONFIRMATION_FAILED',
+        previousStatus: 'Upcoming',
+        newStatus: 'Upcoming',
+        confirmationMethod: 'WhatsApp',
+        errorDetails: `[${sendResult.errorCode || 'META_ERR'}] ${failureReason}`,
+        notes: 'Order retained in Upcoming and added to Manual Follow-up queue.',
+      });
+
+      return { status: 'failed', error: failureReason, errorCode: sendResult.errorCode, logId: sendResult.log.id };
+    } finally {
+      waConfirmationInFlight.delete(normId);
+    }
+  }
+
+  /**
+   * COMMON ATOMIC CONFIRMATION FUNCTION (Single Source of Truth)
+   * Used by BOTH Automatic WhatsApp YES webhook AND Admin Manual Confirmation.
+   * Guarantees:
+   * - An order can only be confirmed ONCE (prevents duplicate confirmation & duplicate AWB).
+   * - Manual confirmation works 100% independently of Meta API availability.
+   * - Triggers automatic real Delhivery AWB creation while STRICTLY keeping order in Confirmed (NEVER RTD).
+   * - Records persistent audit log with previous status, new status, confirmation method, adminId/wamid.
+   */
+  async function confirmOrderAtomically(params: {
+    orderId: string;
+    method: 'WhatsApp' | 'Manual';
+    adminId?: string;
+    adminName?: string;
+    wamid?: string;
+    customerReply?: string;
+    note?: string;
+    skipDelhiveryAutoAwb?: boolean;
+  }): Promise<{
+    success: boolean;
+    confirmed: boolean;
+    alreadyConfirmed?: boolean;
+    blockedReason?: string;
+    order?: any;
+    delhiverySuccess?: boolean;
+    awb?: string | null;
+    delhiveryError?: string;
+  }> {
+    const normId = normalizeWaOrderId(params.orderId);
+    if (!normId) {
+      return { success: false, confirmed: false, blockedReason: 'Invalid Order ID.' };
+    }
+    if (waConfirmAtomicLock.has(normId)) {
+      return {
+        success: true,
+        confirmed: false,
+        alreadyConfirmed: true,
+        blockedReason: 'Confirmation already in progress for this order.',
+      };
+    }
+
+    waConfirmAtomicLock.add(normId);
+    try {
+      const latestOrders = readServerOrders();
+      const targetOrder = latestOrders.find((o) => normalizeWaOrderId(o?.id) === normId);
+      if (!targetOrder) {
+        return { success: false, confirmed: false, blockedReason: `Order ${params.orderId} not found.` };
+      }
+
+      const prevStatusLabel = String(targetOrder.orderStatus || 'Upcoming');
+      const rawStatus = prevStatusLabel.toLowerCase();
+      const isCancelled = rawStatus.includes('cancel') || rawStatus.includes('expire') || targetOrder.isExpired === true;
+      const isAlreadyConfirmedOrFurther =
+        targetOrder.customerConfirmed === true ||
+        rawStatus === 'confirmed' ||
+        rawStatus === 'rtd' ||
+        rawStatus.includes('ready to') ||
+        rawStatus.includes('transit') ||
+        rawStatus.includes('shipped') ||
+        rawStatus.includes('deliver') ||
+        rawStatus === 'completed';
+
+      if (isCancelled) {
+        recordConfirmationAuditLog({
+          orderId: targetOrder.id,
+          eventType: 'CONFIRMATION_BLOCKED_CANCELLED',
+          previousStatus: prevStatusLabel,
+          newStatus: prevStatusLabel,
+          confirmationMethod: params.method,
+          adminId: params.adminId,
+          adminName: params.adminName,
+          whatsappMessageId: params.wamid,
+          notes: `Ignored ${params.method} confirmation because order is already Cancelled.`,
+        });
+        return {
+          success: false,
+          confirmed: false,
+          blockedReason: `Order ${targetOrder.id} is already Cancelled and cannot be confirmed.`,
+          order: targetOrder,
+        };
+      }
+
+      if (isAlreadyConfirmedOrFurther) {
+        recordConfirmationAuditLog({
+          orderId: targetOrder.id,
+          eventType: 'DUPLICATE_CONFIRMATION_PREVENTED',
+          previousStatus: prevStatusLabel,
+          newStatus: prevStatusLabel,
+          confirmationMethod: params.method,
+          adminId: params.adminId,
+          adminName: params.adminName,
+          whatsappMessageId: params.wamid,
+          notes: `Duplicate ${params.method} confirmation prevented. Order was already confirmed via ${targetOrder.confirmationMethod || targetOrder.codVerifiedBy || 'previous action'}.`,
+        });
+        return {
+          success: true,
+          confirmed: false,
+          alreadyConfirmed: true,
+          blockedReason: `Order ${targetOrder.id} was already confirmed via ${targetOrder.confirmationMethod || 'previous action'}. Duplicate confirmation & duplicate AWB prevented.`,
+          order: targetOrder,
+          awb: targetOrder.awb_number || null,
+        };
+      }
+
+      const nowIso = new Date().toISOString();
+      const isManual = params.method === 'Manual';
+
+      // Atomic status transition: Upcoming -> Confirmed (STRICTLY NOT RTD!)
+      const confirmedOrder = updateServerOrderById(targetOrder.id, (prev) => ({
+        ...prev,
+        orderStatus: 'Confirmed',
+        customerConfirmed: true,
+        customerConfirmedAt: nowIso,
+        confirmationMethod: params.method,
+        confirmedByAdminId: isManual ? params.adminId || 'admin' : prev.confirmedByAdminId,
+        confirmedByAdminName: isManual ? params.adminName || 'Admin' : prev.confirmedByAdminName,
+        codVerificationStatus: 'CONFIRMED',
+        codVerifiedBy: isManual ? `Manual (${params.adminName || params.adminId || 'Admin'})` : 'WhatsApp Reply',
+        codVerifiedAt: nowIso,
+        // Preserve actual WhatsApp delivery status on manual confirmation (e.g. 'Failed' stays 'Failed')
+        whatsappStatus: isManual ? prev.whatsappStatus || 'Pending' : 'Confirmed',
+        whatsappReply: isManual ? prev.whatsappReply || 'MANUAL_ADMIN_CONFIRMED' : params.customerReply || 'YES',
+        whatsappReplyAt: isManual ? prev.whatsappReplyAt : nowIso,
+        needsManualFollowUp: false,
+        manualFollowUpReason: undefined,
+        isExpired: false,
+        confirmationAckSent: isManual ? prev.confirmationAckSent : true,
+        confirmationAckSentAt: isManual ? prev.confirmationAckSentAt : nowIso,
+        confirmationTask: {
+          status: 'confirmed',
+          createdAt: prev.confirmationTask?.createdAt || nowIso,
+          updatedAt: nowIso,
+          lastAttemptAt: nowIso,
+          method: params.method,
+        },
+        whatsappProcessedMessageIds: params.wamid
+          ? Array.from(
+              new Set([
+                ...(Array.isArray(prev.whatsappProcessedMessageIds) ? prev.whatsappProcessedMessageIds : []),
+                params.wamid,
+              ])
+            )
+          : prev.whatsappProcessedMessageIds,
+        activityLog: appendOrderActivity(
+          prev,
+          isManual
+            ? `Manually Confirmed by Admin (${params.adminName || params.adminId || 'Admin'})`
+            : 'Customer Confirmed via WhatsApp (YES)',
+          isManual
+            ? `Order ${prev.id} manually confirmed by ${params.adminName || params.adminId || 'Admin'} after verifying customer agreement.${params.note ? ` Note: ${params.note}` : ''} Moved Upcoming → Confirmed and triggered Delhivery AWB creation (stays Confirmed until label download).`
+            : `Order ${prev.id} confirmed via WhatsApp (${params.wamid || 'YES'}). Moved Upcoming → Confirmed and triggered automatic real Delhivery AWB creation (awaiting manual label download for RTD).`,
+          isManual ? 'admin' : 'whatsapp'
+        ),
+      }));
+
+      if (!confirmedOrder) {
+        return { success: false, confirmed: false, blockedReason: 'Failed persisting confirmation.' };
+      }
+
+      recordConfirmationAuditLog({
+        orderId: confirmedOrder.id,
+        eventType: isManual ? 'ORDER_CONFIRMED_MANUAL' : 'ORDER_CONFIRMED_WHATSAPP',
+        previousStatus: prevStatusLabel === 'NEW' ? 'Upcoming' : prevStatusLabel,
+        newStatus: 'Confirmed',
+        confirmationMethod: params.method,
+        adminId: isManual ? params.adminId || 'admin' : undefined,
+        adminName: isManual ? params.adminName || 'Admin' : undefined,
+        whatsappMessageId: params.wamid,
+        notes: params.note || (isManual ? 'Admin explicitly confirmed customer contact and agreement.' : 'Customer replied YES.'),
+      });
+
+      // Best-effort acknowledgement for WhatsApp confirmations only (never required for Manual confirmation)
+      if (!isManual) {
+        const customerName = confirmedOrder.customer?.name || 'Customer';
+        const totalStr = Math.round(Number(confirmedOrder.total || 0)).toLocaleString('en-IN');
+        await dispatchWhatsAppSessionText({
+          order: confirmedOrder,
+          messageType: 'confirm_ack',
+          textBody: `Thank you ${customerName}! Your RedMode order ${confirmedOrder.id} (Rs ${totalStr}, ${confirmedOrder.paymentMode}) is CONFIRMED. We are preparing your parcel for Delhivery dispatch and will share tracking details once handed over.`,
+        }).catch(() => {});
+      }
+
+      // Trigger idempotent automatic real Delhivery AWB generation (STRICTLY keeps order in Confirmed, NEVER RTD!)
+      let delhiverySuccess = false;
+      let awb: string | null = confirmedOrder.awb_number || null;
+      let delhiveryError: string | undefined;
+
+      if (!params.skipDelhiveryAutoAwb && !awb) {
+        const delhiveryRes = await createDelhiveryShipmentInternal({ order: confirmedOrder }).catch((err: any) => ({
+          httpStatus: 500,
+          body: { success: false, message: err?.message || 'Delhivery creation error' },
+        }));
+
+        delhiverySuccess = Boolean(delhiveryRes?.body?.success);
+        awb = (delhiveryRes?.body as any)?.waybill || null;
+        if (!delhiverySuccess) {
+          delhiveryError = delhiveryRes?.body?.message || 'Unable to generate real Delhivery AWB.';
+          updateServerOrderById(confirmedOrder.id, (prev) => ({
+            ...prev,
+            orderStatus: prev.orderStatus === 'RTD' ? prev.orderStatus : 'Confirmed',
+            delhiveryShipmentStatus: 'failed',
+            delhiveryShipmentError: delhiveryError,
+          }));
+          recordConfirmationAuditLog({
+            orderId: confirmedOrder.id,
+            eventType: 'DELHIVERY_AWB_FAILED',
+            previousStatus: 'Confirmed',
+            newStatus: 'Confirmed',
+            confirmationMethod: params.method,
+            adminId: isManual ? params.adminId : undefined,
+            errorDetails: delhiveryError,
+            notes: 'Order remains Confirmed; admin can retry Real AWB creation.',
+          });
+        } else {
+          recordConfirmationAuditLog({
+            orderId: confirmedOrder.id,
+            eventType: 'DELHIVERY_AWB_CREATED',
+            previousStatus: 'Confirmed',
+            newStatus: 'Confirmed',
+            confirmationMethod: params.method,
+            adminId: isManual ? params.adminId : undefined,
+            notes: `Real Delhivery AWB ${awb} created. Order strictly remains Confirmed until manual shipping label download.`,
+          });
+        }
+      }
+
+      const finalOrder = readServerOrders().find((o) => normalizeWaOrderId(o?.id) === normId) || confirmedOrder;
+      return {
+        success: true,
+        confirmed: true,
+        order: finalOrder,
+        delhiverySuccess,
+        awb: finalOrder.awb_number || awb,
+        delhiveryError,
+      };
+    } finally {
+      waConfirmAtomicLock.delete(normId);
+    }
+  }
+
+  /**
+   * COMMON ATOMIC CANCELLATION FUNCTION
+   * Used by BOTH WhatsApp CANCEL webhook AND Admin Manual Cancellation.
+   * Restores inventory atomically once and blocks Delhivery shipment processing.
+   */
+  async function cancelOrderAtomically(params: {
+    orderId: string;
+    source: 'whatsapp_customer' | 'admin' | 'system';
+    adminId?: string;
+    adminName?: string;
+    wamid?: string;
+    customerReply?: string;
+    reason?: string;
+  }): Promise<{
+    success: boolean;
+    cancelled: boolean;
+    alreadyCancelled?: boolean;
+    blockedReason?: string;
+    order?: any;
+    stockRestored: boolean;
+    restoredUnits: number;
+  }> {
+    const normId = normalizeWaOrderId(params.orderId);
+    if (!normId) {
+      return { success: false, cancelled: false, blockedReason: 'Invalid Order ID.', stockRestored: false, restoredUnits: 0 };
+    }
+    if (waCancelAtomicLock.has(normId)) {
+      return {
+        success: true,
+        cancelled: false,
+        alreadyCancelled: true,
+        blockedReason: 'Cancellation already in progress.',
+        stockRestored: false,
+        restoredUnits: 0,
+      };
+    }
+
+    waCancelAtomicLock.add(normId);
+    try {
+      const targetOrder = readServerOrders().find((o) => normalizeWaOrderId(o?.id) === normId);
+      if (!targetOrder) {
+        return { success: false, cancelled: false, blockedReason: `Order ${params.orderId} not found.`, stockRestored: false, restoredUnits: 0 };
+      }
+
+      const prevStatusLabel = String(targetOrder.orderStatus || 'Upcoming');
+      const rawOrderStatus = prevStatusLabel.toLowerCase();
+      const isAlreadyCancelled = rawOrderStatus.includes('cancel') || rawOrderStatus.includes('expire');
+      const isAlreadyDispatched =
+        rawOrderStatus.includes('transit') ||
+        rawOrderStatus.includes('shipped') ||
+        rawOrderStatus.includes('deliver') ||
+        rawOrderStatus === 'completed';
+
+      if (isAlreadyCancelled) {
+        return {
+          success: true,
+          cancelled: false,
+          alreadyCancelled: true,
+          blockedReason: `Order ${targetOrder.id} is already Cancelled. Stock not restored again.`,
+          order: targetOrder,
+          stockRestored: false,
+          restoredUnits: 0,
+        };
+      }
+
+      if (isAlreadyDispatched) {
+        return {
+          success: false,
+          cancelled: false,
+          blockedReason: `Order ${targetOrder.id} is already ${targetOrder.orderStatus} and cannot be cancelled.`,
+          order: targetOrder,
+          stockRestored: false,
+          restoredUnits: 0,
+        };
+      }
+
+      const nowIso = new Date().toISOString();
+      const isWa = params.source === 'whatsapp_customer';
+      const cancelReason =
+        params.reason ||
+        (isWa ? 'Customer cancelled via WhatsApp (CANCEL)' : `Cancelled manually by ${params.adminName || 'Admin'}`);
+
+      const cancelledOrder = updateServerOrderById(targetOrder.id, (prev) => ({
+        ...prev,
+        orderStatus: 'Cancelled',
+        customerConfirmed: false,
+        codVerificationStatus: 'REJECTED',
+        whatsappStatus: isWa ? 'Cancelled' : prev.whatsappStatus || 'Cancelled',
+        whatsappReply: isWa ? params.customerReply || 'CANCEL' : prev.whatsappReply,
+        whatsappReplyAt: isWa ? nowIso : prev.whatsappReplyAt,
+        cancellationSource: params.source,
+        cancelledByAdminId: params.source === 'admin' ? params.adminId || 'admin' : prev.cancelledByAdminId,
+        cancelledByAdminName: params.source === 'admin' ? params.adminName || 'Admin' : prev.cancelledByAdminName,
+        cancellationReason: cancelReason,
+        cancelledAt: nowIso,
+        needsManualFollowUp: false,
+        manualFollowUpReason: undefined,
+        delhiveryShipmentStatus: 'idle',
+        confirmationTask: {
+          status: 'cancelled',
+          createdAt: prev.confirmationTask?.createdAt || nowIso,
+          updatedAt: nowIso,
+          lastAttemptAt: nowIso,
+        },
+        whatsappProcessedMessageIds: params.wamid
+          ? Array.from(
+              new Set([
+                ...(Array.isArray(prev.whatsappProcessedMessageIds) ? prev.whatsappProcessedMessageIds : []),
+                params.wamid,
+              ])
+            )
+          : prev.whatsappProcessedMessageIds,
+        activityLog: appendOrderActivity(
+          prev,
+          isWa
+            ? 'Order Cancelled by Customer via WhatsApp (CANCEL)'
+            : `Order Cancelled Manually by ${params.adminName || 'Admin'}`,
+          `${cancelReason}. Stock restoration triggered atomically once and Delhivery dispatch blocked.`,
+          isWa ? 'whatsapp' : 'admin'
+        ),
+      }));
+
+      const restoreResult = cancelledOrder
+        ? restoreOrderStockAtomicallyOnce(cancelledOrder)
+        : { restored: false, restoredUnits: 0 };
+
+      recordConfirmationAuditLog({
+        orderId: targetOrder.id,
+        eventType: isWa ? 'ORDER_CANCELLED_WHATSAPP' : 'ORDER_CANCELLED_MANUAL',
+        previousStatus: prevStatusLabel === 'NEW' ? 'Upcoming' : prevStatusLabel,
+        newStatus: 'Cancelled',
+        confirmationMethod: isWa ? 'WhatsApp' : 'Manual',
+        adminId: params.source === 'admin' ? params.adminId || 'admin' : undefined,
+        adminName: params.source === 'admin' ? params.adminName || 'Admin' : undefined,
+        whatsappMessageId: params.wamid,
+        notes: `${cancelReason} | Stock restored: ${restoreResult.restored ? `${restoreResult.restoredUnits} unit(s)` : 'already restored/none'}.`,
+      });
+
+      if (isWa && cancelledOrder) {
+        const customerName = cancelledOrder.customer?.name || 'Customer';
+        await dispatchWhatsAppSessionText({
+          order: cancelledOrder,
+          messageType: 'cancel_ack',
+          textBody: `Hello ${customerName}, your RedMode order ${cancelledOrder.id} has been CANCELLED as requested. If you paid online, any eligible refund will be processed per RedMode policy. Thank you.`,
+        }).catch(() => {});
+      }
+
+      const finalOrder = readServerOrders().find((o) => normalizeWaOrderId(o?.id) === normId) || cancelledOrder;
+      return {
+        success: true,
+        cancelled: true,
+        order: finalOrder,
+        stockRestored: restoreResult.restored,
+        restoredUnits: restoreResult.restoredUnits,
+      };
+    } finally {
+      waCancelAtomicLock.delete(normId);
+    }
+  }
+
+  /**
+   * Restores stock atomically, exactly once, for a cancelled order on the server product store.
+   */
+  function restoreOrderStockAtomicallyOnce(order: any): { restored: boolean; restoredUnits: number } {
+    const normId = normalizeWaOrderId(order?.id);
+    if (!normId || !Array.isArray(order?.items) || order.items.length === 0) {
+      return { restored: false, restoredUnits: 0 };
+    }
+    if (order.inventoryRestored === true || waStockRestoreInFlight.has(normId)) {
+      return { restored: false, restoredUnits: 0 };
+    }
+
+    waStockRestoreInFlight.add(normId);
+    try {
+      // Re-read authoritative order from disk to guarantee once-only restoration
+      const latestOrders = readServerOrders();
+      const orderIdx = latestOrders.findIndex((o) => normalizeWaOrderId(o?.id) === normId);
+      if (orderIdx >= 0 && latestOrders[orderIdx].inventoryRestored === true) {
+        return { restored: false, restoredUnits: 0 };
+      }
+
+      const products = readServerProducts();
+      let restoredUnits = 0;
+      let productsChanged = false;
+
+      const updatedProducts = products.map((prod: any) => {
+        const matchingItems = order.items.filter((it: any) => String(it?.productId) === String(prod?.id));
+        if (matchingItems.length === 0) return prod;
+
+        const nextStockBySize = { ...(prod.stockBySize || {}) };
+        const nextColorOptions = Array.isArray(prod.colorOptions)
+          ? prod.colorOptions.map((c: any) => ({ ...c, stockBySize: { ...(c?.stockBySize || {}) } }))
+          : prod.colorOptions;
+        let prodRestored = 0;
+
+        for (const it of matchingItems) {
+          const qty = Math.max(1, Number(it?.quantity || 1));
+          const sizeKey = String(it?.size || 'Free size');
+          nextStockBySize[sizeKey] = Number(nextStockBySize[sizeKey] || 0) + qty;
+          prodRestored += qty;
+          restoredUnits += qty;
+
+          if (Array.isArray(nextColorOptions) && it?.color) {
+            const vIdx = nextColorOptions.findIndex(
+              (c: any) => String(c?.name || '').toLowerCase() === String(it.color).toLowerCase()
+            );
+            if (vIdx >= 0) {
+              nextColorOptions[vIdx].stockBySize[sizeKey] =
+                Number(nextColorOptions[vIdx].stockBySize[sizeKey] || 0) + qty;
+            }
+          }
+        }
+
+        productsChanged = true;
+        return {
+          ...prod,
+          stockBySize: nextStockBySize,
+          colorOptions: nextColorOptions,
+          inStock: true,
+          salesCount: Math.max(0, Number(prod.salesCount || 0) - prodRestored),
+          updatedAt: new Date().toISOString(),
+        };
+      });
+
+      if (productsChanged) {
+        writeServerProducts(updatedProducts);
+      }
+
+      const nowIso = new Date().toISOString();
+      if (orderIdx >= 0) {
+        latestOrders[orderIdx] = {
+          ...latestOrders[orderIdx],
+          inventoryRestored: true,
+          inventoryRestoredAt: nowIso,
+          updatedAt: nowIso,
+          syncVersion: Number(latestOrders[orderIdx].syncVersion || 0) + 1,
+        };
+        writeServerOrders(latestOrders);
+      }
+
+      return { restored: true, restoredUnits };
+    } finally {
+      waStockRestoreInFlight.delete(normId);
+    }
+  }
+
+  function safeHmacCompareHex(expectedHex: string, providedHex: string): boolean {
+    const a = Buffer.from(expectedHex.toLowerCase(), 'utf-8');
+    const b = Buffer.from(providedHex.toLowerCase(), 'utf-8');
+    if (a.length !== b.length || a.length === 0) return false;
+    return crypto.timingSafeEqual(a, b);
+  }
+
+  /**
+   * Verifies incoming webhook authenticity:
+   * - Mode 1 (Render Relay): `X-Redmode-Relay-Signature` (`sha256=<hmac(ts + "." + rawBody, REDMODE_RELAY_SECRET)>`)
+   *   + `X-Redmode-Relay-Timestamp` within 5-minute replay window (plus optional forwarded `X-Hub-Signature-256`).
+   * - Mode 2 (Direct Meta Cloud API): `X-Hub-Signature-256` (`sha256=<hmac(rawBody, WHATSAPP_APP_SECRET)>`).
+   * Strictly fail-closed: unsigned or invalidly signed payloads return verified: false (HTTP 401).
+   */
+  function verifyIncomingWhatsAppWebhookAuth(req: Request): {
+    verified: boolean;
+    mode: 'render_relay' | 'meta_direct' | 'rejected';
+    reason?: string;
+  } {
+    const policy = getEffectiveWhatsAppPolicy();
+    const rawBuf: Buffer = Buffer.isBuffer((req as any).rawBody)
+      ? (req as any).rawBody
+      : Buffer.from(JSON.stringify(req.body || {}), 'utf-8');
+
+    const relaySigHeader = String(req.headers['x-redmode-relay-signature'] || '').trim();
+    const relayTsHeader = String(req.headers['x-redmode-relay-timestamp'] || '').trim();
+    const metaSigHeader = String(req.headers['x-hub-signature-256'] || '').trim();
+
+    // 1. Verify Signed Render Relay if relay headers are present
+    if (relaySigHeader) {
+      if (!policy.relaySecret) {
+        return {
+          verified: false,
+          mode: 'rejected',
+          reason: 'REDMODE_RELAY_SECRET is not configured on the RedMode backend.',
+        };
+      }
+      const tsNum = Number(relayTsHeader);
+      if (!tsNum || Math.abs(Date.now() - tsNum) > 5 * 60 * 1000) {
+        return {
+          verified: false,
+          mode: 'rejected',
+          reason: 'Render relay timestamp missing or outside 5-minute replay window.',
+        };
+      }
+      const providedHex = relaySigHeader.startsWith('sha256=') ? relaySigHeader.slice(7) : relaySigHeader;
+      const expectedHex = crypto
+        .createHmac('sha256', policy.relaySecret)
+        .update(`${relayTsHeader}.`)
+        .update(rawBuf)
+        .digest('hex');
+
+      if (!safeHmacCompareHex(expectedHex, providedHex)) {
+        return {
+          verified: false,
+          mode: 'rejected',
+          reason: 'Invalid X-Redmode-Relay-Signature HMAC.',
+        };
+      }
+
+      // If Meta signature was also forwarded and appSecret is configured, verify it too
+      if (metaSigHeader && policy.appSecret) {
+        const metaProvided = metaSigHeader.startsWith('sha256=') ? metaSigHeader.slice(7) : metaSigHeader;
+        const metaExpected = crypto.createHmac('sha256', policy.appSecret).update(rawBuf).digest('hex');
+        if (!safeHmacCompareHex(metaExpected, metaProvided)) {
+          return {
+            verified: false,
+            mode: 'rejected',
+            reason: 'Forwarded X-Hub-Signature-256 failed Meta App Secret verification.',
+          };
+        }
+      }
+
+      return { verified: true, mode: 'render_relay' };
+    }
+
+    // 2. Verify Direct Meta X-Hub-Signature-256
+    if (metaSigHeader) {
+      if (!policy.appSecret) {
+        return {
+          verified: false,
+          mode: 'rejected',
+          reason: 'WHATSAPP_APP_SECRET is not configured on the RedMode backend.',
+        };
+      }
+      const providedHex = metaSigHeader.startsWith('sha256=') ? metaSigHeader.slice(7) : metaSigHeader;
+      const expectedHex = crypto.createHmac('sha256', policy.appSecret).update(rawBuf).digest('hex');
+      if (!safeHmacCompareHex(expectedHex, providedHex)) {
+        return {
+          verified: false,
+          mode: 'rejected',
+          reason: 'Invalid Meta X-Hub-Signature-256 signature.',
+        };
+      }
+      return { verified: true, mode: 'meta_direct' };
+    }
+
+    return {
+      verified: false,
+      mode: 'rejected',
+      reason: 'Missing webhook signature header (X-Hub-Signature-256 or X-Redmode-Relay-Signature).',
+    };
+  }
+
+  function parseWhatsAppOrderReply(msg: any): {
+    action: 'YES' | 'CANCEL' | 'OTHER';
+    orderId?: string;
+    rawText: string;
+    rawPayload: string;
+  } {
+    const rawPayload = String(
+      msg?.button?.payload || msg?.interactive?.button_reply?.id || ''
+    ).trim();
+    const rawText = String(
+      msg?.button?.text || msg?.interactive?.button_reply?.title || msg?.text?.body || ''
+    ).trim();
+
+    // 1. Exact button payload with Order ID: CONFIRM_ORDER::#12345 or CANCEL_ORDER::#12345
+    const payloadMatch = rawPayload.match(/^(CONFIRM_ORDER|CANCEL_ORDER|YES|CANCEL)::\s*(.+)$/i);
+    if (payloadMatch) {
+      const cmd = payloadMatch[1].toUpperCase();
+      const orderId = payloadMatch[2].trim();
+      const action: 'YES' | 'CANCEL' =
+        cmd === 'CONFIRM_ORDER' || cmd === 'YES' ? 'YES' : 'CANCEL';
+      return { action, orderId, rawText: rawText || action, rawPayload };
+    }
+
+    // 2. Fallback: extract order ID from text if customer typed e.g. "YES #12345" or "CANCEL RM-101"
+    const upper = rawText.toUpperCase();
+    const textOrderMatch = rawText.match(/(#[A-Za-z0-9_-]{3,}|RM-[A-Za-z0-9_-]{3,})/i);
+    const extractedOrderId = textOrderMatch ? textOrderMatch[1].trim() : undefined;
+
+    if (upper === 'YES' || upper === 'CONFIRM' || upper.startsWith('YES ') || upper.includes('CONFIRM ORDER')) {
+      return { action: 'YES', orderId: extractedOrderId, rawText, rawPayload };
+    }
+    if (upper === 'CANCEL' || upper === 'NO' || upper.startsWith('CANCEL ') || upper.includes('CANCEL ORDER')) {
+      return { action: 'CANCEL', orderId: extractedOrderId, rawText, rawPayload };
+    }
+
+    return { action: 'OTHER', orderId: extractedOrderId, rawText, rawPayload };
+  }
+
+  async function processIncomingWhatsAppWebhookPayload(
+    body: any,
+    authMode: 'render_relay' | 'meta_direct'
+  ) {
+    const entries = Array.isArray(body?.entry) ? body.entry : [];
+    const results = {
+      processedMessages: 0,
+      duplicateMessages: 0,
+      processedStatuses: 0,
+      duplicateStatuses: 0,
+      actions: [] as any[],
+    };
+
+    for (const entry of entries) {
+      const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+      for (const ch of changes) {
+        const value = ch?.value;
+        if (!value || typeof value !== 'object') continue;
+
+        // A. Handle Outbound Message Delivery / Read / Failed Status Updates
+        const statuses = Array.isArray(value.statuses) ? value.statuses : [];
+        for (const st of statuses) {
+          const wamid = String(st?.id || '').trim();
+          const stName = String(st?.status || '').trim().toLowerCase();
+          const stTs = String(st?.timestamp || '').trim();
+          if (!wamid || !stName) continue;
+
+          const dedupKey = `${wamid}:${stName}:${stTs}`;
+          const processedState = readProcessedWhatsAppEvents();
+          if (processedState.statuses[dedupKey]) {
+            results.duplicateStatuses++;
+            continue;
+          }
+
+          const nowIso = new Date().toISOString();
+          processedState.statuses[dedupKey] = nowIso;
+          writeProcessedWhatsAppEvents(processedState);
+          results.processedStatuses++;
+
+          const errObj = Array.isArray(st.errors) && st.errors[0] ? st.errors[0] : null;
+          const errCode = errObj?.code ? String(errObj.code) : undefined;
+          const errMsg = errObj
+            ? [errObj.title, errObj.message, errObj.error_data?.details].filter(Boolean).join(' — ')
+            : undefined;
+
+          const allLogs = readWhatsAppLogs();
+          const matchedLog = allLogs.find((l) => l.wamid === wamid);
+          const recipientPhone = normalizeIndianPhoneForWa(st?.recipient_id || matchedLog?.customerPhone || '');
+
+          if (matchedLog) {
+            const nextStatus: WhatsAppMessageLogRecord['status'] =
+              stName === 'delivered'
+                ? 'delivered'
+                : stName === 'read'
+                ? 'read'
+                : stName === 'failed'
+                ? 'failed'
+                : 'sent';
+            const nextRetryCount = stName === 'failed' ? matchedLog.retryCount + 1 : matchedLog.retryCount;
+            const canRetry =
+              stName === 'failed' &&
+              nextRetryCount < matchedLog.maxRetries &&
+              (matchedLog.messageType === 'order_confirmation' || matchedLog.messageType === 'reminder_23h');
+
+            upsertWhatsAppLog({
+              ...matchedLog,
+              status: nextStatus,
+              deliveredAt: stName === 'delivered' ? nowIso : matchedLog.deliveredAt,
+              readAt: stName === 'read' ? nowIso : matchedLog.readAt,
+              failedAt: stName === 'failed' ? nowIso : matchedLog.failedAt,
+              errorCode: stName === 'failed' ? errCode || 'DELIVERY_FAILED' : matchedLog.errorCode,
+              errorMessage: stName === 'failed' ? errMsg || 'WhatsApp delivery failed.' : matchedLog.errorMessage,
+              retryCount: nextRetryCount,
+              retryStatus: stName === 'failed' ? (canRetry ? 'scheduled' : 'exhausted') : matchedLog.retryStatus,
+              nextRetryAt: canRetry ? computeRetryBackoffIso(matchedLog.retryCount) : matchedLog.nextRetryAt,
+              updatedAt: nowIso,
+            });
+
+            if (matchedLog.orderId) {
+              updateServerOrderById(matchedLog.orderId, (prev) => {
+                const isStillUpcoming =
+                  !prev.customerConfirmed &&
+                  !String(prev.orderStatus || '').toLowerCase().includes('cancel') &&
+                  String(prev.orderStatus || '').toLowerCase() !== 'confirmed';
+                return {
+                  ...prev,
+                  whatsappDeliveryStatus: nextStatus as any,
+                  ...(stName === 'failed'
+                    ? {
+                        whatsappStatus: 'Failed' as const,
+                        whatsappError: errMsg || 'WhatsApp message delivery failed.',
+                        ...(isStillUpcoming
+                          ? {
+                              needsManualFollowUp: true,
+                              manualFollowUpFlaggedAt: prev.manualFollowUpFlaggedAt || nowIso,
+                              manualFollowUpReason: `WhatsApp delivery failed: ${errMsg || 'Meta delivery error'}`,
+                            }
+                          : {}),
+                      }
+                    : {}),
+                };
+              });
+            }
+            results.actions.push({ type: 'status', wamid, status: nextStatus, orderId: matchedLog.orderId });
+          } else {
+            // Log standalone status if we didn't have a prior outbound entry
+            upsertWhatsAppLog({
+              id: `walog_st_${wamid.slice(-12)}`,
+              wamid,
+              orderId: 'UNKNOWN',
+              customerPhone: recipientPhone,
+              messageType: 'order_confirmation',
+              direction: 'outbound',
+              status:
+                stName === 'delivered'
+                  ? 'delivered'
+                  : stName === 'read'
+                  ? 'read'
+                  : stName === 'failed'
+                  ? 'failed'
+                  : 'sent',
+              sentAt: nowIso,
+              deliveredAt: stName === 'delivered' ? nowIso : undefined,
+              readAt: stName === 'read' ? nowIso : undefined,
+              failedAt: stName === 'failed' ? nowIso : undefined,
+              errorCode: errCode,
+              errorMessage: errMsg,
+              retryCount: 0,
+              maxRetries: 3,
+              retryStatus: 'none',
+              updatedAt: nowIso,
+            });
+            results.actions.push({ type: 'status', wamid, status: stName });
+          }
+        }
+
+        // B. Handle Incoming Customer Replies (YES / CANCEL Quick Reply Buttons or Text)
+        const messages = Array.isArray(value.messages) ? value.messages : [];
+        for (const msg of messages) {
+          const wamid = String(msg?.id || '').trim();
+          if (!wamid) continue;
+
+          // Durable & in-memory idempotency guard against duplicate webhook delivery
+          const processedState = readProcessedWhatsAppEvents();
+          if (processedState.messages[wamid] || waReplyInFlight.has(wamid)) {
+            results.duplicateMessages++;
+            continue;
+          }
+          waReplyInFlight.add(wamid);
+
+          try {
+            const nowIso = new Date().toISOString();
+            const senderDigits = String(msg?.from || '').replace(/\D/g, '');
+            const cleanSender10 = senderDigits.slice(-10);
+            const parsedReply = parseWhatsAppOrderReply(msg);
+
+            // Identify exact order: priority 1 = exact Order ID from button payload; priority 2 = latest Upcoming order for sender phone
+            const allOrders = readServerOrders();
+            let targetOrder: any = null;
+            if (parsedReply.orderId) {
+              const targetNorm = normalizeWaOrderId(parsedReply.orderId);
+              targetOrder = allOrders.find((o) => normalizeWaOrderId(o?.id) === targetNorm) || null;
+            }
+            if (!targetOrder && cleanSender10.length === 10) {
+              targetOrder =
+                allOrders.find((o) => {
+                  const phone10 = String(o?.customer?.mobile || o?.customer?.phone || '')
+                    .replace(/\D/g, '')
+                    .slice(-10);
+                  const rawSt = String(o?.orderStatus || '').toLowerCase();
+                  const isUpcoming =
+                    !o?.customerConfirmed &&
+                    (rawSt === 'new' || rawSt === 'pending' || rawSt === 'cod verification' || rawSt === '');
+                  return phone10 === cleanSender10 && isUpcoming;
+                }) || null;
+            }
+
+            // Record inbound message permanently in processed store BEFORE side effects (atomic idempotency)
+            const latestProcessed = readProcessedWhatsAppEvents();
+            latestProcessed.messages[wamid] = nowIso;
+            writeProcessedWhatsAppEvents(latestProcessed);
+            results.processedMessages++;
+
+            // Log inbound customer reply in WhatsApp Message Logs
+            upsertWhatsAppLog({
+              id: `walog_in_${wamid.slice(-16)}`,
+              wamid,
+              orderId: targetOrder?.id || parsedReply.orderId || 'UNMATCHED',
+              customerName: targetOrder?.customer?.name || value?.contacts?.[0]?.profile?.name || 'Customer',
+              customerPhone: senderDigits,
+              messageType: 'inbound_reply',
+              direction: 'inbound',
+              status: 'received',
+              sentAt: nowIso,
+              customerReply: parsedReply.rawText || parsedReply.rawPayload,
+              replyAction: parsedReply.action,
+              retryCount: 0,
+              maxRetries: 0,
+              retryStatus: 'none',
+              payloadSummary: `Auth: ${authMode} | Payload: ${parsedReply.rawPayload || parsedReply.rawText}`,
+              updatedAt: nowIso,
+            });
+
+            if (!targetOrder || (parsedReply.action !== 'YES' && parsedReply.action !== 'CANCEL')) {
+              results.actions.push({
+                type: 'inbound_unactioned',
+                wamid,
+                action: parsedReply.action,
+                orderId: targetOrder?.id || parsedReply.orderId || null,
+              });
+              continue;
+            }
+
+            const rawOrderStatus = String(targetOrder.orderStatus || '').toLowerCase();
+            const isAlreadyCancelled = rawOrderStatus.includes('cancel') || rawOrderStatus.includes('expire');
+            const isAlreadyConfirmedOrFurther =
+              targetOrder.customerConfirmed === true ||
+              rawOrderStatus === 'confirmed' ||
+              rawOrderStatus === 'rtd' ||
+              rawOrderStatus.includes('ready to') ||
+              rawOrderStatus.includes('transit') ||
+              rawOrderStatus.includes('shipped') ||
+              rawOrderStatus.includes('deliver') ||
+              rawOrderStatus === 'completed';
+
+            if (parsedReply.action === 'YES') {
+              const confirmRes = await confirmOrderAtomically({
+                orderId: targetOrder.id,
+                method: 'WhatsApp',
+                wamid,
+                customerReply: parsedReply.rawText || 'YES',
+              });
+
+              if (!confirmRes.confirmed) {
+                results.actions.push({
+                  type: 'yes_ignored_state',
+                  wamid,
+                  orderId: targetOrder.id,
+                  currentStatus: confirmRes.order?.orderStatus || targetOrder.orderStatus,
+                  reason: confirmRes.blockedReason,
+                });
+              } else {
+                results.actions.push({
+                  type: 'confirmed',
+                  wamid,
+                  orderId: targetOrder.id,
+                  orderStatus: 'Confirmed',
+                  delhiverySuccess: Boolean(confirmRes.delhiverySuccess),
+                  awb: confirmRes.awb || null,
+                });
+              }
+            } else if (parsedReply.action === 'CANCEL') {
+              const cancelRes = await cancelOrderAtomically({
+                orderId: targetOrder.id,
+                source: 'whatsapp_customer',
+                wamid,
+                customerReply: parsedReply.rawText || 'CANCEL',
+              });
+
+              if (!cancelRes.cancelled) {
+                results.actions.push({
+                  type: 'cancel_ignored_state',
+                  wamid,
+                  orderId: targetOrder.id,
+                  currentStatus: cancelRes.order?.orderStatus || targetOrder.orderStatus,
+                  reason: cancelRes.blockedReason,
+                });
+              } else {
+                results.actions.push({
+                  type: 'cancelled',
+                  wamid,
+                  orderId: targetOrder.id,
+                  orderStatus: 'Cancelled',
+                  stockRestored: cancelRes.stockRestored,
+                  restoredUnits: cancelRes.restoredUnits,
+                });
+              }
+            }
+          } finally {
+            waReplyInFlight.delete(wamid);
+          }
+        }
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Real Background Scheduler Tick:
+   * 1. Dispatches due 10 AM - 9 PM scheduled confirmations
+   * 2. Safely retries failed outbound WhatsApp template sends whose backoff elapsed
+   * 3. Sends ONE 23-hour reminder for unconfirmed Upcoming orders (atomic idempotency guard)
+   * 4. Flags needsManualFollowUp = true after follow-up period without ever auto-shipping
+   */
+  async function runWhatsAppAutomationTick(options?: { nowMs?: number; ignoreWindowForTest?: boolean }) {
+    if (waSchedulerTickRunning) {
+      return { skipped: true, reason: 'tick_in_progress' };
+    }
+    waSchedulerTickRunning = true;
+    const summary = {
+      ranAt: new Date(options?.nowMs || Date.now()).toISOString(),
+      scheduledDispatched: 0,
+      retriesAttempted: 0,
+      remindersSent: 0,
+      manualFollowUpFlagged: 0,
+      errors: [] as string[],
+    };
+
+    try {
+      const nowMs = options?.nowMs || Date.now();
+      const nowDate = new Date(nowMs);
+      const nowIso = nowDate.toISOString();
+      const policy = getEffectiveWhatsAppPolicy();
+      const windowStatus = options?.ignoreWindowForTest
+        ? { withinWindow: true, istHour: 12, istMinute: 0 }
+        : evaluateIstSendingWindow(nowDate, policy.sendingWindowStartHour, policy.sendingWindowEndHour);
+
+      // 1. Dispatch scheduled confirmations once inside 10 AM - 9 PM IST window (only when Automation is ON)
+      const allOrders = readServerOrders();
+      if (policy.enabled && policy.orderConfirmationEnabled) {
+        for (const order of allOrders) {
+          const rawSt = String(order?.orderStatus || '').toLowerCase();
+          const isUpcoming =
+            !order?.customerConfirmed &&
+            !order?.isExpired &&
+            (rawSt === 'new' || rawSt === 'pending' || rawSt === 'cod verification' || rawSt === '');
+          if (!isUpcoming) continue;
+
+          // Never blindly resend old orders created while automation was OFF
+          if (order.confirmationTask?.status === 'automation_off') continue;
+
+          if (
+            order.scheduledConfirmationTime &&
+            !order.confirmationSentAt &&
+            new Date(order.scheduledConfirmationTime).getTime() <= nowMs &&
+            (!policy.respectSendingWindow || windowStatus.withinWindow)
+          ) {
+            const res = await triggerOrderConfirmationWhatsApp(order, {
+              forceNowOverride: true,
+              nowDate,
+            });
+            if (res.status === 'sent') summary.scheduledDispatched++;
+          }
+        }
+      }
+
+      // 2. Retry failed outbound WhatsApp messages safely (only when Automation is ON; never retries confirmed/cancelled)
+      const allLogs = readWhatsAppLogs();
+      if (policy.enabled) {
+        for (const log of allLogs) {
+          if (
+            log.direction === 'outbound' &&
+            log.status === 'failed' &&
+            log.retryStatus === 'scheduled' &&
+            log.retryCount < log.maxRetries &&
+            log.nextRetryAt &&
+            new Date(log.nextRetryAt).getTime() <= nowMs &&
+            (log.messageType === 'order_confirmation' || log.messageType === 'reminder_23h')
+          ) {
+            const linkedOrder = readServerOrders().find(
+              (o) => normalizeWaOrderId(o?.id) === normalizeWaOrderId(log.orderId)
+            );
+            if (
+              !linkedOrder ||
+              linkedOrder.customerConfirmed ||
+              String(linkedOrder.orderStatus || '').toLowerCase().includes('cancel')
+            ) {
+              upsertWhatsAppLog({ ...log, retryStatus: 'none', nextRetryAt: undefined });
+              continue;
+            }
+            summary.retriesAttempted++;
+            const retryRes = await dispatchWhatsAppUtilityTemplate({
+              order: linkedOrder,
+              messageType: log.messageType,
+              existingLogId: log.id,
+              retryCount: log.retryCount,
+            });
+            if (retryRes.success && retryRes.wamid) {
+              updateServerOrderById(linkedOrder.id, (prev) => ({
+                ...prev,
+                whatsappStatus: 'Sent',
+                whatsappDeliveryStatus: 'sent',
+                whatsappError: undefined,
+                needsManualFollowUp: false,
+                manualFollowUpReason: undefined,
+                confirmationTask: {
+                  status: 'sent',
+                  createdAt: prev.confirmationTask?.createdAt || nowIso,
+                  updatedAt: nowIso,
+                  lastAttemptAt: nowIso,
+                  method: 'WhatsApp',
+                },
+                ...(log.messageType === 'order_confirmation'
+                  ? {
+                      whatsappMessageId: retryRes.wamid,
+                      confirmationSentAt: prev.confirmationSentAt || nowIso,
+                      whatsappSentAt: nowIso,
+                    }
+                  : {
+                      whatsappReminderMessageId: retryRes.wamid,
+                      reminder23hSent: true,
+                      reminder23hSentAt: nowIso,
+                    }),
+              }));
+            }
+          }
+        }
+      }
+
+      // 3 & 4. 23-Hour Reminder (atomic once-only) & Manual Follow-Up Flagging
+      const latestOrders = readServerOrders();
+      for (const order of latestOrders) {
+        const normId = normalizeWaOrderId(order?.id);
+        const rawSt = String(order?.orderStatus || '').toLowerCase();
+        const isUpcoming =
+          !order?.customerConfirmed &&
+          !order?.isExpired &&
+          (rawSt === 'new' || rawSt === 'pending' || rawSt === 'cod verification' || rawSt === '');
+        if (!isUpcoming) continue;
+
+        const referenceIso = order.confirmationSentAt || order.whatsappSentAt || order.createdAt;
+        if (!referenceIso) continue;
+        const elapsedHours = (nowMs - new Date(referenceIso).getTime()) / (1000 * 60 * 60);
+
+        // 3. 23-Hour Gentle Reminder (one-time atomic idempotency guard)
+        const processed = readProcessedWhatsAppEvents();
+        const alreadyReminded = Boolean(order.reminder23hSent || processed.remindersSent[normId]);
+
+        if (
+          policy.enabled &&
+          policy.reminder23hEnabled &&
+          !alreadyReminded &&
+          !waReminderInFlight.has(normId) &&
+          elapsedHours >= policy.reminderDelayHours &&
+          order.confirmationSentAt
+        ) {
+          waReminderInFlight.add(normId);
+          try {
+            // Re-verify atomic lock right before sending
+            const freshProcessed = readProcessedWhatsAppEvents();
+            if (!freshProcessed.remindersSent[normId]) {
+              // Claim reminder slot atomically so concurrent ticks can never send twice
+              freshProcessed.remindersSent[normId] = nowIso;
+              writeProcessedWhatsAppEvents(freshProcessed);
+
+              const remRes = await dispatchWhatsAppUtilityTemplate({
+                order,
+                messageType: 'reminder_23h',
+              });
+
+              updateServerOrderById(order.id, (prev) => ({
+                ...prev,
+                reminder23hSent: true,
+                reminder23hSentAt: nowIso,
+                whatsappReminderMessageId: remRes.wamid || prev.whatsappReminderMessageId,
+                whatsappDeliveryStatus: remRes.success ? 'sent' : 'failed',
+                whatsappError: remRes.success ? undefined : remRes.error,
+                activityLog: appendOrderActivity(
+                  prev,
+                  remRes.success ? '23-Hour Reminder Sent via WhatsApp' : '23-Hour Reminder Failed (Retry Scheduled)',
+                  remRes.success
+                    ? `Gentle 23h reminder (${policy.reminderTemplateName}) sent with YES/CANCEL buttons (WAMID: ${remRes.wamid}).`
+                    : `23h reminder attempt failed: ${remRes.error || 'Unknown error'}.`,
+                  'whatsapp'
+                ),
+              }));
+              summary.remindersSent++;
+            }
+          } finally {
+            waReminderInFlight.delete(normId);
+          }
+          continue;
+        }
+
+        // 4. Still no response after follow-up period -> Flag needsManualFollowUp = true (NEVER auto-ship!)
+        const refreshedOrder = readServerOrders().find((o) => normalizeWaOrderId(o?.id) === normId) || order;
+        if (
+          refreshedOrder.reminder23hSent &&
+          !refreshedOrder.customerConfirmed &&
+          !refreshedOrder.needsManualFollowUp &&
+          elapsedHours >= policy.manualFollowUpHours
+        ) {
+          updateServerOrderById(refreshedOrder.id, (prev) => ({
+            ...prev,
+            needsManualFollowUp: true,
+            manualFollowUpFlaggedAt: nowIso,
+            whatsappStatus: 'No Reply',
+            activityLog: appendOrderActivity(
+              prev,
+              'Flagged for Manual Follow-Up',
+              `No customer reply after ${Math.round(elapsedHours)}h (including 23h reminder). Flagged for manual admin follow-up; shipment NOT auto-created.`,
+              'system'
+            ),
+          }));
+          summary.manualFollowUpFlagged++;
+        }
+      }
+    } catch (err: any) {
+      summary.errors.push(err?.message || 'Scheduler tick error');
+    } finally {
+      waSchedulerTickRunning = false;
+    }
+
+    return summary;
+  }
+
+  // Start real background scheduler (runs every 60 seconds)
+  setInterval(() => {
+    void runWhatsAppAutomationTick().catch(() => {});
+  }, 60 * 1000);
+
   // Official Meta WhatsApp Cloud API Connectivity Test Endpoint (Restricted to Super Admin)
   const handleWhatsAppTest = async (req: Request, res: Response) => {
     const body = req.body || {};
@@ -2732,9 +5276,19 @@ async function startServer() {
   app.get('/api/whatsapp/test', requireSuperAdmin, handleWhatsAppTest);
   app.post('/api/whatsapp/test', requireSuperAdmin, handleWhatsAppTest);
 
-  // Official Meta WhatsApp Cloud API Endpoint (Never Faked)
-  app.post('/api/whatsapp/send', async (req: Request, res: Response) => {
-    const { to, templateName, components, textMessage, accessToken: bodyToken, phoneNumberId: bodyPhoneId, languageCode } = req.body || {};
+  // Official Meta WhatsApp Cloud API Send Endpoint (Authenticated Staff/Admin Only, Never Faked)
+  app.post('/api/whatsapp/send', requireStaffOrAdmin, async (req: Request, res: Response) => {
+    const {
+      to,
+      templateName,
+      components,
+      textMessage,
+      accessToken: bodyToken,
+      phoneNumberId: bodyPhoneId,
+      languageCode,
+      orderId,
+      messageType,
+    } = req.body || {};
 
     const cfg = readServerIntegrations();
     if (cfg.whatsappIntegrationDeleted === true || cfg.whatsappSettings?.enabled === false) {
@@ -2748,7 +5302,6 @@ async function startServer() {
 
     const { token, phoneNumberId } = getEffectiveWhatsAppCreds(bodyToken, bodyPhoneId);
 
-    // Strict requirement: Never show message sent unless actual Cloud API succeeds
     if (!token || !phoneNumberId) {
       return res.status(400).json({
         success: false,
@@ -2764,11 +5317,11 @@ async function startServer() {
       });
     }
 
-    const cleanTo = to.replace(/\D/g, '');
-    const formattedTo = cleanTo.length === 10 ? `91${cleanTo}` : cleanTo;
+    const formattedTo = normalizeIndianPhoneForWa(String(to));
+    const nowIso = new Date().toISOString();
 
     try {
-      let payload: any = {
+      const payload: any = {
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
         to: formattedTo,
@@ -2794,15 +5347,33 @@ async function startServer() {
       const metaRes = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
+          Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
       });
 
-      const data: any = await metaRes.json();
+      const data: any = await metaRes.json().catch(() => ({}));
 
       if (!metaRes.ok) {
+        upsertWhatsAppLog({
+          id: `walog_manual_${Date.now()}`,
+          orderId: orderId || 'MANUAL_TEST',
+          customerPhone: formattedTo,
+          messageType: messageType || 'test',
+          direction: 'outbound',
+          templateName: templateName || undefined,
+          status: 'failed',
+          sentAt: nowIso,
+          failedAt: nowIso,
+          errorCode: String(data?.error?.code || metaRes.status),
+          errorMessage: data?.error?.message || `Meta API returned HTTP ${metaRes.status}`,
+          retryCount: 0,
+          maxRetries: 0,
+          retryStatus: 'none',
+          payloadSummary: templateName ? `Template: ${templateName}` : String(textMessage || '').slice(0, 180),
+          updatedAt: nowIso,
+        });
         return res.status(metaRes.status).json({
           success: false,
           configured: true,
@@ -2811,12 +5382,30 @@ async function startServer() {
         });
       }
 
+      const wamid = data?.messages?.[0]?.id;
+      upsertWhatsAppLog({
+        id: `walog_manual_${Date.now()}`,
+        wamid,
+        orderId: orderId || 'MANUAL_TEST',
+        customerPhone: formattedTo,
+        messageType: messageType || 'test',
+        direction: 'outbound',
+        templateName: templateName || undefined,
+        status: 'sent',
+        sentAt: nowIso,
+        retryCount: 0,
+        maxRetries: 0,
+        retryStatus: 'none',
+        payloadSummary: templateName ? `Template: ${templateName}` : String(textMessage || '').slice(0, 180),
+        updatedAt: nowIso,
+      });
+
       return res.json({
         success: true,
         configured: true,
-        messageId: data?.messages?.[0]?.id,
+        messageId: wamid,
         status: 'Sent',
-        timestamp: new Date().toISOString(),
+        timestamp: nowIso,
       });
     } catch (err: any) {
       return res.status(500).json({
@@ -2827,74 +5416,532 @@ async function startServer() {
     }
   });
 
-  // Official Meta WhatsApp Cloud API Webhook (GET Challenge Verification & POST Incoming Reply Handler)
+  // Admin WhatsApp Logs, Safe Retry, & Manual Scheduler Trigger Endpoints
+  app.get('/api/admin/whatsapp/logs', requireStaffOrAdmin, (req: Request, res: Response) => {
+    const statusFilter = String(req.query.status || '').trim().toLowerCase();
+    const orderIdFilter = String(req.query.orderId || '').trim().toLowerCase();
+    const q = String(req.query.q || '').trim().toLowerCase();
+
+    let logs = readWhatsAppLogs();
+    if (statusFilter && statusFilter !== 'all') {
+      logs = logs.filter((l) => l.status === statusFilter);
+    }
+    if (orderIdFilter) {
+      logs = logs.filter((l) => String(l.orderId || '').toLowerCase().includes(orderIdFilter));
+    }
+    if (q) {
+      logs = logs.filter(
+        (l) =>
+          String(l.orderId || '').toLowerCase().includes(q) ||
+          String(l.customerPhone || '').toLowerCase().includes(q) ||
+          String(l.customerName || '').toLowerCase().includes(q) ||
+          String(l.wamid || '').toLowerCase().includes(q) ||
+          String(l.customerReply || '').toLowerCase().includes(q)
+      );
+    }
+
+    const allLogs = readWhatsAppLogs();
+    const ordersList = readServerOrders();
+    const manualFollowUpCount = ordersList.filter((o) => o?.needsManualFollowUp && !o?.customerConfirmed).length;
+    const scheduledCount = ordersList.filter((o) => o?.scheduledConfirmationTime && !o?.confirmationSentAt && !o?.customerConfirmed).length;
+
+    return res.json({
+      success: true,
+      logs: logs.slice(0, 250),
+      stats: {
+        total: allLogs.length,
+        sent: allLogs.filter((l) => l.status === 'sent').length,
+        delivered: allLogs.filter((l) => l.status === 'delivered').length,
+        read: allLogs.filter((l) => l.status === 'read').length,
+        failed: allLogs.filter((l) => l.status === 'failed').length,
+        scheduled: scheduledCount,
+        replies: allLogs.filter((l) => l.direction === 'inbound').length,
+        manualFollowUpCount,
+      },
+      policy: (() => {
+        const p = getEffectiveWhatsAppPolicy();
+        return {
+          enabled: p.enabled,
+          confirmCodOrders: p.confirmCodOrders,
+          confirmPrepaidOrders: p.confirmPrepaidOrders,
+          respectSendingWindow: p.respectSendingWindow,
+          sendingWindowStartHour: p.sendingWindowStartHour,
+          sendingWindowEndHour: p.sendingWindowEndHour,
+          reminderDelayHours: p.reminderDelayHours,
+          manualFollowUpHours: p.manualFollowUpHours,
+          hasAppSecret: Boolean(p.appSecret),
+          hasRelaySecret: Boolean(p.relaySecret),
+        };
+      })(),
+    });
+  });
+
+  app.post('/api/admin/whatsapp/logs/:logId/retry', requireStaffOrAdmin, async (req: Request, res: Response) => {
+    const logId = String(req.params.logId || '').trim();
+    const logs = readWhatsAppLogs();
+    const targetLog = logs.find((l) => l.id === logId);
+    if (!targetLog) {
+      return res.status(404).json({ success: false, message: 'WhatsApp message log not found.' });
+    }
+    if (targetLog.status !== 'failed') {
+      return res.status(400).json({ success: false, message: 'Only failed outbound messages can be retried.' });
+    }
+    if (targetLog.messageType !== 'order_confirmation' && targetLog.messageType !== 'reminder_23h') {
+      return res.status(400).json({ success: false, message: 'Safe retry is supported for order confirmation and 23h reminder templates.' });
+    }
+    const order = readServerOrders().find((o) => normalizeWaOrderId(o?.id) === normalizeWaOrderId(targetLog.orderId));
+    if (!order) {
+      return res.status(404).json({ success: false, message: `Linked order ${targetLog.orderId} not found.` });
+    }
+    const retryRes = await dispatchWhatsAppUtilityTemplate({
+      order,
+      messageType: targetLog.messageType,
+      existingLogId: targetLog.id,
+      retryCount: targetLog.retryCount,
+    });
+    return res.status(retryRes.success ? 200 : 502).json({
+      success: retryRes.success,
+      wamid: retryRes.wamid,
+      log: retryRes.log,
+      error: retryRes.error,
+    });
+  });
+
+  app.post('/api/admin/whatsapp/scheduler/run', requireSuperAdmin, async (req: Request, res: Response) => {
+    const nowMs = req.body?.simulatedNowMs ? Number(req.body.simulatedNowMs) : Date.now();
+    const ignoreWindowForTest = Boolean(req.body?.ignoreWindowForTest);
+    const result = await runWhatsAppAutomationTick({ nowMs, ignoreWindowForTest });
+    return res.json({ success: true, result });
+  });
+
+  app.post('/api/admin/whatsapp/send-confirmation/:orderId', requireStaffOrAdmin, async (req: Request, res: Response) => {
+    const orderId = decodeURIComponent(String(req.params.orderId || ''));
+    const order = readServerOrders().find((o) => normalizeWaOrderId(o?.id) === normalizeWaOrderId(orderId));
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+    const result = await triggerOrderConfirmationWhatsApp(order, { forceNowOverride: true, allowRetryOverride: true });
+    const updatedOrder = readServerOrders().find((o) => normalizeWaOrderId(o?.id) === normalizeWaOrderId(orderId));
+    return res.json({ success: result.status === 'sent', result, order: updatedOrder });
+  });
+
+  // ==========================================
+  // HYBRID CONFIRMATION & MANUAL FALLBACK ADMIN APIs
+  // ==========================================
+
+  // 1. Live Backend Meta WhatsApp Connection Health Indicator (Cached 30s unless ?refresh=1, zero secrets exposed)
+  app.get('/api/admin/whatsapp/health', requireStaffOrAdmin, async (req: Request, res: Response) => {
+    const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
+    const policy = getEffectiveWhatsAppPolicy();
+    const creds = getEffectiveWhatsAppCreds();
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+
+    const respondHealth = (payload: {
+      status: 'Connected' | 'Disconnected' | 'Authentication Error' | 'Temporarily Unavailable';
+      automationEnabled: boolean;
+      checkedAt: string;
+      reason: string;
+      verifiedName?: string;
+      displayPhoneNumber?: string;
+      httpStatus?: number;
+    }) => {
+      const clean = {
+        status: payload.status,
+        automationEnabled: payload.automationEnabled,
+        checkedAt: payload.checkedAt,
+        reason: payload.reason,
+        message: payload.reason,
+        verifiedName: payload.verifiedName,
+        displayPhoneNumber: payload.displayPhoneNumber,
+        httpStatus: payload.httpStatus,
+      };
+      return res.json({ success: true, ...clean, health: clean });
+    };
+
+    if (!forceRefresh && waHealthCache && waHealthCache.expiresAtMs > nowMs) {
+      return respondHealth({
+        status: waHealthCache.status,
+        automationEnabled: policy.enabled,
+        checkedAt: waHealthCache.checkedAt,
+        reason: waHealthCache.reason || '',
+        verifiedName: waHealthCache.verifiedName,
+        displayPhoneNumber: waHealthCache.displayPhoneNumber,
+        httpStatus: waHealthCache.httpStatus,
+      });
+    }
+
+    if (!creds.token || !creds.phoneNumberId) {
+      const result = {
+        status: 'Disconnected' as const,
+        automationEnabled: policy.enabled,
+        checkedAt: nowIso,
+        expiresAtMs: nowMs + 15000,
+        reason: 'WhatsApp Access Token or Phone Number ID is not configured.',
+      };
+      waHealthCache = result;
+      return respondHealth(result);
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7000);
+    try {
+      const checkUrl = `${policy.apiEndpoint}/${creds.phoneNumberId}?fields=verified_name,display_phone_number,quality_rating`;
+      const metaRes = await fetch(checkUrl, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${creds.token}` },
+        signal: controller.signal,
+      });
+      const data: any = await metaRes.json().catch(() => ({}));
+
+      if (metaRes.ok && (data?.id || data?.display_phone_number || data?.verified_name)) {
+        const result = {
+          status: 'Connected' as const,
+          automationEnabled: policy.enabled,
+          checkedAt: nowIso,
+          expiresAtMs: nowMs + 30000,
+          verifiedName: data?.verified_name || 'RedMode WhatsApp',
+          displayPhoneNumber: data?.display_phone_number || undefined,
+          httpStatus: metaRes.status,
+          reason: policy.enabled
+            ? 'Meta WhatsApp Cloud API reachable and authenticated.'
+            : 'Meta credentials valid, but WhatsApp Automation is currently switched OFF.',
+        };
+        waHealthCache = result;
+        return respondHealth(result);
+      }
+
+      const errCode = Number(data?.error?.code || 0);
+      const isAuthErr =
+        metaRes.status === 401 ||
+        metaRes.status === 403 ||
+        errCode === 190 ||
+        errCode === 10 ||
+        errCode === 200;
+
+      const status = isAuthErr ? ('Authentication Error' as const) : ('Temporarily Unavailable' as const);
+      const result = {
+        status,
+        automationEnabled: policy.enabled,
+        checkedAt: nowIso,
+        expiresAtMs: nowMs + 15000,
+        httpStatus: metaRes.status,
+        reason:
+          data?.error?.message ||
+          (isAuthErr
+            ? 'Meta Access Token expired or invalid. Manual confirmation remains fully available.'
+            : `Meta Graph API returned HTTP ${metaRes.status}. Manual confirmation remains fully available.`),
+      };
+      waHealthCache = result;
+      return respondHealth(result);
+    } catch (err: any) {
+      const result = {
+        status: 'Temporarily Unavailable' as const,
+        automationEnabled: policy.enabled,
+        checkedAt: nowIso,
+        expiresAtMs: nowMs + 15000,
+        reason:
+          err?.name === 'AbortError'
+            ? 'Meta API health check timed out. Manual confirmation remains operational.'
+            : `Unable to reach Meta WhatsApp API (${err?.message || 'network error'}). Manual confirmation remains operational.`,
+      };
+      waHealthCache = result;
+      return respondHealth(result);
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
+
+  // 2. Manual Order Confirmation by Authorized Admin (Works 100% independently of Meta API)
+  app.post('/api/admin/orders/:orderId/confirm-manual', requireStaffOrAdmin, async (req: Request, res: Response) => {
+    const orderId = decodeURIComponent(String(req.params.orderId || ''));
+    const { adminConfirmedCustomerContact, note } = req.body || {};
+
+    if (adminConfirmedCustomerContact !== true) {
+      return res.status(400).json({
+        success: false,
+        message: 'Explicit admin confirmation that the customer was contacted and agreed to the order is required.',
+      });
+    }
+
+    const adminUser = (req as any).adminUser || {};
+    const result = await confirmOrderAtomically({
+      orderId,
+      method: 'Manual',
+      adminId: String(adminUser.uid || adminUser.email || 'admin'),
+      adminName: String(adminUser.name || adminUser.email || 'Admin'),
+      note: typeof note === 'string' ? note.trim().slice(0, 300) : undefined,
+    });
+
+    if (!result.success) {
+      return res.status(result.order ? 409 : 404).json({
+        success: false,
+        message: result.blockedReason || 'Unable to confirm order.',
+        order: result.order,
+      });
+    }
+
+    return res.json({
+      success: true,
+      confirmed: result.confirmed,
+      alreadyConfirmed: Boolean(result.alreadyConfirmed),
+      message: result.alreadyConfirmed
+        ? result.blockedReason
+        : `Order ${result.order?.id} manually confirmed. ${
+            result.awb
+              ? `Real Delhivery AWB #${result.awb} generated (remains Confirmed until label download).`
+              : 'Order is Confirmed — you can generate/retry Real Delhivery AWB from the Confirmed tab.'
+          }`,
+      order: result.order,
+      delhiverySuccess: result.delhiverySuccess,
+      awb: result.awb,
+      delhiveryError: result.delhiveryError,
+    });
+  });
+
+  // 3. Atomic Admin Order Cancellation (Restores stock exactly once, blocks Delhivery)
+  app.post('/api/admin/orders/:orderId/cancel', requireStaffOrAdmin, async (req: Request, res: Response) => {
+    const orderId = decodeURIComponent(String(req.params.orderId || ''));
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 240) : undefined;
+    const adminUser = (req as any).adminUser || {};
+
+    const result = await cancelOrderAtomically({
+      orderId,
+      source: 'admin',
+      adminId: String(adminUser.uid || adminUser.email || 'admin'),
+      adminName: String(adminUser.name || adminUser.email || 'Admin'),
+      reason,
+    });
+
+    if (!result.success) {
+      return res.status(result.order ? 409 : 404).json({
+        success: false,
+        message: result.blockedReason || 'Unable to cancel order.',
+        order: result.order,
+      });
+    }
+
+    return res.json({
+      success: true,
+      cancelled: result.cancelled,
+      alreadyCancelled: Boolean(result.alreadyCancelled),
+      stockRestored: result.stockRestored,
+      restoredUnits: result.restoredUnits,
+      order: result.order,
+      message: result.alreadyCancelled
+        ? result.blockedReason
+        : `Order ${result.order?.id} cancelled${result.stockRestored ? ` and ${result.restoredUnits} unit(s) restored to stock` : ''}.`,
+    });
+  });
+
+  // 4. Safe Manual Retry of WhatsApp Confirmation for an Upcoming Order
+  app.post('/api/admin/orders/:orderId/retry-whatsapp', requireStaffOrAdmin, async (req: Request, res: Response) => {
+    const orderId = decodeURIComponent(String(req.params.orderId || ''));
+    const order = readServerOrders().find((o) => normalizeWaOrderId(o?.id) === normalizeWaOrderId(orderId));
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+    const rawSt = String(order.orderStatus || '').toLowerCase();
+    if (order.customerConfirmed || rawSt === 'confirmed' || rawSt.includes('cancel') || rawSt === 'rtd') {
+      return res.status(409).json({
+        success: false,
+        message: `Cannot resend WhatsApp confirmation because order is already ${order.orderStatus}.`,
+        order,
+      });
+    }
+
+    const adminUser = (req as any).adminUser || {};
+    const result = await triggerOrderConfirmationWhatsApp(order, {
+      forceNowOverride: true,
+      allowRetryOverride: true,
+    });
+    const updatedOrder = readServerOrders().find((o) => normalizeWaOrderId(o?.id) === normalizeWaOrderId(orderId)) || order;
+
+    recordConfirmationAuditLog({
+      orderId: order.id,
+      eventType: result.status === 'sent' ? 'WHATSAPP_RETRY_SUCCEEDED' : 'WHATSAPP_RETRY_FAILED',
+      previousStatus: 'Upcoming',
+      newStatus: 'Upcoming',
+      confirmationMethod: 'WhatsApp',
+      adminId: String(adminUser.uid || 'admin'),
+      adminName: String(adminUser.name || 'Admin'),
+      whatsappMessageId: (result as any).wamid,
+      errorDetails: (result as any).error,
+      notes: `Admin manually triggered Retry WhatsApp (${result.status}).`,
+    });
+
+    return res.status(result.status === 'sent' ? 200 : 200).json({
+      success: result.status === 'sent',
+      status: result.status,
+      wamid: (result as any).wamid,
+      error: (result as any).error,
+      message:
+        result.status === 'sent'
+          ? `WhatsApp confirmation resent successfully (WAMID: ${(result as any).wamid}).`
+          : result.status === 'skipped_disabled'
+          ? 'WhatsApp Automation is currently switched OFF. Turn it ON or confirm the order manually.'
+          : `WhatsApp retry failed: ${(result as any).error || 'Meta API unavailable'}. Order remains safely in Upcoming for manual confirmation.`,
+      order: updatedOrder,
+    });
+  });
+
+  // 5. Explicitly Mark / Unmark an Upcoming Order for Manual Follow-Up
+  app.post('/api/admin/orders/:orderId/mark-followup', requireStaffOrAdmin, (req: Request, res: Response) => {
+    const orderId = decodeURIComponent(String(req.params.orderId || ''));
+    const flagged = req.body?.needsManualFollowUp !== false;
+    const reason =
+      typeof req.body?.reason === 'string' && req.body.reason.trim()
+        ? req.body.reason.trim().slice(0, 240)
+        : 'Marked for manual admin follow-up';
+    const adminUser = (req as any).adminUser || {};
+    const nowIso = new Date().toISOString();
+
+    const existing = readServerOrders().find((o) => normalizeWaOrderId(o?.id) === normalizeWaOrderId(orderId));
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+
+    const updated = updateServerOrderById(existing.id, (prev) => ({
+      ...prev,
+      needsManualFollowUp: flagged,
+      manualFollowUpFlaggedAt: flagged ? nowIso : undefined,
+      manualFollowUpReason: flagged ? reason : undefined,
+      confirmationTask: {
+        status: flagged ? 'manual_followup' : prev.confirmationTask?.status || 'pending',
+        createdAt: prev.confirmationTask?.createdAt || nowIso,
+        updatedAt: nowIso,
+        failureReason: flagged ? reason : prev.confirmationTask?.failureReason,
+      },
+      activityLog: appendOrderActivity(
+        prev,
+        flagged ? 'Marked for Manual Follow-Up' : 'Cleared Manual Follow-Up Flag',
+        `${reason} (by ${adminUser.name || 'Admin'}).`,
+        'admin'
+      ),
+    }));
+
+    recordConfirmationAuditLog({
+      orderId: existing.id,
+      eventType: flagged ? 'MARKED_MANUAL_FOLLOWUP' : 'CLEARED_MANUAL_FOLLOWUP',
+      previousStatus: existing.orderStatus === 'NEW' ? 'Upcoming' : String(existing.orderStatus || 'Upcoming'),
+      newStatus: existing.orderStatus === 'NEW' ? 'Upcoming' : String(existing.orderStatus || 'Upcoming'),
+      confirmationMethod: 'Manual',
+      adminId: String(adminUser.uid || 'admin'),
+      adminName: String(adminUser.name || 'Admin'),
+      notes: reason,
+    });
+
+    return res.json({
+      success: true,
+      order: updated,
+      message: flagged
+        ? `Order ${existing.id} added to Manual Follow-up queue.`
+        : `Manual Follow-up cleared for Order ${existing.id}.`,
+    });
+  });
+
+  // 6. Persistent Confirmation Audit Logs Endpoint (Zero secrets)
+  app.get('/api/admin/confirmation-audit-logs', requireStaffOrAdmin, (req: Request, res: Response) => {
+    const orderIdFilter = String(req.query.orderId || '').trim();
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 100)));
+    let logs = readConfirmationAuditLogs();
+    if (orderIdFilter) {
+      const norm = normalizeWaOrderId(orderIdFilter);
+      logs = logs.filter((l) => normalizeWaOrderId(l.orderId) === norm);
+    }
+    return res.json({
+      success: true,
+      total: logs.length,
+      logs: logs.slice(0, limit),
+    });
+  });
+
+  // Single Unified Official Meta & Signed Render Relay Webhook Receiver (NO Duplicate Endpoints)
   app.get('/api/whatsapp/webhook', (req: Request, res: Response) => {
     const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
+    const token = String(req.query['hub.verify_token'] || '');
     const challenge = req.query['hub.challenge'];
-    const expectedToken = (process.env.WHATSAPP_VERIFY_TOKEN || 'redmode_wa_verify_2026').trim();
+    const expectedToken = getEffectiveWhatsAppPolicy().verifyToken;
 
-    if (mode === 'subscribe' && token === expectedToken) {
+    if (mode === 'subscribe' && expectedToken && token === expectedToken) {
       return res.status(200).send(String(challenge || ''));
     }
     return res.status(403).json({ success: false, message: 'Invalid webhook verify token.' });
   });
 
-  app.post('/api/whatsapp/webhook', (req: Request, res: Response) => {
+  app.post('/api/whatsapp/webhook', async (req: Request, res: Response) => {
     try {
-      const entry = req.body?.entry?.[0];
-      const change = entry?.changes?.[0]?.value;
-      const msg = change?.messages?.[0];
-      if (msg) {
-        const senderRaw = String(msg.from || '').replace(/\D/g, '');
-        const cleanSender = senderRaw.slice(-10);
-        const textBody = (
-          msg.text?.body ||
-          msg.button?.text ||
-          msg.interactive?.button_reply?.title ||
-          ''
-        )
-          .trim()
-          .toUpperCase();
-
-        if (cleanSender.length === 10 && textBody) {
-          const isConfirm = textBody === 'YES' || textBody === 'CONFIRM' || textBody.startsWith('YES');
-          const isCancel = textBody === 'CANCEL' || textBody === 'NO' || textBody.startsWith('CANCEL');
-
-          if (isConfirm || isCancel) {
-            const rawOrders = readServerOrders();
-            if (Array.isArray(rawOrders)) {
-              const nowIso = new Date().toISOString();
-              let updatedAny = false;
-              const nextOrders = rawOrders.map((o: any) => {
-                const phone = String(o?.customer?.mobile || o?.customer?.phone || '')
-                  .replace(/\D/g, '')
-                  .slice(-10);
-                if (phone === cleanSender && !updatedAny && (o.orderStatus === 'NEW' || o.orderStatus === 'Pending')) {
-                  updatedAny = true;
-                  return {
-                    ...o,
-                    customerConfirmed: isConfirm,
-                    customerConfirmedAt: isConfirm ? nowIso : o.customerConfirmedAt,
-                    codVerificationStatus: isConfirm ? 'CONFIRMED' : 'REJECTED',
-                    orderStatus: isConfirm ? 'Confirmed' : 'Cancelled',
-                    whatsappStatus: isConfirm ? 'Confirmed' : 'Cancelled',
-                    whatsappReply: textBody,
-                    whatsappReplyAt: nowIso,
-                  };
-                }
-                return o;
-              });
-              if (updatedAny) {
-                writeServerOrders(nextOrders);
-              }
-            }
-          }
-        }
+      const authCheck = verifyIncomingWhatsAppWebhookAuth(req);
+      if (!authCheck.verified) {
+        recordWebhookLog({
+          source: 'WhatsApp',
+          endpoint: '/api/whatsapp/webhook',
+          eventType: 'SIGNATURE_REJECTED',
+          referenceId: String(req.headers['x-redmode-relay-event-id'] || 'unverified'),
+          httpStatus: 401,
+          verified: false,
+          summary: authCheck.reason || 'Rejected WhatsApp webhook due to missing or invalid HMAC signature.',
+          headersSummary: sanitizeWebhookHeaders(req.headers as any),
+          payload: { object: req.body?.object || 'unknown' },
+        });
+        return res.status(401).json({
+          success: false,
+          error: 'INVALID_WEBHOOK_SIGNATURE',
+          message: authCheck.reason || 'Invalid or missing webhook signature.',
+        });
       }
-      return res.status(200).json({ status: 'EVENT_RECEIVED' });
-    } catch {
-      return res.status(200).json({ status: 'EVENT_RECEIVED' });
+
+      const result = await processIncomingWhatsAppWebhookPayload(
+        req.body,
+        authCheck.mode as 'render_relay' | 'meta_direct'
+      );
+
+      const firstAction = result.actions[0];
+      const refId =
+        firstAction?.orderId ||
+        firstAction?.wamid ||
+        String(req.headers['x-redmode-relay-event-id'] || 'wa_event');
+      const eventType = firstAction?.type
+        ? `WHATSAPP_${String(firstAction.type).toUpperCase()}`
+        : result.duplicateMessages > 0 || result.duplicateStatuses > 0
+        ? 'WHATSAPP_DUPLICATE_IGNORED'
+        : 'WHATSAPP_EVENT';
+
+      recordWebhookLog({
+        source: 'WhatsApp',
+        endpoint: '/api/whatsapp/webhook',
+        eventType,
+        referenceId: String(refId),
+        httpStatus: 200,
+        verified: true,
+        summary: `Verified (${authCheck.mode}): ${result.processedMessages} msg(s), ${result.processedStatuses} status(es), ${result.duplicateMessages + result.duplicateStatuses} duplicate(s) ignored.`,
+        headersSummary: sanitizeWebhookHeaders(req.headers as any),
+        payload: req.body,
+      });
+
+      return res.status(200).json({
+        success: true,
+        status: 'EVENT_RECEIVED',
+        authMode: authCheck.mode,
+        ...result,
+      });
+    } catch (err: any) {
+      recordWebhookLog({
+        source: 'WhatsApp',
+        endpoint: '/api/whatsapp/webhook',
+        eventType: 'WEBHOOK_PROCESSING_ERROR',
+        referenceId: 'error',
+        httpStatus: 500,
+        verified: true,
+        summary: err?.message || 'Internal error processing WhatsApp webhook.',
+        headersSummary: sanitizeWebhookHeaders(req.headers as any),
+        payload: { error: err?.message || 'Processing error' },
+      });
+      return res.status(500).json({
+        success: false,
+        status: 'PROCESSING_ERROR',
+        message: err?.message || 'Failed processing WhatsApp webhook.',
+      });
     }
   });
 
@@ -4005,6 +7052,93 @@ async function startServer() {
       note,
     };
 
+    // Update authoritative order status ONLY for verified courier scans on eligible dispatched/RTD orders
+    const statusLower = finalStatus.toLowerCase();
+    const statusCodeUpper = String(nestedStatus?.StatusCode || body.statusCode || '').trim().toUpperCase();
+    const isDeliveredScan = statusLower === 'delivered' || statusCodeUpper === 'DL';
+    const isPickupOrTransitScan =
+      !isDeliveredScan &&
+      (statusLower.includes('in transit') ||
+        statusLower.includes('picked up') ||
+        statusLower.includes('dispatched') ||
+        statusLower.includes('out for delivery') ||
+        statusCodeUpper === 'UD');
+
+    let updatedOrderId: string | null = null;
+    let transitionedToStatus: string | null = null;
+
+    const matchedOrder = readServerOrders().find(
+      (o) => String(o?.awb_number || o?.shipmozo?.awb || '').trim() === finalAwb
+    );
+
+    if (matchedOrder) {
+      const currentRaw = String(matchedOrder.orderStatus || '').toLowerCase();
+      const isCancelledOrUpcoming =
+        !matchedOrder.customerConfirmed ||
+        currentRaw === 'new' ||
+        currentRaw === 'pending' ||
+        currentRaw.includes('cancel') ||
+        currentRaw.includes('expire');
+
+      if (!isCancelledOrUpcoming) {
+        const nowIso = new Date().toISOString();
+        const isEligibleForTransit =
+          currentRaw === 'rtd' ||
+          currentRaw.includes('ready to') ||
+          (currentRaw === 'confirmed' && matchedOrder.labelDownloaded === true);
+
+        if (isDeliveredScan && (currentRaw.includes('transit') || currentRaw.includes('shipped') || currentRaw === 'rtd')) {
+          const prevStatus = String(matchedOrder.orderStatus);
+          updateServerOrderById(matchedOrder.id, (prev) => ({
+            ...prev,
+            orderStatus: 'Delivered',
+            deliveredAt: prev.deliveredAt || nowIso,
+            shipment_status: finalStatus,
+            activityLog: appendOrderActivity(
+              prev,
+              'Verified Delhivery Delivery — Order Completed',
+              `Delhivery confirmed delivery for AWB #${finalAwb} at ${finalLocation}.`,
+              'system'
+            ),
+          }));
+          updatedOrderId = matchedOrder.id;
+          transitionedToStatus = 'Delivered';
+          recordConfirmationAuditLog({
+            orderId: matchedOrder.id,
+            eventType: 'DELHIVERY_DELIVERED_COMPLETED',
+            previousStatus: prevStatus,
+            newStatus: 'Completed',
+            confirmationMethod: 'System',
+            notes: `Verified Delhivery delivery scan (${finalStatus}) for AWB #${finalAwb}.`,
+          });
+        } else if (isPickupOrTransitScan && isEligibleForTransit) {
+          const prevStatus = String(matchedOrder.orderStatus);
+          updateServerOrderById(matchedOrder.id, (prev) => ({
+            ...prev,
+            orderStatus: 'In Transit',
+            pickedUpAt: prev.pickedUpAt || nowIso,
+            shipment_status: finalStatus,
+            activityLog: appendOrderActivity(
+              prev,
+              'Verified Delhivery Pickup Scan — In Transit',
+              `Delhivery recorded verified scan "${finalStatus}" for AWB #${finalAwb} at ${finalLocation}.`,
+              'system'
+            ),
+          }));
+          updatedOrderId = matchedOrder.id;
+          transitionedToStatus = 'In Transit';
+          recordConfirmationAuditLog({
+            orderId: matchedOrder.id,
+            eventType: 'DELHIVERY_PICKUP_IN_TRANSIT',
+            previousStatus: prevStatus,
+            newStatus: 'In Transit',
+            confirmationMethod: 'System',
+            notes: `Verified Delhivery pickup/transit scan (${finalStatus}) for AWB #${finalAwb}.`,
+          });
+        }
+      }
+    }
+
     recordWebhookLog({
       source: 'Delhivery',
       endpoint: '/api/shipping/webhook',
@@ -4012,7 +7146,9 @@ async function startServer() {
       referenceId: finalAwb,
       httpStatus: 200,
       verified: true,
-      summary: `${finalCourier}: AWB #${finalAwb} updated to "${finalStatus}" at ${finalLocation}.`,
+      summary: `${finalCourier}: AWB #${finalAwb} updated to "${finalStatus}" at ${finalLocation}${
+        transitionedToStatus ? ` → Order ${updatedOrderId} moved to ${transitionedToStatus}` : ''
+      }.`,
       headersSummary: sanitizeWebhookHeaders(req.headers),
       payload: body,
     });
@@ -4022,12 +7158,41 @@ async function startServer() {
       awb: finalAwb,
       status: finalStatus,
       location: finalLocation,
+      orderId: updatedOrderId,
+      transitionedToStatus,
       message: `Webhook successfully recorded status "${finalStatus}" for AWB #${finalAwb}!`,
     });
   });
 
-  // Official Delhivery B2C CMU Shipment Creation Endpoint
-  app.post('/api/delhivery/create-shipment', requireStaffOrAdmin, async (req: Request, res: Response) => {
+  // Server-side duplicate-shipment guard maps (prevents duplicate Delhivery CMU bookings for the same order)
+  const delhiveryManifestedOrders = new Map<
+    string,
+    {
+      waybill: string;
+      refnum?: string;
+      sortCode?: string;
+      environment: string;
+      warehouseName: string;
+      createdAt: string;
+    }
+  >();
+  const delhiveryInFlightOrderIds = new Set<string>();
+
+  async function createDelhiveryShipmentInternal(params: {
+    order: any;
+    mode?: string;
+    apiToken?: string;
+    clientName?: string;
+    warehouseName?: string;
+    pickupPincode?: string;
+    pickupAddress?: string;
+    pickupPhone?: string;
+    environment?: string;
+    officialWaybill?: boolean;
+  }): Promise<{
+    httpStatus: number;
+    body: Record<string, any>;
+  }> {
     const {
       order,
       mode = 'Surface',
@@ -4039,10 +7204,89 @@ async function startServer() {
       pickupPhone: bodyPhone,
       environment: bodyEnv,
       officialWaybill = false,
-    } = req.body || {};
+    } = params;
 
     if (!order || !order.id) {
-      return res.status(400).json({ success: false, message: 'Order payload is required.' });
+      return { httpStatus: 400, body: { success: false, message: 'Order payload is required.' } };
+    }
+
+    const rawStatus = String(order.orderStatus || '').toLowerCase();
+    const isOrderConfirmed =
+      order.customerConfirmed === true ||
+      order.codVerificationStatus === 'CONFIRMED' ||
+      rawStatus === 'confirmed' ||
+      rawStatus === 'rtd' ||
+      rawStatus.includes('ready to ship') ||
+      rawStatus.includes('ready to dispatch');
+    const isCancelled = rawStatus.includes('cancel') || rawStatus.includes('expire') || order.isExpired === true;
+
+    if (!isOrderConfirmed || isCancelled) {
+      return {
+        httpStatus: 400,
+        body: {
+          success: false,
+          message: 'Order must be confirmed by the customer before creating a Delhivery shipment.',
+        },
+      };
+    }
+
+    const normOrderId = String(order.id).trim().replace(/^#/, '');
+
+    // 1. Prevent duplicate creation: check existing order AWB, server orders.json, and manifested cache
+    const cached = delhiveryManifestedOrders.get(normOrderId);
+    if (cached?.waybill) {
+      return {
+        httpStatus: 200,
+        body: {
+          success: true,
+          configured: true,
+          alreadyExists: true,
+          environment: cached.environment,
+          waybill: cached.waybill,
+          status: 'Manifested',
+          refnum: cached.refnum,
+          sortCode: cached.sortCode,
+          warehouseName: cached.warehouseName,
+          message: `Existing Delhivery Waybill #${cached.waybill} returned (duplicate shipment prevented).`,
+        },
+      };
+    }
+
+    const storedOrders = readServerOrders();
+    const existingServerOrder = storedOrders.find(
+      (o: any) => String(o?.id || '').trim().replace(/^#/, '') === normOrderId
+    );
+    const existingLiveAwb =
+      existingServerOrder?.awbSource === 'delhivery_live' && existingServerOrder?.awb_number
+        ? String(existingServerOrder.awb_number).trim()
+        : order.awbSource === 'delhivery_live' && order.awb_number
+        ? String(order.awb_number).trim()
+        : '';
+
+    if (existingLiveAwb && !isPlaceholderAwbValue(existingLiveAwb, 'delhivery_live')) {
+      return {
+        httpStatus: 200,
+        body: {
+          success: true,
+          configured: true,
+          alreadyExists: true,
+          waybill: existingLiveAwb,
+          status: 'Manifested',
+          sortCode: existingServerOrder?.delhiverySortCode || order.delhiverySortCode,
+          message: `Existing Delhivery Waybill #${existingLiveAwb} preserved (duplicate shipment prevented).`,
+        },
+      };
+    }
+
+    if (delhiveryInFlightOrderIds.has(normOrderId)) {
+      return {
+        httpStatus: 409,
+        body: {
+          success: false,
+          inFlight: true,
+          message: 'Delhivery shipment creation is already in progress for this order.',
+        },
+      };
     }
 
     const dCfg = getEffectiveDelhiveryConfig({
@@ -4056,33 +7300,52 @@ async function startServer() {
     });
 
     if (!dCfg.apiToken) {
-      return res.status(200).json({
-        success: true,
-        configured: false,
-        waybill: order.awb_number || null,
-        message: 'Delhivery API Token not active on server; local AWB manifest retained.',
-      });
+      return {
+        httpStatus: 400,
+        body: {
+          success: false,
+          configured: false,
+          waybill: null,
+          message:
+            'Delhivery API Token is not configured on the server. Save your live Delhivery token in Couriers & Logistics first.',
+        },
+      };
     }
 
+    delhiveryInFlightOrderIds.add(normOrderId);
     try {
       const cust = order.customer || {};
       const isCod = (order.paymentMode || '').toUpperCase() === 'COD';
-      const cleanCustPin = String(cust.pincode || '250002').replace(/\D/g, '').slice(0, 6);
+      const cleanCustPin = String(cust.pincode || '').replace(/\D/g, '').slice(0, 6);
+      if (cleanCustPin.length !== 6) {
+        return {
+          httpStatus: 400,
+          body: {
+            success: false,
+            configured: true,
+            message: 'A valid 6-digit customer delivery pincode is required to generate a Delhivery AWB.',
+          },
+        };
+      }
+
       const cleanCustPhone = String(cust.mobile || cust.phone || '').replace(/\D/g, '').slice(-10) || dCfg.pickupPhone;
       const shipmentPayload = {
         shipments: [
           {
             name: cust.name || 'Customer',
-            add: [cust.house, cust.street, cust.landmark].filter(Boolean).join(', ') || 'Delivery Address',
-            pin: cleanCustPin || '250002',
+            add: [cust.house, cust.address || cust.street, cust.landmark].filter(Boolean).join(', ') || 'Delivery Address',
+            pin: cleanCustPin,
             city: cust.city || 'Meerut',
             state: cust.state || 'Uttar Pradesh',
             country: cust.country || 'India',
             phone: cleanCustPhone,
-            order: String(order.id).replace('#', ''),
+            order: normOrderId,
             payment_mode: isCod ? 'COD' : 'Prepaid',
             return_pin: dCfg.pickupPincode,
-            return_city: cust.city && dCfg.pickupAddress.toLowerCase().includes(String(cust.city).toLowerCase()) ? cust.city : 'Meerut',
+            return_city:
+              cust.city && dCfg.pickupAddress.toLowerCase().includes(String(cust.city).toLowerCase())
+                ? cust.city
+                : 'Meerut',
             return_phone: dCfg.pickupPhone,
             return_add: dCfg.pickupAddress,
             return_state: 'Uttar Pradesh',
@@ -4094,9 +7357,8 @@ async function startServer() {
             total_amount: Number(order.total) || 0,
             seller_add: dCfg.pickupAddress,
             seller_name: dCfg.clientName || 'REDMODE',
-            seller_inv: `RM-INV-${String(order.id).replace(/[^A-Za-z0-9]/g, '')}`,
-            quantity: String((order.items || []).reduce((acc: number, it: any) => acc + (Number(it.quantity) || 1), 0)),
-            // Leave waybill empty unless pre-fetched directly from Delhivery bulk waybill API
+            seller_inv: `RM-INV-${normOrderId.replace(/[^A-Za-z0-9]/g, '')}`,
+            quantity: String((order.items || []).reduce((acc: number, it: any) => acc + (Number(it.quantity) || 1), 0) || 1),
             waybill: officialWaybill && order.awb_number ? String(order.awb_number) : '',
             shipment_width: String(order.final_package_width || 24),
             shipment_height: String(order.final_package_height || 4),
@@ -4130,16 +7392,61 @@ async function startServer() {
       const pkg = cmuData?.packages?.[0];
       const pkgFailed = pkg?.status && String(pkg.status).toLowerCase() === 'fail';
       if (cmuRes.ok && cmuData?.success !== false && pkg?.waybill && !pkgFailed) {
-        return res.json({
-          success: true,
-          configured: true,
-          environment: dCfg.environment,
-          waybill: pkg.waybill,
-          status: pkg.status || 'Manifested',
+        const realWaybill = String(pkg.waybill).trim();
+        const sortCode = pkg.sort_code ? String(pkg.sort_code).trim() : undefined;
+        const nowIso = new Date().toISOString();
+
+        delhiveryManifestedOrders.set(normOrderId, {
+          waybill: realWaybill,
           refnum: pkg.refnum,
+          sortCode,
+          environment: dCfg.environment,
           warehouseName: dCfg.warehouseName,
-          message: `Delhivery CMU Shipment manifested on ${dCfg.environment} with official Waybill #${pkg.waybill}`,
+          createdAt: nowIso,
         });
+
+        // Persist real AWB onto matching server order WITHOUT changing orderStatus to RTD
+        const latestOrders = readServerOrders();
+        if (Array.isArray(latestOrders) && latestOrders.length > 0) {
+          let modified = false;
+          const updatedList = latestOrders.map((o: any) => {
+            if (String(o?.id || '').trim().replace(/^#/, '') !== normOrderId) return o;
+            modified = true;
+            return {
+              ...o,
+              awb_number: realWaybill,
+              awbSource: 'delhivery_live',
+              delhiveryShipmentStatus: 'created',
+              delhiveryShipmentError: undefined,
+              delhiverySortCode: sortCode || o.delhiverySortCode,
+              delhiveryCreatedAt: nowIso,
+              delhiveryRefNum: pkg.refnum || o.delhiveryRefNum,
+              selected_courier_name: 'Delhivery Direct B2C',
+              label_url_or_data: `/api/shipping/label/${encodeURIComponent(realWaybill)}`,
+              updatedAt: nowIso,
+              syncVersion: Number(o.syncVersion || 0) + 1,
+            };
+          });
+          if (modified) {
+            writeServerOrders(updatedList);
+          }
+        }
+
+        return {
+          httpStatus: 200,
+          body: {
+            success: true,
+            configured: true,
+            alreadyExists: false,
+            environment: dCfg.environment,
+            waybill: realWaybill,
+            status: pkg.status || 'Manifested',
+            refnum: pkg.refnum,
+            sortCode,
+            warehouseName: dCfg.warehouseName,
+            message: `Delhivery CMU Shipment manifested on ${dCfg.environment} with official Waybill #${realWaybill}. Order remains Confirmed until shipping label is downloaded.`,
+          },
+        };
       }
 
       const errorReason =
@@ -4150,19 +7457,196 @@ async function startServer() {
         (cmuData?.package_count === 0 ? 'Warehouse/Pickup Location name may not match Delhivery One exactly.' : '') ||
         `Delhivery CMU API rejected shipment (HTTP ${cmuRes.status}).`;
 
-      return res.status(cmuRes.status >= 400 ? cmuRes.status : 400).json({
-        success: false,
-        configured: true,
-        environment: dCfg.environment,
-        delhiveryResponse: cmuData,
-        message: errorReason,
-      });
+      return {
+        httpStatus: cmuRes.status >= 400 ? cmuRes.status : 400,
+        body: {
+          success: false,
+          configured: true,
+          environment: dCfg.environment,
+          delhiveryResponse: cmuData,
+          message: errorReason,
+        },
+      };
     } catch (err: any) {
-      return res.status(500).json({
+      return {
+        httpStatus: 500,
+        body: {
+          success: false,
+          message: `Delhivery CMU shipment creation error: ${err.message}`,
+        },
+      };
+    } finally {
+      delhiveryInFlightOrderIds.delete(normOrderId);
+    }
+  }
+
+  // Official Delhivery B2C CMU Shipment Creation Endpoint (Never transitions order to RTD)
+  app.post('/api/delhivery/create-shipment', requireStaffOrAdmin, async (req: Request, res: Response) => {
+    const result = await createDelhiveryShipmentInternal(req.body || {});
+    return res.status(result.httpStatus).json(result.body);
+  });
+
+  // Official Delhivery Scannable Shipping Label Download Endpoint (Fetches Official Packing Slip PDF or renders ISO Code-128 Thermal Label)
+  app.post('/api/delhivery/download-label', requireStaffOrAdmin, async (req: Request, res: Response) => {
+    const {
+      order,
+      awb: rawAwb,
+      apiToken: bodyToken,
+      clientName: bodyClient,
+      warehouseName: bodyWarehouse,
+      pickupPincode: bodyPin,
+      pickupAddress: bodyAddress,
+      pickupPhone: bodyPhone,
+      environment: bodyEnv,
+      shippingMode: bodyMode,
+    } = req.body || {};
+
+    const awb = String(rawAwb || order?.awb_number || order?.shipmozo?.awb || '').trim();
+    if (!order || !order.id) {
+      return res.status(400).json({ success: false, message: 'Order details are required to download a shipping label.' });
+    }
+    if (!awb || isPlaceholderAwbValue(awb, order.awbSource)) {
+      return res.status(400).json({
         success: false,
-        message: `Delhivery CMU shipment creation error: ${err.message}`,
+        message: 'A real Delhivery AWB is required before downloading the shipping label. Generate the Delhivery AWB first.',
       });
     }
+
+    const rawStatus = String(order.orderStatus || '').toLowerCase();
+    const isConfirmedOrLater =
+      order.customerConfirmed === true ||
+      order.codVerificationStatus === 'CONFIRMED' ||
+      rawStatus === 'confirmed' ||
+      rawStatus === 'rtd' ||
+      rawStatus.includes('ready to ship') ||
+      rawStatus.includes('ready to dispatch') ||
+      rawStatus.includes('transit') ||
+      rawStatus.includes('shipped') ||
+      rawStatus.includes('deliver') ||
+      rawStatus === 'completed';
+
+    if (!isConfirmedOrLater || rawStatus.includes('cancel') || rawStatus.includes('expire')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Shipping labels can only be downloaded for Confirmed (or dispatched) orders.',
+      });
+    }
+
+    const dCfg = getEffectiveDelhiveryConfig({
+      apiToken: bodyToken,
+      clientName: bodyClient,
+      warehouseName: bodyWarehouse,
+      pickupPincode: bodyPin,
+      pickupAddress: bodyAddress,
+      pickupPhone: bodyPhone,
+      environment: bodyEnv,
+    });
+
+    const safeFileAwb = awb.replace(/[^A-Za-z0-9_-]/g, '');
+    let officialSortCode: string | undefined = order.delhiverySortCode || undefined;
+    let officialBarcodeImage: string | undefined;
+
+    // 1. Try Official Delhivery Packing Slip API (returns official PDF link or official barcode + sort code)
+    if (dCfg.apiToken) {
+      try {
+        const slipRes = await fetch(
+          `${dCfg.baseUrl}/api/p/packing_slip?wbns=${encodeURIComponent(awb)}&pdf=true&pdf_size=4R`,
+          {
+            headers: {
+              Authorization: `Token ${dCfg.apiToken}`,
+              Accept: 'application/json',
+            },
+          }
+        );
+
+        if (slipRes.ok) {
+          const contentType = String(slipRes.headers.get('content-type') || '').toLowerCase();
+          if (contentType.includes('application/pdf')) {
+            const pdfBuf = Buffer.from(await slipRes.arrayBuffer());
+            if (pdfBuf.length > 200) {
+              res.setHeader('Content-Type', 'application/pdf');
+              res.setHeader('Content-Disposition', `attachment; filename="Delhivery-Label-${safeFileAwb}.pdf"`);
+              res.setHeader('X-Label-Format', 'delhivery_official_pdf');
+              res.setHeader('X-Label-Awb', safeFileAwb);
+              return res.send(pdfBuf);
+            }
+          }
+
+          const slipJson: any = await slipRes.json().catch(() => null);
+          const slipPkg = Array.isArray(slipJson?.packages) ? slipJson.packages[0] : null;
+          if (slipPkg) {
+            if (slipPkg.sort_code) officialSortCode = String(slipPkg.sort_code).trim();
+            if (typeof slipPkg.barcode === 'string' && slipPkg.barcode.startsWith('data:image/')) {
+              officialBarcodeImage = slipPkg.barcode;
+            }
+            const pdfLink = typeof slipPkg.pdf_download_link === 'string' ? slipPkg.pdf_download_link.trim() : '';
+            if (pdfLink && isSafeDelhiveryLabelUrl(pdfLink)) {
+              const pdfRes = await fetch(pdfLink);
+              if (pdfRes.ok) {
+                const pdfBuf = Buffer.from(await pdfRes.arrayBuffer());
+                if (pdfBuf.length > 200) {
+                  res.setHeader('Content-Type', 'application/pdf');
+                  res.setHeader('Content-Disposition', `attachment; filename="Delhivery-Label-${safeFileAwb}.pdf"`);
+                  res.setHeader('X-Label-Format', 'delhivery_official_pdf');
+                  res.setHeader('X-Label-Awb', safeFileAwb);
+                  return res.send(pdfBuf);
+                }
+              }
+            }
+          }
+        }
+      } catch (err: any) {
+        console.warn('Delhivery packing_slip PDF fetch fell back to scannable Code-128 thermal label:', err?.message);
+      }
+    }
+
+    // 2. Fallback: Genuine ISO/IEC 15417 Code-128 Scannable 4x6 Thermal Label HTML (with official Delhivery barcode/sort code if returned)
+    const cust = order.customer || {};
+    const address = [cust.house, cust.address || cust.street, cust.landmark].filter(Boolean).join(', ') || 'Delivery Address';
+    const items = Array.isArray(order.items) ? order.items : [];
+    const itemsSummary =
+      items.length > 0
+        ? items.map((it: any) => `${it.name || 'Apparel'} (Size: ${it.size || 'Free'}) x${it.quantity || 1}`).join(', ')
+        : 'RedMode Apparel';
+    const totalQty = items.reduce((acc: number, it: any) => acc + (Number(it.quantity) || 1), 0) || 1;
+    const totalAmount = Number(order.total || 0);
+    const paymentMode = String(order.paymentMode || 'COD').toUpperCase() === 'PREPAID' ? 'Prepaid' : 'COD';
+    const weightKg = Number(order.final_package_weight || order.final_package_weight_kg || 0.45);
+    const dims = `${Number(order.final_package_length || 25)} x ${Number(order.final_package_width || 20)} x ${Number(order.final_package_height || 4)} cm`;
+
+    const html = buildDelhiveryThermalLabelHtml({
+      awb,
+      orderId: String(order.id),
+      customerName: String(cust.name || 'Customer'),
+      address,
+      city: String(cust.city || ''),
+      state: String(cust.state || ''),
+      pincode: String(cust.pincode || ''),
+      phone: String(cust.phone || cust.mobile || ''),
+      shippingMode: String(bodyMode || 'Delhivery Surface'),
+      paymentMode,
+      codAmount: paymentMode === 'COD' ? totalAmount : 0,
+      totalAmount,
+      itemsSummary,
+      totalQty,
+      weightKg,
+      dimensionsText: dims,
+      sortCode: officialSortCode,
+      officialBarcodeImage,
+      warehouseName: dCfg.warehouseName || 'REDMODE B2C',
+      pickupAddress: dCfg.pickupAddress || '1807, Zakir Hussain Colony, Near Madina Masjid, Meerut, Uttar Pradesh, India',
+      pickupPincode: dCfg.pickupPincode || '250002',
+      pickupPhone: dCfg.pickupPhone || '+91 73027 97464',
+      clientName: dCfg.clientName || 'Redmode',
+      orderDateText: new Date(order.createdAt || Date.now()).toLocaleDateString('en-IN'),
+      autoPrint: false,
+    });
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="Delhivery-Label-${safeFileAwb}.html"`);
+    res.setHeader('X-Label-Format', 'delhivery_thermal_code128');
+    res.setHeader('X-Label-Awb', safeFileAwb);
+    return res.send(html);
   });
 
   // Delhivery Pickup Request Scheduling (/fm/request/new/)

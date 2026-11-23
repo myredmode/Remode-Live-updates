@@ -310,22 +310,75 @@ export interface Order {
   selected_courier_name?: string;
   shipmozo_order_id?: string;
   awb_number?: string;
+  awbSource?: 'delhivery_live' | 'manual' | 'other_carrier';
+  delhiveryShipmentStatus?: 'idle' | 'creating' | 'created' | 'failed';
+  delhiveryShipmentError?: string;
+  delhiverySortCode?: string;
+  delhiveryCreatedAt?: string;
+  delhiveryRefNum?: string;
   shipment_status?: string;
   label_url_or_data?: string;
 
-  // Order Confirmation & 10 AM - 9 PM Dispatch Batch Tracking
+  // Order Confirmation & 10 AM - 9 PM Dispatch Batch Tracking (Hybrid Automation + Manual Fallback)
   customerConfirmed?: boolean;
   customerConfirmedAt?: string;
+  confirmationMethod?: 'WhatsApp' | 'Manual';
+  confirmedByAdminId?: string;
+  confirmedByAdminName?: string;
   confirmationSentAt?: string;
-  whatsappStatus?: 'Sending' | 'Sent' | 'Awaiting Reply' | 'Confirmed' | 'No Reply' | 'Expired';
+  whatsappStatus?:
+    | 'Pending'
+    | 'Scheduled'
+    | 'Sending'
+    | 'Sent'
+    | 'Awaiting Reply'
+    | 'Confirmed'
+    | 'Cancelled'
+    | 'Failed'
+    | 'No Reply'
+    | 'Expired';
   whatsappSentAt?: string;
   whatsappReply?: string;
   whatsappReplyAt?: string;
+  whatsappMessageId?: string;
+  whatsappReminderMessageId?: string;
+  whatsappDeliveryStatus?: 'queued' | 'scheduled' | 'sent' | 'delivered' | 'read' | 'failed';
+  whatsappError?: string;
+  whatsappProcessedMessageIds?: string[];
+  confirmationTask?: {
+    status:
+      | 'pending'
+      | 'scheduled'
+      | 'sent'
+      | 'failed'
+      | 'manual_followup'
+      | 'confirmed'
+      | 'cancelled'
+      | 'automation_off';
+    createdAt: string;
+    updatedAt: string;
+    lastAttemptAt?: string;
+    failureReason?: string;
+    method?: 'WhatsApp' | 'Manual';
+  };
   acceptedAt?: string;
   rtdAt?: string;
+  pickedUpAt?: string;
+  deliveredAt?: string;
   scheduledConfirmationTime?: string; // For orders placed after 9 PM, scheduled for 10 AM next morning
   reminder23hSent?: boolean;
   reminder23hSentAt?: string;
+  needsManualFollowUp?: boolean;
+  manualFollowUpFlaggedAt?: string;
+  manualFollowUpReason?: string;
+  cancellationSource?: 'whatsapp_customer' | 'admin' | 'system';
+  cancelledByAdminId?: string;
+  cancelledByAdminName?: string;
+  cancellationReason?: string;
+  cancelledAt?: string;
+  inventoryRestored?: boolean;
+  inventoryRestoredAt?: string;
+  firestoreInventoryRestored?: boolean;
   labelDownloaded?: boolean;
   labelDownloadedAt?: string;
   trackingSentToCustomer?: boolean;
@@ -337,6 +390,8 @@ export interface Order {
   reactivatedAt?: string;
   confirmationAckSent?: boolean;
   confirmationAckSentAt?: string;
+  updatedAt?: string;
+  syncVersion?: number;
 
   // Genuine RTO & NDR (Delhivery Courier Information)
   rtoInfo?: {
@@ -456,6 +511,83 @@ export interface WhatsAppSettings {
   codVerificationOtpEnabled: boolean;
   deliveredReviewEnabled: boolean;
   apiEndpoint?: string;
+  confirmCodOrders?: boolean;
+  confirmPrepaidOrders?: boolean;
+  respectSendingWindow?: boolean;
+  sendingWindowStartHour?: number;
+  sendingWindowEndHour?: number;
+  reminderDelayHours?: number;
+  manualFollowUpHours?: number;
+  confirmationTemplateName?: string;
+  reminderTemplateName?: string;
+  templateLanguageCode?: string;
+  renderWebhookUrl?: string;
+  automationEnabledAt?: string;
+}
+
+export type WhatsAppConnectionHealthStatus =
+  | 'Connected'
+  | 'Disconnected'
+  | 'Authentication Error'
+  | 'Temporarily Unavailable';
+
+export interface WhatsAppHealthState {
+  status: WhatsAppConnectionHealthStatus;
+  automationEnabled: boolean;
+  checkedAt: string;
+  reason?: string;
+  verifiedName?: string;
+  displayPhoneNumber?: string;
+  httpStatus?: number;
+}
+
+export interface ConfirmationAuditLogEntry {
+  id: string;
+  orderId: string;
+  eventType: string;
+  previousStatus: string;
+  newStatus: string;
+  confirmationMethod?: 'WhatsApp' | 'Manual' | 'System';
+  adminId?: string;
+  adminName?: string;
+  whatsappMessageId?: string;
+  timestamp: string;
+  errorDetails?: string;
+  notes?: string;
+}
+
+export interface WhatsAppMessageLog {
+  id: string;
+  wamid?: string;
+  orderId: string;
+  customerName?: string;
+  customerPhone: string;
+  messageType:
+    | 'order_confirmation'
+    | 'reminder_23h'
+    | 'confirm_ack'
+    | 'cancel_ack'
+    | 'dispatch_tracking'
+    | 'test'
+    | 'inbound_reply';
+  direction: 'outbound' | 'inbound';
+  templateName?: string;
+  status: 'scheduled' | 'sent' | 'delivered' | 'read' | 'failed' | 'received';
+  sentAt: string;
+  deliveredAt?: string;
+  readAt?: string;
+  failedAt?: string;
+  scheduledFor?: string;
+  customerReply?: string;
+  replyAction?: 'YES' | 'CANCEL' | 'OTHER';
+  errorCode?: string;
+  errorMessage?: string;
+  retryCount: number;
+  maxRetries: number;
+  retryStatus: 'none' | 'scheduled' | 'retrying' | 'exhausted' | 'succeeded';
+  nextRetryAt?: string;
+  payloadSummary?: string;
+  updatedAt: string;
 }
 
 export type SmsProviderType = 'meta_whatsapp' | 'twofactor' | 'fast2sms' | 'msg91' | 'custom_http';

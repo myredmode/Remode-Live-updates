@@ -29,12 +29,50 @@
       },
       "required": ["id", "name", "price"]
     },
+    "Order": {
+      "title": "Order",
+      "description": "Customer e-commerce orders with hybrid WhatsApp automation and manual confirmation fallback state",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 4, "maxLength": 64 },
+        "total": { "type": "number" },
+        "paymentMode": { "type": "string", "enum": ["COD", "Prepaid"] },
+        "orderStatus": { "type": "string" },
+        "customerConfirmed": { "type": "boolean" },
+        "customerConfirmedAt": { "type": "string" },
+        "confirmationMethod": { "type": "string", "enum": ["WhatsApp", "Manual"] },
+        "confirmedByAdminId": { "type": "string" },
+        "confirmedByAdminName": { "type": "string" },
+        "whatsappStatus": { "type": "string" },
+        "whatsappDeliveryStatus": { "type": "string" },
+        "whatsappMessageId": { "type": "string" },
+        "whatsappError": { "type": "string" },
+        "needsManualFollowUp": { "type": "boolean" },
+        "manualFollowUpFlaggedAt": { "type": "string" },
+        "manualFollowUpReason": { "type": "string" },
+        "awb_number": { "type": "string" },
+        "labelDownloaded": { "type": "boolean" },
+        "labelDownloadedAt": { "type": "string" },
+        "rtdAt": { "type": "string" },
+        "pickedUpAt": { "type": "string" },
+        "deliveredAt": { "type": "string" },
+        "cancellationSource": { "type": "string", "enum": ["whatsapp_customer", "admin", "system"] },
+        "cancelledByAdminId": { "type": "string" },
+        "cancelledAt": { "type": "string" },
+        "inventoryRestored": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "syncVersion": { "type": "number" }
+      },
+      "required": ["id", "total", "orderStatus", "createdAt"]
+    },
     "AuditLog": {
       "title": "AuditLog",
-      "description": "Security audit trail for critical admin actions like product updates, user status changes, and settings modifications",
+      "description": "Security and order confirmation audit trail for critical admin and automated actions",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
+        "who": { "type": "string" },
         "adminId": { "type": "string" },
         "adminName": { "type": "string" },
         "role": { "type": "string" },
@@ -43,10 +81,13 @@
         "entityId": { "type": "string" },
         "oldValue": { "type": "string" },
         "newValue": { "type": "string" },
+        "confirmationMethod": { "type": "string" },
+        "whatsappMessageId": { "type": "string" },
+        "errorDetails": { "type": "string" },
         "timestamp": { "type": "string" },
         "createdAt": { "type": "string" }
       },
-      "required": ["id", "action", "entity", "entityId", "timestamp"]
+      "required": ["id", "action", "who", "timestamp"]
     }
   },
   "firestore": {
@@ -57,6 +98,10 @@
     "/products/{productId}": {
       "schema": "Product",
       "description": "Catalog products and updated listings"
+    },
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Customer orders with hybrid WhatsApp and manual confirmation state"
     },
     "/categories/{categoryId}": {
       "schema": "Category",
@@ -70,9 +115,9 @@
       "schema": "StoreSettings",
       "description": "Global store settings and payment configurations"
     },
-    "/AuditLog/{logId}": {
+    "/audit_logs/{logId}": {
       "schema": "AuditLog",
-      "description": "Critical administrative security audit logs"
+      "description": "Append-only administrative and order confirmation audit logs"
     }
   }
 }

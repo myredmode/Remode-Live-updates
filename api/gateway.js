@@ -1732,13 +1732,38 @@ export default async function handler(req, res) {
     if (!order || !order.id) {
       return res.status(400).json({ success: false, message: 'Order payload is required.' });
     }
-    const token = (bodyToken || process.env.DELHIVERY_API_TOKEN || '').trim();
-    if (!token) {
+    const rawStatus = String(order.orderStatus || '').toLowerCase();
+    const isOrderConfirmed =
+      order.customerConfirmed === true ||
+      order.codVerificationStatus === 'CONFIRMED' ||
+      rawStatus === 'confirmed' ||
+      rawStatus === 'rtd' ||
+      rawStatus.includes('ready to ship') ||
+      rawStatus.includes('ready to dispatch');
+    if (!isOrderConfirmed || rawStatus.includes('cancel') || rawStatus.includes('expire')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Order must be confirmed by the customer before creating a Delhivery shipment.',
+      });
+    }
+    if (order.awbSource === 'delhivery_live' && order.awb_number) {
       return res.status(200).json({
         success: true,
+        configured: true,
+        alreadyExists: true,
+        waybill: String(order.awb_number).trim(),
+        status: 'Manifested',
+        sortCode: order.delhiverySortCode,
+        message: `Existing Delhivery Waybill #${order.awb_number} preserved (duplicate shipment prevented).`,
+      });
+    }
+    const token = (bodyToken || process.env.DELHIVERY_API_TOKEN || '').trim();
+    if (!token) {
+      return res.status(400).json({
+        success: false,
         configured: false,
-        waybill: order.awb_number || null,
-        message: 'Delhivery API Token not set on server; local AWB manifest retained.',
+        waybill: null,
+        message: 'Delhivery API Token is not configured on the server.',
       });
     }
     const isStaging = String(environment).toLowerCase() === 'staging';
@@ -1748,12 +1773,20 @@ export default async function handler(req, res) {
     try {
       const cust = order.customer || {};
       const isCod = (order.paymentMode || '').toUpperCase() === 'COD';
+      const cleanCustPin = String(cust.pincode || '').replace(/\D/g, '').slice(0, 6);
+      if (cleanCustPin.length !== 6) {
+        return res.status(400).json({
+          success: false,
+          configured: true,
+          message: 'A valid 6-digit customer delivery pincode is required to generate a Delhivery AWB.',
+        });
+      }
       const shipmentPayload = {
         shipments: [
           {
             name: cust.name || 'Customer',
-            add: [cust.house, cust.street, cust.landmark].filter(Boolean).join(', ') || 'Delivery Address',
-            pin: String(cust.pincode || '250002').replace(/\D/g, '').slice(0, 6),
+            add: [cust.house, cust.address || cust.street, cust.landmark].filter(Boolean).join(', ') || 'Delivery Address',
+            pin: cleanCustPin,
             city: cust.city || 'Meerut',
             state: cust.state || 'Uttar Pradesh',
             country: cust.country || 'India',
@@ -1774,7 +1807,7 @@ export default async function handler(req, res) {
             seller_add: pickupAddress,
             seller_name: clientName || 'REDMODE',
             seller_inv: `RM-INV-${String(order.id).replace(/[^A-Za-z0-9]/g, '')}`,
-            quantity: String((order.items || []).reduce((acc, it) => acc + (Number(it.quantity) || 1), 0)),
+            quantity: String((order.items || []).reduce((acc, it) => acc + (Number(it.quantity) || 1), 0) || 1),
             waybill: officialWaybill && order.awb_number ? String(order.awb_number) : '',
             shipment_width: String(order.final_package_width || 24),
             shipment_height: String(order.final_package_height || 4),
@@ -1809,10 +1842,13 @@ export default async function handler(req, res) {
         return res.status(200).json({
           success: true,
           configured: true,
+          alreadyExists: false,
           environment: isStaging ? 'staging' : 'production',
           waybill: pkg.waybill,
           status: pkg.status || 'Manifested',
           refnum: pkg.refnum,
+          sortCode: pkg.sort_code || undefined,
+          warehouseName,
         });
       }
       const errorReason =
@@ -1832,6 +1868,72 @@ export default async function handler(req, res) {
     } catch (err) {
       return res.status(500).json({ success: false, message: err.message });
     }
+  }
+
+  if (pathStr === 'delhivery/download-label' && req.method === 'POST') {
+    if (!requireAdminRole(['Super Admin', 'Listing + Label Admin', 'Label Admin'])) return;
+    const {
+      order,
+      awb: rawAwb,
+      apiToken: bodyToken,
+      environment = 'production',
+    } = body;
+    const awb = String(rawAwb || order?.awb_number || order?.shipmozo?.awb || '').trim();
+    if (!order || !order.id || !awb || awb.length < 8) {
+      return res.status(400).json({ success: false, message: 'A real Delhivery AWB and order payload are required.' });
+    }
+    const token = (bodyToken || process.env.DELHIVERY_API_TOKEN || '').trim();
+    const isStaging = String(environment).toLowerCase() === 'staging';
+    const baseHost = isStaging ? 'https://staging-express.delhivery.com' : 'https://track.delhivery.com';
+    const safeFileAwb = awb.replace(/[^A-Za-z0-9_-]/g, '');
+
+    if (token) {
+      try {
+        const slipRes = await fetch(
+          `${baseHost}/api/p/packing_slip?wbns=${encodeURIComponent(awb)}&pdf=true&pdf_size=4R`,
+          { headers: { Authorization: `Token ${token}`, Accept: 'application/json' } }
+        );
+        if (slipRes.ok) {
+          const contentType = String(slipRes.headers.get('content-type') || '').toLowerCase();
+          if (contentType.includes('application/pdf')) {
+            const pdfBuf = Buffer.from(await slipRes.arrayBuffer());
+            if (pdfBuf.length > 200) {
+              res.setHeader('Content-Type', 'application/pdf');
+              res.setHeader('Content-Disposition', `attachment; filename="Delhivery-Label-${safeFileAwb}.pdf"`);
+              res.setHeader('X-Label-Format', 'delhivery_official_pdf');
+              return res.status(200).send(pdfBuf);
+            }
+          }
+          const slipJson = await slipRes.json().catch(() => null);
+          const slipPkg = Array.isArray(slipJson?.packages) ? slipJson.packages[0] : null;
+          const pdfLink = typeof slipPkg?.pdf_download_link === 'string' ? slipPkg.pdf_download_link.trim() : '';
+          if (pdfLink) {
+            const parsed = new URL(pdfLink);
+            const h = parsed.hostname.toLowerCase();
+            if (
+              parsed.protocol === 'https:' &&
+              (h.endsWith('.delhivery.com') || h.endsWith('.amazonaws.com') || h.endsWith('.cloudfront.net'))
+            ) {
+              const pdfRes = await fetch(pdfLink);
+              if (pdfRes.ok) {
+                const pdfBuf = Buffer.from(await pdfRes.arrayBuffer());
+                if (pdfBuf.length > 200) {
+                  res.setHeader('Content-Type', 'application/pdf');
+                  res.setHeader('Content-Disposition', `attachment; filename="Delhivery-Label-${safeFileAwb}.pdf"`);
+                  res.setHeader('X-Label-Format', 'delhivery_official_pdf');
+                  return res.status(200).send(pdfBuf);
+                }
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+
+    return res.status(502).json({
+      success: false,
+      message: 'Official Delhivery packing slip PDF could not be fetched from serverless gateway; please retry or use local thermal label.',
+    });
   }
 
   if (pathStr === 'delhivery/schedule-pickup' && req.method === 'POST') {
