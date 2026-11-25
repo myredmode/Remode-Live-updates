@@ -4,6 +4,21 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import {
+  isServerFirestoreEnabled,
+  hydrateAllFromFirestore,
+  fetchOrderFromFirestore,
+  fetchAllOrdersFromFirestore,
+  persistOrderToFirestore,
+  persistProductToFirestore,
+  deleteProductFromFirestore,
+  persistIntegrationsToFirestore,
+  persistWhatsAppLogsToFirestore,
+  persistWhatsAppProcessedToFirestore,
+  persistConfirmationAuditLogsToFirestore,
+  persistWebhookLogsToFirestore,
+  getFirestoreStoreStatus,
+} from './server/firestoreStore.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -506,12 +521,15 @@ function buildDelhiveryThermalLabelHtml(params: {
 async function startServer() {
   const app = express();
   
-  // In AI Studio / Cloud Run container environment:
-  // Nginx listens externally on port 8080 and reverse-proxies to http://localhost:3000.
-  // When Cloud Run sets PORT=8080, binding to 8080 triggers EADDRINUSE and crashes the deployment.
-  // Thus, the Node application MUST always bind to port 3000 unless a non-8080 PORT or CLI --port is passed.
-  let PORT = 3000;
-  if (process.env.PORT && process.env.PORT !== '8080') {
+  // Port binding:
+  // - Standalone Production Google Cloud Run (Docker sets REDMODE_STANDALONE_CLOUD_RUN=true): honor Cloud Run's PORT (8080).
+  // - AI Studio Preview container: Nginx listens on 8080 and proxies to localhost:3000, so bind 3000 when PORT=8080.
+  let PORT = process.env.REDMODE_STANDALONE_CLOUD_RUN === 'true' ? Number(process.env.PORT) || 8080 : 3000;
+  if (
+    process.env.REDMODE_STANDALONE_CLOUD_RUN !== 'true' &&
+    process.env.PORT &&
+    process.env.PORT !== '8080'
+  ) {
     const parsed = Number(process.env.PORT);
     if (!isNaN(parsed) && parsed > 0) PORT = parsed;
   }
@@ -575,7 +593,13 @@ async function startServer() {
 
   // Health check endpoints for Cloud Run & load balancer probes
   app.get('/api/health', (req: Request, res: Response) => {
-    res.json({ status: 'ok', time: new Date().toISOString() });
+    const fsStatus = getFirestoreStoreStatus();
+    res.json({
+      status: 'ok',
+      time: new Date().toISOString(),
+      firestoreConnected: fsStatus.connected,
+      standaloneCloudRun: process.env.REDMODE_STANDALONE_CLOUD_RUN === 'true',
+    });
   });
   app.get('/_healthz', (req: Request, res: Response) => {
     res.status(200).send('OK');
@@ -957,9 +981,12 @@ async function startServer() {
     } catch (e) {
       console.error('Failed writing integrations-config.json:', e);
     }
+    if (isServerFirestoreEnabled()) {
+      void persistIntegrationsToFirestore(cfg);
+    }
   };
 
-  // Persistent Admin Webhook Debug Logs (/data/webhook-logs.json, capped at 150 events)
+  // Persistent Admin Webhook Debug Logs (/data/webhook-logs.json + Firestore settings_private/webhook_logs)
   const webhookLogsDbPath = path.join(dataDir, 'webhook-logs.json');
 
   interface WebhookLogEntry {
@@ -988,10 +1015,14 @@ async function startServer() {
   };
 
   const writeWebhookLogs = (logs: WebhookLogEntry[]) => {
+    const capped = logs.slice(0, 150);
     try {
-      writeJsonAtomic(webhookLogsDbPath, logs.slice(0, 150));
+      writeJsonAtomic(webhookLogsDbPath, capped);
     } catch (e) {
       console.error('Failed writing webhook-logs.json:', e);
+    }
+    if (isServerFirestoreEnabled()) {
+      void persistWebhookLogsToFirestore(capped);
     }
   };
 
@@ -1508,6 +1539,9 @@ async function startServer() {
         existing.unshift(normalized);
       }
       writeServerProducts(existing);
+      if (isServerFirestoreEnabled()) {
+        void persistProductToFirestore(normalized);
+      }
       return res.json({ success: true, product: normalized });
     } catch (err: any) {
       return res.status(500).json({ success: false, message: err.message || 'Failed to save product on server.' });
@@ -1560,7 +1594,11 @@ async function startServer() {
         existing.unshift(normalized);
       }
       writeServerProducts(existing);
-      return res.json({ success: true, product: existing[idx >= 0 ? idx : 0] });
+      const savedProd = existing[idx >= 0 ? idx : 0];
+      if (isServerFirestoreEnabled() && savedProd) {
+        void persistProductToFirestore(savedProd);
+      }
+      return res.json({ success: true, product: savedProd });
     } catch (err: any) {
       return res.status(500).json({ success: false, message: err.message || 'Failed to update product on server.' });
     }
@@ -1581,15 +1619,26 @@ async function startServer() {
       }
       const existing = all.filter((p) => p.id !== id);
       writeServerProducts(existing);
+      if (isServerFirestoreEnabled()) {
+        void deleteProductFromFirestore(id);
+      }
       return res.json({ success: true, deletedId: id });
     } catch (err: any) {
       return res.status(500).json({ success: false, message: err.message || 'Failed to delete product on server.' });
     }
   });
 
-  // Permanent Orders CRUD API Endpoints (with Phase 2 Automatic WhatsApp Order Confirmation Trigger)
-  app.get('/api/orders', (_req: Request, res: Response) => {
-    return res.json({ success: true, orders: readServerOrders() });
+  // Permanent Orders CRUD API Endpoints (Firestore + Local Cache + Phase 2 Automatic WhatsApp Order Confirmation Trigger)
+  app.get('/api/orders', async (_req: Request, res: Response) => {
+    const localOrders = readServerOrders();
+    if (isServerFirestoreEnabled() && localOrders.length === 0) {
+      const remoteOrders = await fetchAllOrdersFromFirestore();
+      if (Array.isArray(remoteOrders) && remoteOrders.length > 0) {
+        writeServerOrders(remoteOrders);
+        return res.json({ success: true, orders: remoteOrders });
+      }
+    }
+    return res.json({ success: true, orders: localOrders });
   });
 
   app.post('/api/orders', async (req: Request, res: Response) => {
@@ -1662,8 +1711,11 @@ async function startServer() {
         existing.unshift(savedOrder);
       }
 
-      // DATABASE-FIRST: Persist order to authoritative store BEFORE any external WhatsApp API call
+      // DATABASE-FIRST: Persist order to authoritative store (local cache + Firebase Firestore) BEFORE any external WhatsApp API call
       writeServerOrders(existing);
+      if (isServerFirestoreEnabled()) {
+        await persistOrderToFirestore(savedOrder);
+      }
 
       if (isNewOrder) {
         recordConfirmationAuditLog({
@@ -1684,8 +1736,11 @@ async function startServer() {
           error: err?.message || 'WhatsApp trigger failed',
         }));
 
-        // Reload latest persisted version after WhatsApp metadata update
+        // Reload latest persisted version after WhatsApp metadata update and persist to Firestore
         const refreshed = readServerOrders().find((o) => o.id === savedOrder.id) || savedOrder;
+        if (isServerFirestoreEnabled()) {
+          await persistOrderToFirestore(refreshed);
+        }
         return res.json({ success: true, order: refreshed, whatsappAutomation: waResult });
       }
 
@@ -3225,7 +3280,11 @@ async function startServer() {
 
     try {
       const existing = readConfirmationAuditLogs();
-      writeJsonAtomic(confirmationAuditLogsDbPath, [record, ...existing].slice(0, 1000));
+      const updatedLogs = [record, ...existing].slice(0, 1000);
+      writeJsonAtomic(confirmationAuditLogsDbPath, updatedLogs);
+      if (isServerFirestoreEnabled()) {
+        void persistConfirmationAuditLogsToFirestore(updatedLogs);
+      }
     } catch (e) {
       console.error('Failed writing confirmation-audit-logs.json:', e);
     }
@@ -3253,10 +3312,14 @@ async function startServer() {
   }
 
   function writeWhatsAppLogs(logs: WhatsAppMessageLogRecord[]) {
+    const capped = logs.slice(0, 1000);
     try {
-      writeJsonAtomic(whatsappLogsDbPath, logs.slice(0, 1000));
+      writeJsonAtomic(whatsappLogsDbPath, capped);
     } catch (e) {
       console.error('Failed writing whatsapp-logs.json:', e);
+    }
+    if (isServerFirestoreEnabled()) {
+      void persistWhatsAppLogsToFirestore(capped);
     }
   }
 
@@ -3300,12 +3363,16 @@ async function startServer() {
         if (entries.length <= maxEntries) return obj;
         return Object.fromEntries(entries.slice(-maxEntries));
       };
-      writeJsonAtomic(whatsappProcessedDbPath, {
+      const trimmed = {
         messages: trimMap(state.messages),
         statuses: trimMap(state.statuses),
         remindersSent: trimMap(state.remindersSent),
         confirmationsSent: trimMap(state.confirmationsSent),
-      });
+      };
+      writeJsonAtomic(whatsappProcessedDbPath, trimmed);
+      if (isServerFirestoreEnabled()) {
+        void persistWhatsAppProcessedToFirestore(trimmed);
+      }
     } catch (e) {
       console.error('Failed writing whatsapp-processed-events.json:', e);
     }
@@ -3850,6 +3917,9 @@ async function startServer() {
       syncVersion: Number(prev.syncVersion || 0) + 1,
     };
     writeServerOrders(list);
+    if (isServerFirestoreEnabled()) {
+      void persistOrderToFirestore(list[idx]);
+    }
     return list[idx];
   }
 
@@ -4119,7 +4189,15 @@ async function startServer() {
     waConfirmAtomicLock.add(normId);
     try {
       const latestOrders = readServerOrders();
-      const targetOrder = latestOrders.find((o) => normalizeWaOrderId(o?.id) === normId);
+      let targetOrder = latestOrders.find((o) => normalizeWaOrderId(o?.id) === normId);
+      if (!targetOrder && isServerFirestoreEnabled()) {
+        const remote = await fetchOrderFromFirestore(params.orderId);
+        if (remote?.id) {
+          latestOrders.unshift(remote);
+          writeServerOrders(latestOrders);
+          targetOrder = remote;
+        }
+      }
       if (!targetOrder) {
         return { success: false, confirmed: false, blockedReason: `Order ${params.orderId} not found.` };
       }
@@ -4302,6 +4380,9 @@ async function startServer() {
       }
 
       const finalOrder = readServerOrders().find((o) => normalizeWaOrderId(o?.id) === normId) || confirmedOrder;
+      if (isServerFirestoreEnabled() && finalOrder) {
+        await persistOrderToFirestore(finalOrder);
+      }
       return {
         success: true,
         confirmed: true,
@@ -4354,7 +4435,16 @@ async function startServer() {
 
     waCancelAtomicLock.add(normId);
     try {
-      const targetOrder = readServerOrders().find((o) => normalizeWaOrderId(o?.id) === normId);
+      const currentOrders = readServerOrders();
+      let targetOrder = currentOrders.find((o) => normalizeWaOrderId(o?.id) === normId);
+      if (!targetOrder && isServerFirestoreEnabled()) {
+        const remote = await fetchOrderFromFirestore(params.orderId);
+        if (remote?.id) {
+          currentOrders.unshift(remote);
+          writeServerOrders(currentOrders);
+          targetOrder = remote;
+        }
+      }
       if (!targetOrder) {
         return { success: false, cancelled: false, blockedReason: `Order ${params.orderId} not found.`, stockRestored: false, restoredUnits: 0 };
       }
@@ -4463,6 +4553,9 @@ async function startServer() {
       }
 
       const finalOrder = readServerOrders().find((o) => normalizeWaOrderId(o?.id) === normId) || cancelledOrder;
+      if (isServerFirestoreEnabled() && finalOrder) {
+        await persistOrderToFirestore(finalOrder);
+      }
       return {
         success: true,
         cancelled: true,
@@ -4541,6 +4634,12 @@ async function startServer() {
 
       if (productsChanged) {
         writeServerProducts(updatedProducts);
+        if (isServerFirestoreEnabled()) {
+          const affectedIds = new Set(order.items.map((it: any) => String(it?.productId)));
+          updatedProducts
+            .filter((p: any) => affectedIds.has(String(p?.id)))
+            .forEach((p: any) => void persistProductToFirestore(p));
+        }
       }
 
       const nowIso = new Date().toISOString();
@@ -4553,6 +4652,9 @@ async function startServer() {
           syncVersion: Number(latestOrders[orderIdx].syncVersion || 0) + 1,
         };
         writeServerOrders(latestOrders);
+        if (isServerFirestoreEnabled()) {
+          void persistOrderToFirestore(latestOrders[orderIdx]);
+        }
       }
 
       return { restored: true, restoredUnits };
@@ -4860,13 +4962,28 @@ async function startServer() {
             const parsedReply = parseWhatsAppOrderReply(msg);
 
             // Identify exact order: priority 1 = exact Order ID from button payload; priority 2 = latest Upcoming order for sender phone
-            const allOrders = readServerOrders();
+            let allOrders = readServerOrders();
             let targetOrder: any = null;
             if (parsedReply.orderId) {
               const targetNorm = normalizeWaOrderId(parsedReply.orderId);
               targetOrder = allOrders.find((o) => normalizeWaOrderId(o?.id) === targetNorm) || null;
+              if (!targetOrder && isServerFirestoreEnabled()) {
+                const remoteOrder = await fetchOrderFromFirestore(parsedReply.orderId);
+                if (remoteOrder?.id) {
+                  allOrders = [remoteOrder, ...allOrders];
+                  writeServerOrders(allOrders);
+                  targetOrder = remoteOrder;
+                }
+              }
             }
             if (!targetOrder && cleanSender10.length === 10) {
+              if (allOrders.length === 0 && isServerFirestoreEnabled()) {
+                const remoteAll = await fetchAllOrdersFromFirestore();
+                if (Array.isArray(remoteAll) && remoteAll.length > 0) {
+                  allOrders = remoteAll;
+                  writeServerOrders(allOrders);
+                }
+              }
               targetOrder =
                 allOrders.find((o) => {
                   const phone10 = String(o?.customer?.mobile || o?.customer?.phone || '')
@@ -7918,6 +8035,53 @@ async function startServer() {
           res.status(200).send('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>REDMODE</title></head><body><div id="root"></div></body></html>');
         }
       });
+    }
+  }
+
+  // Hydrate server caches from Firebase Firestore on boot (essential for stateless Google Cloud Run instances)
+  if (isServerFirestoreEnabled()) {
+    try {
+      const hydrated = await hydrateAllFromFirestore();
+      if (hydrated.connected) {
+        if (Array.isArray(hydrated.orders) && hydrated.orders.length > 0) {
+          writeServerOrders(hydrated.orders);
+        }
+        if (Array.isArray(hydrated.products) && hydrated.products.length > 0) {
+          writeServerProducts(hydrated.products);
+        }
+        if (hydrated.integrations && Object.keys(hydrated.integrations).length > 0) {
+          const localCfg = readServerIntegrations();
+          const mergedCfg = mergeIntegrationsConfigPreservingSecrets(hydrated.integrations, localCfg);
+          try {
+            fs.writeFileSync(integrationsDbPath, JSON.stringify(mergedCfg, null, 2), 'utf-8');
+          } catch {}
+          if (mergedCfg.smsSettings) {
+            dynamicSmsConfig = mergedCfg.smsSettings;
+          }
+        }
+        if (Array.isArray(hydrated.whatsappLogs) && hydrated.whatsappLogs.length > 0) {
+          try {
+            writeJsonAtomic(whatsappLogsDbPath, hydrated.whatsappLogs.slice(0, 1000));
+          } catch {}
+        }
+        if (hydrated.whatsappProcessed) {
+          try {
+            writeJsonAtomic(whatsappProcessedDbPath, hydrated.whatsappProcessed);
+          } catch {}
+        }
+        if (Array.isArray(hydrated.confirmationAuditLogs) && hydrated.confirmationAuditLogs.length > 0) {
+          try {
+            writeJsonAtomic(confirmationAuditLogsDbPath, hydrated.confirmationAuditLogs.slice(0, 1000));
+          } catch {}
+        }
+        if (Array.isArray(hydrated.webhookLogs) && hydrated.webhookLogs.length > 0) {
+          try {
+            writeJsonAtomic(webhookLogsDbPath, hydrated.webhookLogs.slice(0, 150));
+          } catch {}
+        }
+      }
+    } catch (bootErr: any) {
+      console.warn('[Firestore Admin] Startup hydration skipped:', bootErr?.message || bootErr);
     }
   }
 

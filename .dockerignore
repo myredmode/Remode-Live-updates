@@ -1,0 +1,11 @@
+node_modules
+dist
+.git
+.env
+.env.local
+.env.*.local
+data
+render-webhook
+*.log
+.DS_Store
+.aistudio

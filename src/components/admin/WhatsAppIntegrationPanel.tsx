@@ -86,7 +86,7 @@ const sanitizeWhatsAppSettings = (
     confirmationTemplateName: raw?.confirmationTemplateName || 'redmode_order_confirmation',
     reminderTemplateName: raw?.reminderTemplateName || 'redmode_order_reminder_23h',
     templateLanguageCode: raw?.templateLanguageCode || 'en',
-    renderWebhookUrl: raw?.renderWebhookUrl || 'https://redmode-whatsapp-webhook.onrender.com/webhook',
+    renderWebhookUrl: raw?.renderWebhookUrl || '',
   };
 };
 
@@ -272,8 +272,12 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
     }
   };
 
-  // Single Active Meta Webhook Receiver (Render Service)
-  const webhookUrl = formData.renderWebhookUrl || 'https://redmode-whatsapp-webhook.onrender.com/webhook';
+  // Single Unified Direct Meta Webhook Receiver on Google Cloud Run (no Render middleman required)
+  const directWebhookOrigin =
+    typeof window !== 'undefined' && window.location?.origin && !window.location.origin.includes('localhost')
+      ? window.location.origin
+      : 'https://redmode.in';
+  const webhookUrl = formData.renderWebhookUrl || `${directWebhookOrigin}/api/whatsapp/webhook`;
 
   const handleFieldChange = (field: keyof WhatsAppSettings, value: any) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
@@ -982,9 +986,9 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
         </div>
 
         <p className="text-xs text-slate-500 pt-1">
-          <strong>Single Active Meta Webhook Receiver (Render):</strong> Meta delivers webhooks to{' '}
-          <code className="font-mono text-slate-700">{webhookUrl}</code>, which verifies{' '}
-          <code className="font-mono text-slate-700">X-Hub-Signature-256</code> and durably forwards signed events to RedMode&apos;s backend.
+          <strong>Direct Meta Webhook Receiver (Google Cloud Run):</strong> Point Meta Developer Dashboard directly to{' '}
+          <code className="font-mono text-slate-700">{webhookUrl}</code>. The backend verifies{' '}
+          <code className="font-mono text-slate-700">X-Hub-Signature-256</code>, processes YES/CANCEL replies, updates Firebase Firestore, and creates real Delhivery AWBs automatically.
         </p>
       </div>
 
