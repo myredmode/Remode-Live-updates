@@ -15,8 +15,8 @@ RUN npm install --no-audit --no-fund --legacy-peer-deps
 # Copy application source
 COPY . .
 
-# Build Vite production bundle into dist/
-RUN mkdir -p public && npx vite build && cp dist/index.html dist/404.html
+# Build Vite production bundle into dist/ and compile Express server with esbuild
+RUN mkdir -p public && npx vite build && cp dist/index.html dist/404.html && npx esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server.mjs
 
 # Production Google Cloud Run runtime configuration
 ENV NODE_ENV=production
@@ -25,5 +25,5 @@ ENV PORT=8080
 
 EXPOSE 8080
 
-# Run full Express + static dist/ server via tsx
-CMD ["./node_modules/.bin/tsx", "server.ts"]
+# Run compiled Express + static dist/ server directly via Node.js (fast cold start, low RAM)
+CMD ["node", "dist-server.mjs"]

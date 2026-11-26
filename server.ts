@@ -8038,53 +8038,7 @@ async function startServer() {
     }
   }
 
-  // Hydrate server caches from Firebase Firestore on boot (essential for stateless Google Cloud Run instances)
-  if (isServerFirestoreEnabled()) {
-    try {
-      const hydrated = await hydrateAllFromFirestore();
-      if (hydrated.connected) {
-        if (Array.isArray(hydrated.orders) && hydrated.orders.length > 0) {
-          writeServerOrders(hydrated.orders);
-        }
-        if (Array.isArray(hydrated.products) && hydrated.products.length > 0) {
-          writeServerProducts(hydrated.products);
-        }
-        if (hydrated.integrations && Object.keys(hydrated.integrations).length > 0) {
-          const localCfg = readServerIntegrations();
-          const mergedCfg = mergeIntegrationsConfigPreservingSecrets(hydrated.integrations, localCfg);
-          try {
-            fs.writeFileSync(integrationsDbPath, JSON.stringify(mergedCfg, null, 2), 'utf-8');
-          } catch {}
-          if (mergedCfg.smsSettings) {
-            dynamicSmsConfig = mergedCfg.smsSettings;
-          }
-        }
-        if (Array.isArray(hydrated.whatsappLogs) && hydrated.whatsappLogs.length > 0) {
-          try {
-            writeJsonAtomic(whatsappLogsDbPath, hydrated.whatsappLogs.slice(0, 1000));
-          } catch {}
-        }
-        if (hydrated.whatsappProcessed) {
-          try {
-            writeJsonAtomic(whatsappProcessedDbPath, hydrated.whatsappProcessed);
-          } catch {}
-        }
-        if (Array.isArray(hydrated.confirmationAuditLogs) && hydrated.confirmationAuditLogs.length > 0) {
-          try {
-            writeJsonAtomic(confirmationAuditLogsDbPath, hydrated.confirmationAuditLogs.slice(0, 1000));
-          } catch {}
-        }
-        if (Array.isArray(hydrated.webhookLogs) && hydrated.webhookLogs.length > 0) {
-          try {
-            writeJsonAtomic(webhookLogsDbPath, hydrated.webhookLogs.slice(0, 150));
-          } catch {}
-        }
-      }
-    } catch (bootErr: any) {
-      console.warn('[Firestore Admin] Startup hydration skipped:', bootErr?.message || bootErr);
-    }
-  }
-
+  // Bind HTTP port immediately so Cloud Run / container startup probes pass in <1 second
   const server = app.listen(PORT, HOST, () => {
     console.log(`REDMODE Server running on http://${HOST}:${PORT}`);
   });
@@ -8092,6 +8046,55 @@ async function startServer() {
   server.on('error', (err: any) => {
     console.error('Server error:', err);
   });
+
+  // Hydrate server caches from Firebase Firestore asynchronously after binding port
+  if (isServerFirestoreEnabled()) {
+    void (async () => {
+      try {
+        const hydrated = await hydrateAllFromFirestore();
+        if (hydrated.connected) {
+          if (Array.isArray(hydrated.orders) && hydrated.orders.length > 0) {
+            writeServerOrders(hydrated.orders);
+          }
+          if (Array.isArray(hydrated.products) && hydrated.products.length > 0) {
+            writeServerProducts(hydrated.products);
+          }
+          if (hydrated.integrations && Object.keys(hydrated.integrations).length > 0) {
+            const localCfg = readServerIntegrations();
+            const mergedCfg = mergeIntegrationsConfigPreservingSecrets(hydrated.integrations, localCfg);
+            try {
+              fs.writeFileSync(integrationsDbPath, JSON.stringify(mergedCfg, null, 2), 'utf-8');
+            } catch {}
+            if (mergedCfg.smsSettings) {
+              dynamicSmsConfig = mergedCfg.smsSettings;
+            }
+          }
+          if (Array.isArray(hydrated.whatsappLogs) && hydrated.whatsappLogs.length > 0) {
+            try {
+              writeJsonAtomic(whatsappLogsDbPath, hydrated.whatsappLogs.slice(0, 1000));
+            } catch {}
+          }
+          if (hydrated.whatsappProcessed) {
+            try {
+              writeJsonAtomic(whatsappProcessedDbPath, hydrated.whatsappProcessed);
+            } catch {}
+          }
+          if (Array.isArray(hydrated.confirmationAuditLogs) && hydrated.confirmationAuditLogs.length > 0) {
+            try {
+              writeJsonAtomic(confirmationAuditLogsDbPath, hydrated.confirmationAuditLogs.slice(0, 1000));
+            } catch {}
+          }
+          if (Array.isArray(hydrated.webhookLogs) && hydrated.webhookLogs.length > 0) {
+            try {
+              writeJsonAtomic(webhookLogsDbPath, hydrated.webhookLogs.slice(0, 150));
+            } catch {}
+          }
+        }
+      } catch (bootErr: any) {
+        console.warn('[Firestore Admin] Startup hydration skipped:', bootErr?.message || bootErr);
+      }
+    })();
+  }
 
   const shutdown = () => {
     console.log('Received termination signal, shutting down server gracefully...');
