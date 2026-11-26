@@ -4,7 +4,7 @@
 # including Orders, Admin RBAC, Delhivery, Payments, OTP & Direct Meta Webhook.
 # ============================================================================
 
-FROM node:20-slim
+FROM node:22-slim
 
 WORKDIR /app
 
