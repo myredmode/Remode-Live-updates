@@ -9,14 +9,14 @@ FROM node:20-slim
 WORKDIR /app
 
 # Install production & build dependencies cleanly
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package*.json ./
+RUN npm install --no-audit --no-fund --legacy-peer-deps
 
 # Copy application source
 COPY . .
 
 # Build Vite production bundle into dist/
-RUN npm run build
+RUN mkdir -p public && npx vite build && cp dist/index.html dist/404.html
 
 # Production Google Cloud Run runtime configuration
 ENV NODE_ENV=production
