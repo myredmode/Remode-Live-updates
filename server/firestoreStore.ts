@@ -79,7 +79,16 @@ function noteFirestoreError(context: string, err: any) {
   lastFirestoreError = `${context}: ${msg}`;
   if (!warnedOnce) {
     warnedOnce = true;
-    console.warn(`[Firestore Admin] ${context} failed (falling back to local cache): ${msg}`);
+    const isPreviewIamDenial =
+      process.env.REDMODE_STANDALONE_CLOUD_RUN !== 'true' &&
+      (err?.code === 7 || msg.includes('PERMISSION_DENIED'));
+    if (isPreviewIamDenial) {
+      console.log(
+        '[Firestore Admin] Preview sandbox running with local cache (production Cloud Run connects directly to Firestore).'
+      );
+    } else {
+      console.warn(`[Firestore Admin] ${context} failed (falling back to local cache): ${msg}`);
+    }
   }
 }
 

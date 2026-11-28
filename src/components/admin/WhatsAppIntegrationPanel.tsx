@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   MessageSquare,
   Check,
@@ -8,19 +8,26 @@ import {
   Send,
   X,
   ExternalLink,
-  ShieldCheck,
   Trash2,
   AlertTriangle,
   RefreshCw,
   Clock,
   RotateCcw,
   Search,
-  Wifi,
-  WifiOff,
-  ShieldAlert,
 } from 'lucide-react';
 import { useStore } from '../../context/StoreContext';
 import { WhatsAppSettings, WhatsAppMessageLog, WhatsAppHealthState } from '../../types';
+import {
+  IntegrationStatusIndicator,
+  IntegrationInfoTip,
+  SaveChangesButton,
+  TestConnectionButton,
+  InlineActionFeedback,
+  AutomationToggleRow,
+  SaveButtonState,
+  TestButtonState,
+  IntegrationConnectionStatus,
+} from './IntegrationActionControls';
 
 interface WhatsAppIntegrationPanelProps {
   onSaveNotification?: (msg: string) => void;
@@ -121,13 +128,26 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
   const [testPhone, setTestPhone] = useState<string>('7302797464');
   const [testTemplate, setTestTemplate] = useState<'confirmation' | 'dispatch' | 'reminder'>('confirmation');
   const [isTestingConnection, setIsTestingConnection] = useState<boolean>(false);
+  const [testButtonState, setTestButtonState] = useState<TestButtonState>('idle');
   const [testConnectionResult, setTestConnectionResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [saveButtonState, setSaveButtonState] = useState<SaveButtonState>('idle');
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [isSendingMessage, setIsSendingMessage] = useState<boolean>(false);
   const [messageFeedback, setMessageFeedback] = useState<{ success: boolean; message: string } | null>(null);
   const [saveNotification, setSaveNotification] = useState<string | null>(null);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState<boolean>(false);
   const [waHealth, setWaHealth] = useState<WhatsAppHealthState | null>(null);
   const [waHealthLoading, setWaHealthLoading] = useState<boolean>(false);
+
+  const saveTimerRef = useRef<number | null>(null);
+  const testTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+      if (testTimerRef.current) window.clearTimeout(testTimerRef.current);
+    };
+  }, []);
 
   // WhatsApp Message Logs & Scheduler State
   const [waLogs, setWaLogs] = useState<WhatsAppMessageLog[]>([]);
@@ -283,7 +303,7 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
     setFormData((prev) => ({ ...prev, [field]: value }));
   };
 
-  const handleToggleActive = () => {
+  const handleToggleActive = async () => {
     const nextEnabled = !formData.enabled;
     const updatedData: WhatsAppSettings = {
       ...formData,
@@ -297,19 +317,11 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
       enabled: nextEnabled,
     };
     setFormData(updatedData);
-    updateWhatsAppSettings(updatedData);
-    const msg = nextEnabled
-      ? 'WhatsApp Automation turned ON. New orders will use automated confirmation (old historical orders will NOT be resent).'
-      : 'WhatsApp Automation turned OFF. Checkout, order saving, manual confirmation, and Delhivery shipping remain 100% active.';
-    setSaveNotification(msg);
-    if (onSaveNotification) {
-      onSaveNotification(msg);
-    }
+    await updateWhatsAppSettings(updatedData);
     setTimeout(() => void fetchWhatsAppHealth(true), 350);
-    setTimeout(() => setSaveNotification(null), 4500);
   };
 
-  const handleConfirmDelete = () => {
+  const handleConfirmDelete = async () => {
     const cleared: WhatsAppSettings = {
       ...formData,
       enabled: false,
@@ -321,9 +333,10 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
       webhookVerifyToken: '',
     };
     setFormData(cleared);
-    updateWhatsAppSettings({ __delete: true } as any);
+    await updateWhatsAppSettings({ __delete: true } as any);
     setIsDeleteModalOpen(false);
     setTestConnectionResult(null);
+    setSaveError(null);
     setMessageFeedback(null);
     const msg = 'Meta WhatsApp integration deleted permanently.';
     setSaveNotification(msg);
@@ -331,9 +344,14 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
       onSaveNotification(msg);
     }
     setTimeout(() => setSaveNotification(null), 3500);
+    setTimeout(() => void fetchWhatsAppHealth(true), 350);
   };
 
-  const handleSaveChanges = () => {
+  const handleSaveChanges = async () => {
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    setSaveButtonState('saving');
+    setSaveError(null);
+
     const cleanedData: WhatsAppSettings = {
       ...formData,
       accessToken: (formData.accessToken || '').trim(),
@@ -346,12 +364,18 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
       enabled: formData.enabled,
     };
     setFormData(cleanedData);
-    updateWhatsAppSettings(cleanedData);
-    setSaveNotification('Meta WhatsApp settings saved successfully.');
-    if (onSaveNotification) {
-      onSaveNotification('Meta WhatsApp settings saved successfully.');
+
+    const result = await updateWhatsAppSettings(cleanedData);
+    if (result?.success !== false) {
+      setSaveButtonState('saved');
+      saveTimerRef.current = window.setTimeout(() => {
+        setSaveButtonState('idle');
+      }, 2000);
+      setTimeout(() => void fetchWhatsAppHealth(true), 350);
+    } else {
+      setSaveButtonState('error');
+      setSaveError(result?.error || 'Failed to save Meta WhatsApp settings. Please try again.');
     }
-    setTimeout(() => setSaveNotification(null), 3500);
   };
 
   const parseJsonSafe = async (res: Response) => {
@@ -365,7 +389,9 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
   };
 
   const handleTestConnection = async () => {
+    if (testTimerRef.current) window.clearTimeout(testTimerRef.current);
     setIsTestingConnection(true);
+    setTestButtonState('testing');
     setTestConnectionResult(null);
 
     try {
@@ -388,23 +414,30 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
       });
       const data = await parseJsonSafe(res);
       if (res.ok && data?.success) {
+        setTestButtonState('connected');
         setTestConnectionResult({
           success: true,
           message: data.message || `Connected to Meta WhatsApp Cloud API (${data.verifiedName || data.phoneNumberId})`,
         });
+        setTimeout(() => void fetchWhatsAppHealth(true), 300);
       } else {
+        setTestButtonState('failed');
         setTestConnectionResult({
           success: false,
           message: data?.error || data?.message || `Meta API verification failed (HTTP ${res.status}). Check Access Token & Phone Number ID.`,
         });
       }
     } catch (err: any) {
+      setTestButtonState('failed');
       setTestConnectionResult({
         success: false,
         message: `Network error testing Meta WhatsApp API: ${err?.message || 'Unable to connect'}`,
       });
     } finally {
       setIsTestingConnection(false);
+      testTimerRef.current = window.setTimeout(() => {
+        setTestButtonState('idle');
+      }, 2000);
     }
   };
 
@@ -488,473 +521,379 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
     setTimeout(() => setTokenCopied(false), 2000);
   };
 
+  const connectionStatus: IntegrationConnectionStatus =
+    saveButtonState === 'saving'
+      ? 'saving'
+      : isTestingConnection || testButtonState === 'testing'
+      ? 'testing'
+      : waHealth?.status === 'Connected'
+      ? 'connected'
+      : waHealth?.status === 'Authentication Error' || waHealth?.status === 'Temporarily Unavailable'
+      ? 'error'
+      : 'disconnected';
+
+  const connectionLabel =
+    saveButtonState === 'saving'
+      ? 'Saving'
+      : isTestingConnection || testButtonState === 'testing'
+      ? 'Testing'
+      : waHealthLoading && !waHealth
+      ? 'Testing'
+      : waHealth?.status === 'Connected'
+      ? 'Connected'
+      : waHealth?.status === 'Authentication Error' || waHealth?.status === 'Temporarily Unavailable'
+      ? 'Error'
+      : 'Disconnected';
+
   return (
-    <div className="space-y-6 text-slate-800">
-      {/* 1. NOTIFICATION BANNER */}
+    <div className="space-y-5 text-slate-800">
+      {/* Critical / Destructive Notice Only */}
       {saveNotification && (
-        <div className="p-3.5 bg-emerald-50 border border-emerald-300 rounded-xl text-xs font-semibold text-emerald-900 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Check className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span>{saveNotification}</span>
-          </div>
-          <button
-            type="button"
-            onClick={() => setSaveNotification(null)}
-            className="text-emerald-700 hover:text-emerald-900 cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+        <InlineActionFeedback
+          type="success"
+          message={saveNotification}
+          onDismiss={() => setSaveNotification(null)}
+        />
       )}
 
-      {/* 2. SECTION HEADER CARD */}
-      <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+      {/* 1. COMPACT INTEGRATION HEADER */}
+      <div className="bg-white rounded-xl border border-slate-200 px-5 py-4">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="w-9 h-9 rounded-lg bg-emerald-50 border border-emerald-200/80 text-emerald-700 flex items-center justify-center shrink-0 mt-0.5">
               <MessageSquare className="w-4 h-4" />
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <h3 className="text-base font-semibold text-slate-900">
-                  Official WhatsApp Business API (Meta)
+                <h3 className="text-sm font-semibold text-slate-900">
+                  Meta WhatsApp Cloud API
                 </h3>
-                {/* Real Backend Connection Indicator */}
-                <span
+                <IntegrationStatusIndicator
+                  status={connectionStatus}
+                  label={connectionLabel}
                   title={waHealth?.message || 'Live Meta WhatsApp Cloud API status'}
-                  className={`px-2 py-0.5 rounded text-[10px] font-semibold border inline-flex items-center gap-1 ${
-                    waHealth?.status === 'Connected'
-                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                      : waHealth?.status === 'Authentication Error'
-                      ? 'bg-rose-50 text-rose-700 border-rose-200'
-                      : waHealth?.status === 'Temporarily Unavailable'
-                      ? 'bg-amber-50 text-amber-800 border-amber-200'
-                      : 'bg-slate-100 text-slate-700 border-slate-200'
-                  }`}
-                >
-                  {waHealth?.status === 'Connected' ? (
-                    <Wifi className="w-3 h-3" />
-                  ) : waHealth?.status === 'Authentication Error' ? (
-                    <ShieldAlert className="w-3 h-3" />
-                  ) : (
-                    <WifiOff className="w-3 h-3" />
-                  )}
-                  <span>{waHealthLoading && !waHealth ? 'Checking...' : waHealth?.status || 'Disconnected'}</span>
-                </span>
+                />
                 <span
-                  className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                  className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium border ${
                     formData.enabled
                       ? 'bg-slate-900 text-white border-slate-900'
-                      : 'bg-amber-50 text-amber-900 border-amber-300'
+                      : 'bg-slate-50 text-slate-600 border-slate-200'
                   }`}
                 >
                   Automation: {formData.enabled ? 'ON' : 'OFF'}
                 </span>
               </div>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Hybrid confirmation engine: Meta Cloud API automation with permanent manual admin fallback. Turning OFF never blocks checkout, database saving, manual confirmation, or Delhivery.
+              <p className="text-xs text-slate-500 mt-1">
+                Automated order confirmations, tracking alerts, and customer reply webhooks with manual fallback.
               </p>
               {waHealth && waHealth.status !== 'Connected' && waHealth.message && (
-                <p className="text-[11px] text-rose-700 mt-1 font-medium">
+                <p className="text-[11px] text-rose-700 mt-1.5 font-medium">
                   {waHealth.message}
                 </p>
               )}
             </div>
           </div>
 
-          <div className="flex items-center flex-wrap gap-2 self-start sm:self-auto">
+          <div className="flex items-center gap-2 shrink-0 self-start sm:self-center">
             <button
               type="button"
               onClick={handleToggleActive}
-              className={`px-3 py-2 text-xs font-semibold rounded-lg transition cursor-pointer border ${
+              className={`h-8 px-3 text-xs font-medium rounded-lg transition-colors cursor-pointer border whitespace-nowrap ${
                 formData.enabled
                   ? 'border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900'
                   : 'border-emerald-700 bg-emerald-700 hover:bg-emerald-800 text-white'
               }`}
             >
-              {formData.enabled ? 'Turn Automation OFF' : 'Turn Automation ON'}
-            </button>
-            <button
-              type="button"
-              onClick={handleTestConnection}
-              disabled={isTestingConnection}
-              className="px-3.5 py-2 border border-slate-300 hover:border-slate-400 bg-white text-slate-800 text-xs font-medium rounded-lg transition cursor-pointer disabled:opacity-50"
-            >
-              {isTestingConnection ? 'Testing...' : 'Test Connection'}
-            </button>
-            <button
-              type="button"
-              onClick={handleSaveChanges}
-              className="px-4 py-2 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5"
-            >
-              <Check className="w-3.5 h-3.5" />
-              <span>Save Changes</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setIsDeleteModalOpen(true)}
-              className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer border border-transparent hover:border-rose-200"
-              title="Delete WhatsApp Integration"
-            >
-              <Trash2 className="w-4 h-4" />
+              {formData.enabled ? 'Pause Automation' : 'Enable Automation'}
             </button>
           </div>
         </div>
       </div>
 
-      {/* 3. META CLOUD API CONFIGURATION CARD */}
+      {/* 2. API CONFIGURATION & AUTOMATION CARD */}
       <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-5">
-        <div className="flex items-center justify-between pb-4 border-b border-slate-100">
-          <div className="flex items-center gap-2.5">
-            <h4 className="text-sm font-semibold text-slate-900">Meta WhatsApp Cloud Gateway</h4>
-            <span className="px-2 py-0.5 rounded text-[10px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 flex items-center gap-1">
-              <ShieldCheck className="w-3 h-3 text-emerald-600" />
-              Official API
-            </span>
-          </div>
-          <span className="text-xs text-slate-400">Environment: Production (Graph API v19.0)</span>
+        <div className="flex items-center justify-between gap-2 pb-3.5 border-b border-slate-100">
+          <h4 className="text-sm font-semibold text-slate-900">API Configuration</h4>
+          <span className="text-[11px] text-slate-400 font-mono">Production · Official Cloud API</span>
         </div>
 
-        {/* Test Connection Result Alert */}
-        {testConnectionResult && (
-          <div
-            className={`p-3 rounded-lg text-xs flex items-center justify-between ${
-              testConnectionResult.success
-                ? 'bg-emerald-50 text-emerald-900 border border-emerald-200'
-                : 'bg-rose-50 text-rose-900 border border-rose-200'
-            }`}
-          >
-            <span>{testConnectionResult.message}</span>
-            <button
-              type="button"
-              onClick={() => setTestConnectionResult(null)}
-              className="text-slate-500 hover:text-slate-800 p-0.5 cursor-pointer"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        )}
-
         <div className="space-y-5">
-          {/* Group 1: API Credentials (Prompt-specified fields) */}
-          <div className="space-y-3">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-              API Credentials
-            </h4>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-              {/* Field 1: WhatsApp Cloud Token */}
-              <div className="md:col-span-2">
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-xs font-medium text-slate-700">
-                    WhatsApp Cloud Token
-                  </label>
-                  <span className="text-[11px] text-slate-400">Meta Permanent Access Token</span>
-                </div>
-                <div className="relative">
-                  <input
-                    type={showToken ? 'text' : 'password'}
-                    value={formData.accessToken || ''}
-                    onChange={(e) => handleFieldChange('accessToken', e.target.value)}
-                    placeholder="e.g. EAAG9xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-                    className="w-full px-3 py-2 pr-9 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 font-mono transition"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowToken(!showToken)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
-                  >
-                    {showToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                  </button>
-                </div>
-                <p className="text-[11px] text-slate-400 mt-1">
-                  Permanent system user token from Meta Business Manager with <code className="font-mono text-slate-600">whatsapp_business_messaging</code> permission.
-                </p>
-              </div>
-
-              {/* Field 2: Phone Number ID */}
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Phone Number ID
-                </label>
+          {/* Group 1: API Credentials */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Field 1: WhatsApp Cloud Token */}
+            <div className="md:col-span-2">
+              <label className="flex items-center gap-1.5 text-xs font-medium text-slate-700 mb-1.5">
+                <span>WhatsApp Cloud Token</span>
+                <IntegrationInfoTip text="Permanent system user access token from Meta Business Manager with whatsapp_business_messaging permission." />
+              </label>
+              <div className="relative">
                 <input
-                  type="text"
-                  value={formData.phoneNumberId || ''}
-                  onChange={(e) => handleFieldChange('phoneNumberId', e.target.value)}
-                  placeholder="e.g. 109845729104823"
-                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 font-mono transition"
+                  type={showToken ? 'text' : 'password'}
+                  value={formData.accessToken || ''}
+                  onChange={(e) => handleFieldChange('accessToken', e.target.value)}
+                  placeholder="EAAG9xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                  autoComplete="off"
+                  className="w-full h-9 px-3 pr-9 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 font-mono transition"
                 />
-                <p className="text-[11px] text-slate-400 mt-1">
-                  Found in Meta App Dashboard → WhatsApp → API Setup.
-                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowToken(!showToken)}
+                  aria-label={showToken ? 'Hide access token' : 'Show access token'}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer p-0.5"
+                >
+                  {showToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                </button>
               </div>
+            </div>
 
-              {/* Field 3: WABA ID */}
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  WABA ID (WhatsApp Business Account ID)
-                </label>
-                <input
-                  type="text"
-                  value={formData.wabaId || ''}
-                  onChange={(e) => handleFieldChange('wabaId', e.target.value)}
-                  placeholder="e.g. 392019482910482"
-                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 font-mono transition"
-                />
-                <p className="text-[11px] text-slate-400 mt-1">
-                  Found in Meta Business Manager → WhatsApp Accounts.
-                </p>
-              </div>
+            {/* Field 2: Phone Number ID */}
+            <div>
+              <label className="flex items-center gap-1.5 text-xs font-medium text-slate-700 mb-1.5">
+                <span>Phone Number ID</span>
+                <IntegrationInfoTip text="Found in Meta App Dashboard under WhatsApp → API Setup." />
+              </label>
+              <input
+                type="text"
+                value={formData.phoneNumberId || ''}
+                onChange={(e) => handleFieldChange('phoneNumberId', e.target.value)}
+                placeholder="1375149605673144"
+                className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 font-mono transition"
+              />
+            </div>
 
-              {/* Additional Clean Settings */}
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Registered WhatsApp Sender Number
-                </label>
-                <input
-                  type="text"
-                  value={formData.phoneNumber}
-                  onChange={(e) => handleFieldChange('phoneNumber', e.target.value)}
-                  placeholder="+91 73027 97464"
-                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 font-mono transition"
-                />
-                <p className="text-[11px] text-slate-400 mt-1">
-                  Sender mobile number verified in Meta Business Manager.
-                </p>
-              </div>
+            {/* Field 3: WABA ID */}
+            <div>
+              <label className="flex items-center gap-1.5 text-xs font-medium text-slate-700 mb-1.5">
+                <span>WABA ID</span>
+                <IntegrationInfoTip text="WhatsApp Business Account ID from Meta Business Manager → WhatsApp Accounts." />
+              </label>
+              <input
+                type="text"
+                value={formData.wabaId || ''}
+                onChange={(e) => handleFieldChange('wabaId', e.target.value)}
+                placeholder="2745819689145292"
+                className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 font-mono transition"
+              />
+            </div>
 
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  API Base URL
-                </label>
-                <input
-                  type="text"
-                  value={formData.apiEndpoint || 'https://graph.facebook.com/v19.0'}
-                  onChange={(e) => handleFieldChange('apiEndpoint', e.target.value)}
-                  placeholder="https://graph.facebook.com/v19.0"
-                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 font-mono transition"
-                />
-                <p className="text-[11px] text-slate-400 mt-1">
-                  Default: Meta Graph API v19.0.
-                </p>
-              </div>
+            {/* Field 4: Registered Sender Number */}
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                Registered Sender Number
+              </label>
+              <input
+                type="text"
+                value={formData.phoneNumber}
+                onChange={(e) => handleFieldChange('phoneNumber', e.target.value)}
+                placeholder="+91 73027 97464"
+                className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 font-mono transition"
+              />
+            </div>
+
+            {/* Field 5: API Base URL */}
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                API Base URL
+              </label>
+              <input
+                type="text"
+                value={formData.apiEndpoint || 'https://graph.facebook.com/v21.0'}
+                onChange={(e) => handleFieldChange('apiEndpoint', e.target.value)}
+                placeholder="https://graph.facebook.com/v21.0"
+                className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 font-mono transition"
+              />
             </div>
           </div>
 
-          {/* Group 2: Automated Triggers */}
-          <div className="space-y-3 pt-4 border-t border-slate-100">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-              Automated Notification Triggers
+          {/* Group 2: Automation Settings */}
+          <div className="space-y-2.5 pt-4 border-t border-slate-100">
+            <h4 className="text-xs font-semibold text-slate-700">
+              Automation Settings
             </h4>
-            <div className="space-y-2.5">
-              <div className="flex items-center justify-between p-3 rounded-lg border border-slate-100 hover:bg-slate-50/50">
-                <div>
-                  <p className="text-xs font-semibold text-slate-900">Order Confirmation Notification (YES / CANCEL)</p>
-                  <p className="text-[11px] text-slate-500">
-                    Dispatched immediately or queued for morning batch with quick confirmation buttons.
-                  </p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={formData.orderConfirmationEnabled}
-                    onChange={(e) => handleFieldChange('orderConfirmationEnabled', e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-slate-900"></div>
-                </label>
-              </div>
-
-              <div className="flex items-center justify-between p-3 rounded-lg border border-slate-100 hover:bg-slate-50/50">
-                <div>
-                  <p className="text-xs font-semibold text-slate-900">23-Hour Gentle Reminder</p>
-                  <p className="text-[11px] text-slate-500">
-                    Sent before Meta 24-hour customer service window expires if customer hasn't responded.
-                  </p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={formData.reminder23hEnabled}
-                    onChange={(e) => handleFieldChange('reminder23hEnabled', e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-slate-900"></div>
-                </label>
-              </div>
-
-              <div className="flex items-center justify-between p-3 rounded-lg border border-slate-100 hover:bg-slate-50/50">
-                <div>
-                  <p className="text-xs font-semibold text-slate-900">Dispatched &amp; Live Tracking AWB Link</p>
-                  <p className="text-[11px] text-slate-500">
-                    Automatically sent when an AWB is generated via active courier partner.
-                  </p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={formData.orderDispatchTrackingEnabled}
-                    onChange={(e) => handleFieldChange('orderDispatchTrackingEnabled', e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-slate-900"></div>
-                </label>
-              </div>
-
-              <div className="flex items-center justify-between p-3 rounded-lg border border-slate-100 hover:bg-slate-50/50">
-                <div>
-                  <p className="text-xs font-semibold text-slate-900">COD Verification OTP &amp; Address Verification</p>
-                  <p className="text-[11px] text-slate-500">
-                    Verifies high-risk COD orders with automated WhatsApp OTP to reduce RTO rate.
-                  </p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={formData.codVerificationOtpEnabled}
-                    onChange={(e) => handleFieldChange('codVerificationOtpEnabled', e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-slate-900"></div>
-                </label>
-              </div>
+            <div className="rounded-lg border border-slate-200 divide-y divide-slate-100 bg-white">
+              <AutomationToggleRow
+                title="Order Confirmation (YES / CANCEL)"
+                description="Send quick confirmation buttons immediately or in the morning batch."
+                checked={formData.orderConfirmationEnabled}
+                onChange={(val) => handleFieldChange('orderConfirmationEnabled', val)}
+              />
+              <AutomationToggleRow
+                title="23-Hour Gentle Reminder"
+                description="Follow up before the 24-hour customer window expires if unanswered."
+                checked={formData.reminder23hEnabled}
+                onChange={(val) => handleFieldChange('reminder23hEnabled', val)}
+              />
+              <AutomationToggleRow
+                title="Dispatched & Live Tracking AWB"
+                description="Send tracking details automatically when a courier AWB is created."
+                checked={formData.orderDispatchTrackingEnabled}
+                onChange={(val) => handleFieldChange('orderDispatchTrackingEnabled', val)}
+              />
+              <AutomationToggleRow
+                title="COD Verification OTP"
+                description="Verify high-risk COD orders over WhatsApp to reduce RTO."
+                checked={formData.codVerificationOtpEnabled}
+                onChange={(val) => handleFieldChange('codVerificationOtpEnabled', val)}
+              />
             </div>
           </div>
 
-          {/* Group 3: Confirmation Policy, 10 AM - 9 PM Schedule & Approved Meta Utility Templates */}
+          {/* Group 3: Confirmation Policy & Utility Templates */}
           <div className="space-y-3 pt-4 border-t border-slate-100">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-              Order Confirmation Policy, 10 AM – 9 PM IST Schedule &amp; Utility Templates
+            <h4 className="text-xs font-semibold text-slate-700">
+              Confirmation Policy &amp; Templates
             </h4>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <label className="flex items-center justify-between p-3 rounded-lg border border-slate-200 bg-slate-50/50 cursor-pointer">
-                <div>
-                  <p className="text-xs font-semibold text-slate-900">Confirm COD Orders</p>
-                  <p className="text-[11px] text-slate-500">Require YES reply before dispatch</p>
+              <label className="flex items-center justify-between px-3 py-2.5 rounded-lg border border-slate-200 bg-slate-50/40 hover:bg-slate-50 transition cursor-pointer">
+                <div className="min-w-0 pr-2">
+                  <p className="text-xs font-medium text-slate-900">Confirm COD Orders</p>
+                  <p className="text-[11px] text-slate-500">Require YES before dispatch</p>
                 </div>
                 <input
                   type="checkbox"
                   checked={formData.confirmCodOrders ?? true}
                   onChange={(e) => handleFieldChange('confirmCodOrders', e.target.checked)}
-                  className="accent-slate-900 w-4 h-4"
+                  className="accent-slate-900 w-4 h-4 shrink-0 cursor-pointer"
                 />
               </label>
 
-              <label className="flex items-center justify-between p-3 rounded-lg border border-slate-200 bg-slate-50/50 cursor-pointer">
-                <div>
-                  <p className="text-xs font-semibold text-slate-900">Confirm Prepaid Orders</p>
-                  <p className="text-[11px] text-slate-500">Send Utility confirmation for Prepaid too</p>
+              <label className="flex items-center justify-between px-3 py-2.5 rounded-lg border border-slate-200 bg-slate-50/40 hover:bg-slate-50 transition cursor-pointer">
+                <div className="min-w-0 pr-2">
+                  <p className="text-xs font-medium text-slate-900">Confirm Prepaid Orders</p>
+                  <p className="text-[11px] text-slate-500">Send confirmation for prepaid</p>
                 </div>
                 <input
                   type="checkbox"
                   checked={formData.confirmPrepaidOrders ?? true}
                   onChange={(e) => handleFieldChange('confirmPrepaidOrders', e.target.checked)}
-                  className="accent-slate-900 w-4 h-4"
+                  className="accent-slate-900 w-4 h-4 shrink-0 cursor-pointer"
                 />
               </label>
 
-              <label className="flex items-center justify-between p-3 rounded-lg border border-slate-200 bg-slate-50/50 cursor-pointer">
-                <div>
-                  <p className="text-xs font-semibold text-slate-900">10 AM – 9 PM IST Window</p>
-                  <p className="text-[11px] text-slate-500">Queue night orders for 10:00 AM IST</p>
+              <label className="flex items-center justify-between px-3 py-2.5 rounded-lg border border-slate-200 bg-slate-50/40 hover:bg-slate-50 transition cursor-pointer">
+                <div className="min-w-0 pr-2">
+                  <p className="text-xs font-medium text-slate-900">10 AM – 9 PM IST Window</p>
+                  <p className="text-[11px] text-slate-500">Queue night orders for 10 AM</p>
                 </div>
                 <input
                   type="checkbox"
                   checked={formData.respectSendingWindow ?? true}
                   onChange={(e) => handleFieldChange('respectSendingWindow', e.target.checked)}
-                  className="accent-slate-900 w-4 h-4"
+                  className="accent-slate-900 w-4 h-4 shrink-0 cursor-pointer"
                 />
               </label>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div>
-                <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                  Confirmation Utility Template Name
+                <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                  Confirmation Template
                 </label>
                 <input
                   type="text"
                   value={formData.confirmationTemplateName || 'redmode_order_confirmation'}
                   onChange={(e) => handleFieldChange('confirmationTemplateName', e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900"
+                  className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                  23-Hour Reminder Template Name
+                <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                  23-Hour Reminder Template
                 </label>
                 <input
                   type="text"
                   value={formData.reminderTemplateName || 'redmode_order_reminder_23h'}
                   onChange={(e) => handleFieldChange('reminderTemplateName', e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900"
+                  className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                  Template Language Code
+                <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                  Language Code
                 </label>
                 <input
                   type="text"
                   value={formData.templateLanguageCode || 'en'}
                   onChange={(e) => handleFieldChange('templateLanguageCode', e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900"
+                  className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
                 />
               </div>
             </div>
           </div>
         </div>
 
-        {/* Action Buttons Footer */}
-        <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div className="flex items-center gap-2 self-start sm:self-auto">
-            <button
-              type="button"
-              onClick={handleTestConnection}
-              disabled={isTestingConnection}
-              className="px-3.5 py-2 border border-slate-300 hover:border-slate-400 bg-white text-slate-800 text-xs font-medium rounded-lg transition cursor-pointer disabled:opacity-50"
-            >
-              {isTestingConnection ? 'Testing...' : 'Test Connection'}
-            </button>
+        {/* Consistent Bottom-Right Action Row */}
+        <div className="pt-4 border-t border-slate-100 space-y-3">
+          <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-3">
             <button
               type="button"
               onClick={() => setIsDeleteModalOpen(true)}
-              className="px-3 py-2 text-rose-600 hover:text-rose-700 text-xs font-medium transition cursor-pointer"
+              className="inline-flex items-center gap-1.5 text-rose-600 hover:text-rose-700 text-xs font-medium transition cursor-pointer self-start sm:self-auto"
             >
-              Delete Integration
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Delete Integration</span>
             </button>
+
+            <div className="flex items-center justify-end gap-2.5 flex-wrap">
+              <TestConnectionButton
+                state={testButtonState}
+                onClick={handleTestConnection}
+              />
+              <SaveChangesButton
+                state={saveButtonState}
+                onClick={handleSaveChanges}
+              />
+            </div>
           </div>
 
-          <button
-            type="button"
-            onClick={handleSaveChanges}
-            className="px-4 py-2 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 self-end sm:self-auto"
-          >
-            <Check className="w-3.5 h-3.5" />
-            <span>Save Changes</span>
-          </button>
+          {saveError && (
+            <InlineActionFeedback
+              type="error"
+              message={saveError}
+              onDismiss={() => setSaveError(null)}
+            />
+          )}
+
+          {testConnectionResult && !testConnectionResult.success && (
+            <InlineActionFeedback
+              type="error"
+              message={testConnectionResult.message}
+              onDismiss={() => setTestConnectionResult(null)}
+            />
+          )}
+
+          {testConnectionResult && testConnectionResult.success && (
+            <InlineActionFeedback
+              type="success"
+              message={testConnectionResult.message}
+              onDismiss={() => setTestConnectionResult(null)}
+            />
+          )}
         </div>
       </div>
 
-      {/* 4. WEBHOOK CONFIGURATION CARD (Matching courier panel webhook style) */}
-      <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-3">
-        <h4 className="text-sm font-semibold text-slate-900">Meta Webhook Endpoint</h4>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-w-3xl">
+      {/* 3. WEBHOOK CONFIGURATION CARD */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-3.5">
+        <div className="flex items-center gap-1.5">
+          <h4 className="text-sm font-semibold text-slate-900">Webhook Configuration</h4>
+          <IntegrationInfoTip text="Configure this Callback URL and Verify Token in Meta Developer Dashboard. The backend verifies X-Hub-Signature-256 and processes YES/CANCEL replies automatically." />
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1">
+            <label className="block text-xs font-medium text-slate-700 mb-1.5">
               Callback URL
             </label>
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-2">
               <input
                 type="text"
                 readOnly
                 value={webhookUrl}
-                className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-700 select-all"
+                className="flex-1 min-w-0 h-9 px-3 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-700 select-all"
               />
               <button
                 type="button"
                 onClick={handleCopyWebhook}
-                className="px-3 py-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 text-xs font-medium rounded-lg transition cursor-pointer shrink-0 flex items-center gap-1.5"
+                className="h-9 px-3 bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 text-xs font-medium rounded-lg transition cursor-pointer shrink-0 flex items-center gap-1.5"
               >
                 {webhookCopied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{webhookCopied ? 'Copied' : 'Copy'}</span>
@@ -963,20 +902,20 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1">
+            <label className="block text-xs font-medium text-slate-700 mb-1.5">
               Verify Token
             </label>
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-2">
               <input
                 type="text"
                 value={formData.webhookVerifyToken || 'redmode_wa_verify_2026'}
                 onChange={(e) => handleFieldChange('webhookVerifyToken', e.target.value)}
-                className="flex-1 px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:border-slate-900"
+                className="flex-1 min-w-0 h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10"
               />
               <button
                 type="button"
                 onClick={handleCopyToken}
-                className="px-3 py-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 text-xs font-medium rounded-lg transition cursor-pointer shrink-0 flex items-center gap-1.5"
+                className="h-9 px-3 bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 text-xs font-medium rounded-lg transition cursor-pointer shrink-0 flex items-center gap-1.5"
               >
                 {tokenCopied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{tokenCopied ? 'Copied' : 'Copy'}</span>
@@ -984,12 +923,6 @@ export const WhatsAppIntegrationPanel: React.FC<WhatsAppIntegrationPanelProps> =
             </div>
           </div>
         </div>
-
-        <p className="text-xs text-slate-500 pt-1">
-          <strong>Direct Meta Webhook Receiver (Google Cloud Run):</strong> Point Meta Developer Dashboard directly to{' '}
-          <code className="font-mono text-slate-700">{webhookUrl}</code>. The backend verifies{' '}
-          <code className="font-mono text-slate-700">X-Hub-Signature-256</code>, processes YES/CANCEL replies, updates Firebase Firestore, and creates real Delhivery AWBs automatically.
-        </p>
       </div>
 
       {/* 4B. WHATSAPP MESSAGE LOGS & 23-HOUR SCHEDULER MONITOR */}

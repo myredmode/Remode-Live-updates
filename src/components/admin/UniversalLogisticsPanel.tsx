@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Truck,
   Plus,
@@ -8,12 +8,21 @@ import {
   Check,
   Copy,
   AlertTriangle,
-  AlertCircle,
   X,
   ExternalLink,
 } from 'lucide-react';
 import { useStore } from '../../context/StoreContext';
 import { ShippingChannelConfig } from '../../types';
+import {
+  IntegrationStatusIndicator,
+  IntegrationInfoTip,
+  SaveChangesButton,
+  TestConnectionButton,
+  InlineActionFeedback,
+  SaveButtonState,
+  TestButtonState,
+  IntegrationConnectionStatus,
+} from './IntegrationActionControls';
 
 interface UniversalLogisticsPanelProps {
   onSaveNotification?: (msg: string) => void;
@@ -181,7 +190,10 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
   const [showApiSecret, setShowApiSecret] = useState<boolean>(false);
   const [isAddCourierOpen, setIsAddCourierOpen] = useState<boolean>(false);
   const [isTesting, setIsTesting] = useState<boolean>(false);
+  const [testButtonState, setTestButtonState] = useState<TestButtonState>('idle');
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [saveButtonState, setSaveButtonState] = useState<SaveButtonState>('idle');
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [notification, setNotification] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
   const [webhookCopied, setWebhookCopied] = useState<boolean>(false);
   const [pickupDate, setPickupDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
@@ -192,6 +204,16 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
 
   // Modal for Delete
   const [channelToDelete, setChannelToDelete] = useState<ShippingChannelConfig | null>(null);
+
+  const saveTimerRef = useRef<number | null>(null);
+  const testTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+      if (testTimerRef.current) window.clearTimeout(testTimerRef.current);
+    };
+  }, []);
 
   // Sync state if settings change externally (preserving empty arrays & deactivated active ID)
   useEffect(() => {
@@ -355,7 +377,11 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
   };
 
   // Save changes
-  const handleSaveChanges = () => {
+  const handleSaveChanges = async () => {
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    setSaveButtonState('saving');
+    setSaveError(null);
+
     const updatedChannels = channels.map((ch) => ({
       ...ch,
       name: (ch.name || '').trim() || ch.name,
@@ -368,30 +394,36 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
       isPrimary: ch.id === activeChannelId,
     }));
     setChannels(updatedChannels);
-    updateShippingChannels(updatedChannels, activeChannelId);
 
-    setNotification({
-      type: 'success',
-      text: 'Courier settings saved successfully.',
-    });
-    if (onSaveNotification) {
-      onSaveNotification('Courier settings saved successfully.');
+    const result = await updateShippingChannels(updatedChannels, activeChannelId);
+    if (result?.success !== false) {
+      setSaveButtonState('saved');
+      saveTimerRef.current = window.setTimeout(() => {
+        setSaveButtonState('idle');
+      }, 2000);
+    } else {
+      setSaveButtonState('error');
+      setSaveError(result?.error || 'Failed to save courier settings. Please try again.');
     }
-    setTimeout(() => setNotification(null), 3500);
   };
 
   // Test connection
   const handleTestConnection = async () => {
     if (!currentChannel) return;
+    if (testTimerRef.current) window.clearTimeout(testTimerRef.current);
+
     if (!currentChannel.apiKey || !currentChannel.apiKey.trim()) {
+      setTestButtonState('failed');
       setTestResult({
         success: false,
         message: `Please enter a valid ${currentMeta.apiKeyLabel || 'API Token'} before testing the connection.`,
       });
+      testTimerRef.current = window.setTimeout(() => setTestButtonState('idle'), 2000);
       return;
     }
 
     setIsTesting(true);
+    setTestButtonState('testing');
     setTestResult(null);
 
     try {
@@ -423,13 +455,15 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
       setIsTesting(false);
 
       if (res.ok && data && data.success) {
+        setTestButtonState('connected');
         setTestResult({
           success: true,
           message:
             data.message ||
-            `Connected to ${currentChannel.name} (${currentChannel.environment === 'staging' ? 'Staging' : 'Production'}) successfully!`,
+            `Connected to ${currentChannel.name} (${currentChannel.environment === 'staging' ? 'Staging' : 'Production'}) successfully.`,
         });
       } else {
+        setTestButtonState('failed');
         setTestResult({
           success: false,
           message:
@@ -439,10 +473,15 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
       }
     } catch (err: any) {
       setIsTesting(false);
+      setTestButtonState('failed');
       setTestResult({
         success: false,
         message: `Network error while testing connection to ${currentChannel.name}: ${err?.message || 'Unable to reach server'}.`,
       });
+    } finally {
+      testTimerRef.current = window.setTimeout(() => {
+        setTestButtonState('idle');
+      }, 2000);
     }
   };
 
@@ -541,46 +580,49 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  const getChannelStatus = (ch: ShippingChannelConfig): { status: IntegrationConnectionStatus; label: string } => {
+    const isActive = isChannelActive(ch);
+    const isConfigured = Boolean(ch.apiKey && ch.apiKey.trim().length > 0);
+    if (ch.id === currentChannel?.id) {
+      if (saveButtonState === 'saving') return { status: 'saving', label: 'Saving' };
+      if (isTesting || testButtonState === 'testing') return { status: 'testing', label: 'Testing' };
+      if (testResult && !testResult.success) return { status: 'error', label: 'Error' };
+      if (testResult && testResult.success) return { status: 'connected', label: 'Connected' };
+    }
+    if (isActive && isConfigured) return { status: 'connected', label: 'Connected' };
+    if (isActive) return { status: 'connected', label: 'Active' };
+    if (ch.enabled === false) return { status: 'disconnected', label: 'Disconnected' };
+    if (!isConfigured) return { status: 'setup', label: 'Needs Setup' };
+    return { status: 'inactive', label: 'Inactive' };
+  };
+
   return (
-    <div className="space-y-6 text-slate-800">
-      {/* Toast Notification */}
+    <div className="space-y-5 text-slate-800">
+      {/* Important Status Notice (add / delete / errors) */}
       {notification && (
-        <div
-          className={`p-3.5 rounded-lg border text-[14px] flex items-center justify-between transition-all ${
-            notification.type === 'success'
-              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-              : notification.type === 'error'
-              ? 'bg-rose-50 border-rose-200 text-rose-900'
-              : 'bg-slate-50 border-slate-200 text-slate-900'
-          }`}
-        >
-          <span>{notification.text}</span>
-          <button
-            type="button"
-            onClick={() => setNotification(null)}
-            className="text-slate-500 hover:text-slate-800 p-1 cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+        <InlineActionFeedback
+          type={notification.type === 'error' ? 'error' : 'success'}
+          message={notification.text}
+          onDismiss={() => setNotification(null)}
+        />
       )}
 
-      {/* 2. COURIER CHANNELS SECTION */}
+      {/* 1. COURIER CHANNELS LIST */}
       <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
-            <h3 className="text-base font-semibold text-slate-900">Courier Channels</h3>
+            <h3 className="text-sm font-semibold text-slate-900">Courier Channels</h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              Add and manage your shipping partners. Only one courier can be active for new orders.
+              Select a logistics partner to configure API credentials and pickup settings.
             </p>
           </div>
 
           <button
             type="button"
             onClick={() => setIsAddCourierOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer self-start sm:self-auto"
+            className="h-9 inline-flex items-center gap-1.5 px-3.5 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer self-start sm:self-auto whitespace-nowrap"
           >
-            <Plus className="w-4 h-4" />
+            <Plus className="w-3.5 h-3.5" />
             <span>Add Courier</span>
           </button>
         </div>
@@ -589,12 +631,12 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
         {channels.length === 0 ? (
           <div className="rounded-lg border border-dashed border-slate-300 p-6 text-center space-y-2.5 bg-slate-50/50">
             <p className="text-xs font-medium text-slate-600">
-              No courier channels configured. Add a shipping partner to enable live AWB &amp; shipment creation.
+              No courier channels configured. Add a shipping partner to enable AWB and shipment creation.
             </p>
             <button
               type="button"
               onClick={() => setIsAddCourierOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer"
+              className="h-9 inline-flex items-center gap-1.5 px-3.5 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Add Courier</span>
@@ -605,7 +647,7 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
             {channels.map((ch) => {
               const isActive = isChannelActive(ch);
               const isSelected = ch.id === selectedChannelId;
-              const isConfigured = Boolean(ch.apiKey && ch.apiKey.trim().length > 0);
+              const badge = getChannelStatus(ch);
 
               return (
                 <div
@@ -613,6 +655,9 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
                   onClick={() => {
                     setSelectedChannelId(ch.id);
                     setTestResult(null);
+                    setSaveError(null);
+                    setTestButtonState('idle');
+                    setSaveButtonState('idle');
                   }}
                   className={`p-3.5 rounded-lg border transition cursor-pointer flex flex-col justify-between ${
                     isSelected
@@ -620,41 +665,24 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
                       : 'border-slate-200 hover:border-slate-300 bg-white'
                   }`}
                 >
-                  <div>
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <div className="w-7 h-7 rounded bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
-                          <Truck className="w-3.5 h-3.5" />
-                        </div>
-                        <div>
-                          <h4 className="text-sm font-semibold text-slate-900 line-clamp-1">{ch.name}</h4>
-                          <p className="text-[11px] text-slate-400 capitalize">{ch.provider}</p>
-                        </div>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-7 h-7 rounded-md bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
+                        <Truck className="w-3.5 h-3.5" />
                       </div>
-
-                      {/* Status Badge */}
-                      {isActive ? (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 shrink-0">
-                          ACTIVE
-                        </span>
-                      ) : ch.enabled === false ? (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-rose-50 text-rose-700 border border-rose-200 shrink-0">
-                          DEACTIVATED
-                        </span>
-                      ) : !isConfigured ? (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-200 shrink-0">
-                          NEEDS SETUP
-                        </span>
-                      ) : (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-medium text-slate-500 bg-slate-100 shrink-0">
-                          INACTIVE
-                        </span>
-                      )}
+                      <div className="min-w-0">
+                        <h4 className="text-xs font-semibold text-slate-900 truncate">{ch.name}</h4>
+                        <p className="text-[11px] text-slate-500 capitalize truncate">
+                          {ch.provider} · {ch.environment === 'staging' ? 'Staging' : 'Production'}
+                        </p>
+                      </div>
                     </div>
+
+                    <IntegrationStatusIndicator status={badge.status} label={badge.label} />
                   </div>
 
                   {/* Card Actions */}
-                  <div className="pt-3 mt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+                  <div className="pt-2.5 mt-3 border-t border-slate-100 flex items-center justify-between text-xs">
                     <div className="flex items-center gap-3">
                       {isActive ? (
                         <button
@@ -663,7 +691,7 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
                             e.stopPropagation();
                             handleDeactivate(ch.id);
                           }}
-                          className="text-amber-700 hover:text-amber-900 font-semibold cursor-pointer"
+                          className="text-amber-700 hover:text-amber-900 font-medium cursor-pointer"
                         >
                           Deactivate
                         </button>
@@ -674,7 +702,7 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
                             e.stopPropagation();
                             handleMakeActive(ch.id);
                           }}
-                          className="text-emerald-700 hover:text-emerald-900 font-semibold cursor-pointer"
+                          className="text-emerald-700 hover:text-emerald-900 font-medium cursor-pointer"
                         >
                           Activate
                         </button>
@@ -684,10 +712,12 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
                         onClick={(e) => {
                           e.stopPropagation();
                           setSelectedChannelId(ch.id);
+                          setTestResult(null);
+                          setSaveError(null);
                         }}
                         className="text-slate-600 hover:text-slate-900 cursor-pointer"
                       >
-                        Edit
+                        Configure
                       </button>
                     </div>
 
@@ -697,7 +727,7 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
                         e.stopPropagation();
                         handleDeleteClick(ch);
                       }}
-                      className="text-slate-400 hover:text-rose-600 cursor-pointer p-1"
+                      className="text-slate-400 hover:text-rose-600 cursor-pointer p-1 rounded"
                       title="Delete Courier"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -710,478 +740,392 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
         )}
       </div>
 
-      {/* 3. COURIER CONFIGURATION SECTION */}
-      {currentChannel && (
-        <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-5">
-          {/* Header */}
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-4 border-b border-slate-100">
-            <div className="flex items-center gap-2.5">
-              <h3 className="text-base font-semibold text-slate-900">{currentChannel.name}</h3>
-              {isChannelActive(currentChannel) ? (
-                <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                  ACTIVE
-                </span>
-              ) : currentChannel.enabled === false ? (
-                <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-rose-50 text-rose-700 border border-rose-200">
-                  DEACTIVATED
-                </span>
-              ) : (
-                <span className="px-2 py-0.5 rounded text-[11px] font-medium text-slate-500 bg-slate-100">
-                  INACTIVE
-                </span>
-              )}
-            </div>
+      {/* 2. SELECTED COURIER CONFIGURATION SECTION */}
+      {currentChannel && (() => {
+        const headerBadge = getChannelStatus(currentChannel);
+        return (
+          <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-5">
+            {/* Compact Integration Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-4 border-b border-slate-100">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="text-sm font-semibold text-slate-900">{currentChannel.name}</h3>
+                  <IntegrationStatusIndicator status={headerBadge.status} label={headerBadge.label} />
+                  {currentChannel.provider === 'delhivery' && (
+                    <IntegrationInfoTip text="Copy your API Token from Delhivery One → Settings → API Setup and match your exact case-sensitive Warehouse Hub Name." />
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5 capitalize">
+                  {currentMeta.label} · {currentChannel.environment === 'staging' ? 'Sandbox / Staging' : 'Live Production'}
+                </p>
+              </div>
 
-            <div className="flex items-center gap-2 self-start sm:self-auto">
-              <button
-                type="button"
-                onClick={handleTestConnection}
-                disabled={isTesting}
-                className="px-3.5 py-1.5 border border-slate-300 hover:border-slate-900 bg-white text-slate-800 text-xs font-semibold rounded-lg transition cursor-pointer disabled:opacity-50"
-              >
-                {isTesting ? 'Testing Connection...' : 'Test Connection'}
-              </button>
-              {isChannelActive(currentChannel) ? (
-                <button
-                  type="button"
-                  onClick={() => handleDeactivate(currentChannel.id)}
-                  className="px-3 py-1.5 border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-medium rounded-lg transition cursor-pointer"
-                >
-                  Deactivate
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => handleMakeActive(currentChannel.id)}
-                  className="px-3 py-1.5 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer"
-                >
-                  Activate
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Test connection feedback (Top) */}
-          {isTesting && (
-            <div className="p-3 rounded-lg text-xs bg-slate-50 text-slate-700 border border-slate-200 flex items-center gap-2 font-medium">
-              <span className="w-2 h-2 rounded-full bg-slate-900 animate-ping shrink-0" />
-              <span>Connecting to {currentChannel.name} API server and verifying credentials...</span>
-            </div>
-          )}
-          {testResult && (
-            <div
-              className={`p-3.5 rounded-lg text-xs flex items-start justify-between gap-3 ${
-                testResult.success
-                  ? 'bg-emerald-50 text-emerald-900 border border-emerald-200 font-medium'
-                  : 'bg-rose-50 text-rose-900 border border-rose-200 font-medium'
-              }`}
-            >
-              <div className="flex items-start gap-2">
-                {testResult.success ? (
-                  <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                ) : (
-                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <div className="flex items-center gap-2 shrink-0 self-start sm:self-center">
+                {currentChannel.provider === 'delhivery' && (
+                  <a
+                    href="https://one.delhivery.com/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="h-8 px-2.5 border border-slate-200 hover:border-slate-300 bg-white text-slate-600 hover:text-slate-900 text-xs font-medium rounded-lg inline-flex items-center gap-1 transition whitespace-nowrap"
+                  >
+                    <span>Delhivery One</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
                 )}
-                <span>{testResult.message}</span>
+                {isChannelActive(currentChannel) ? (
+                  <button
+                    type="button"
+                    onClick={() => handleDeactivate(currentChannel.id)}
+                    className="h-8 px-3 border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-medium rounded-lg transition cursor-pointer whitespace-nowrap"
+                  >
+                    Deactivate
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleMakeActive(currentChannel.id)}
+                    className="h-8 px-3 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-medium rounded-lg transition cursor-pointer whitespace-nowrap"
+                  >
+                    Activate
+                  </button>
+                )}
               </div>
-              <button
-                type="button"
-                onClick={() => setTestResult(null)}
-                className="text-slate-500 hover:text-slate-800 p-0.5 cursor-pointer shrink-0"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
             </div>
-          )}
 
-          {/* Delhivery B2C Setup Checklist */}
-          {currentChannel.provider === 'delhivery' && (
-            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs text-slate-700">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-slate-900">Delhivery One B2C Setup Checklist</span>
-                <a
-                  href="https://one.delhivery.com/"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-700 hover:text-slate-950 underline"
-                >
-                  <span>Open Delhivery One</span>
-                  <ExternalLink className="w-3 h-3" />
-                </a>
-              </div>
-              <ol className="list-decimal list-inside space-y-1 text-[11px] text-slate-600 leading-relaxed">
-                <li>
-                  In <strong>Delhivery One -&gt; Settings -&gt; API Setup</strong>, copy your <strong>API Token</strong> (use Sandbox token if testing in Staging mode, Live token for Production).
-                </li>
-                <li>
-                  Copy your exact <strong>Registered Warehouse / Pickup Location Name</strong> (case-sensitive, e.g. <code className="px-1 py-0.5 bg-white border border-slate-200 rounded">REDMODE B2C</code>) and <strong>Client Name</strong> from Delhivery One -&gt; Pickups / Warehouses.
-                </li>
-                <li>
-                  Click <strong>Test Connection</strong> to verify token authentication &amp; pincode serviceability, then click <strong>Save Changes</strong> and <strong>Activate</strong>.
-                </li>
-                <li>
-                  Once Active, clicking <strong>Accept -&gt; RTD</strong> or <strong>Dispatch</strong> manifests real official AWBs with Delhivery CMU API for 4x6 thermal labels.
-                </li>
-              </ol>
-            </div>
-          )}
-
-          {/* Form Groups */}
-          <div className="space-y-5">
-            {/* Group 1: General & API Credentials */}
-            <div className="space-y-3">
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                API Credentials
-              </h4>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Courier / Channel Display Name
-                  </label>
-                  <input
-                    type="text"
-                    value={currentChannel.name}
-                    onChange={(e) => handleFieldChange('name', e.target.value)}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    API Base URL
-                  </label>
-                  <input
-                    type="text"
-                    value={currentChannel.apiBaseUrl || currentMeta.apiBaseUrl}
-                    onChange={(e) => handleFieldChange('apiBaseUrl', e.target.value)}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 font-mono transition"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    {currentMeta.apiKeyLabel}
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={showApiKey ? 'text' : 'password'}
-                      value={currentChannel.apiKey}
-                      onChange={(e) => handleFieldChange('apiKey', e.target.value)}
-                      placeholder={currentMeta.apiKeyPlaceholder}
-                      className="w-full px-3 py-2 pr-9 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 font-mono transition"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowApiKey(!showApiKey)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
-                    >
-                      {showApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
-                </div>
-
-                {currentMeta.clientIdLabel && (
+            {/* Form Groups */}
+            <div className="space-y-5">
+              {/* Group 1: API Credentials */}
+              <div className="space-y-3">
+                <h4 className="text-xs font-semibold text-slate-700">API Credentials</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs font-medium text-slate-700 mb-1">
-                      {currentMeta.clientIdLabel}
+                    <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                      Courier Display Name
                     </label>
                     <input
                       type="text"
-                      value={currentChannel.clientId || ''}
-                      onChange={(e) => handleFieldChange('clientId', e.target.value)}
-                      placeholder={currentMeta.clientIdPlaceholder}
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition"
+                      value={currentChannel.name}
+                      onChange={(e) => handleFieldChange('name', e.target.value)}
+                      className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
                     />
                   </div>
-                )}
 
-                {currentMeta.apiSecretLabel && (
                   <div>
-                    <label className="block text-xs font-medium text-slate-700 mb-1">
-                      {currentMeta.apiSecretLabel}
+                    <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                      API Base URL
+                    </label>
+                    <input
+                      type="text"
+                      value={currentChannel.apiBaseUrl || currentMeta.apiBaseUrl}
+                      onChange={(e) => handleFieldChange('apiBaseUrl', e.target.value)}
+                      className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 font-mono transition"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                      {currentMeta.apiKeyLabel}
                     </label>
                     <div className="relative">
                       <input
-                        type={showApiSecret ? 'text' : 'password'}
-                        value={currentChannel.apiSecret || ''}
-                        onChange={(e) => handleFieldChange('apiSecret', e.target.value)}
-                        placeholder={currentMeta.apiSecretPlaceholder}
-                        className="w-full px-3 py-2 pr-9 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 font-mono transition"
+                        type={showApiKey ? 'text' : 'password'}
+                        value={currentChannel.apiKey}
+                        onChange={(e) => handleFieldChange('apiKey', e.target.value)}
+                        placeholder={currentMeta.apiKeyPlaceholder}
+                        autoComplete="off"
+                        className="w-full h-9 px-3 pr-9 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 font-mono transition"
                       />
                       <button
                         type="button"
-                        onClick={() => setShowApiSecret(!showApiSecret)}
-                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                        onClick={() => setShowApiKey(!showApiKey)}
+                        aria-label={showApiKey ? 'Hide API key' : 'Show API key'}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer p-0.5"
                       >
-                        {showApiSecret ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        {showApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                       </button>
                     </div>
                   </div>
-                )}
 
-                {/* Custom Courier Extra Fields */}
-                {currentChannel.provider === 'custom' && (
-                  <>
+                  {currentMeta.clientIdLabel && (
                     <div>
-                      <label className="block text-xs font-medium text-slate-700 mb-1">
-                        Authentication Type
-                      </label>
-                      <select
-                        value={currentChannel.authType || 'Bearer'}
-                        onChange={(e) => handleFieldChange('authType', e.target.value)}
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition"
-                      >
-                        <option value="Bearer">Bearer Token (Authorization: Bearer ...)</option>
-                        <option value="ApiKeyHeader">API Key Header (x-api-key)</option>
-                        <option value="BasicAuth">Basic Auth</option>
-                        <option value="Custom">Custom Headers Only</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-medium text-slate-700 mb-1">
-                        AWB Generation Endpoint (Optional)
+                      <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                        {currentMeta.clientIdLabel}
                       </label>
                       <input
                         type="text"
-                        value={currentChannel.awbEndpoint || ''}
-                        onChange={(e) => handleFieldChange('awbEndpoint', e.target.value)}
-                        placeholder="/api/v1/generate-awb"
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 font-mono transition"
+                        value={currentChannel.clientId || ''}
+                        onChange={(e) => handleFieldChange('clientId', e.target.value)}
+                        placeholder={currentMeta.clientIdPlaceholder}
+                        className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
                       />
                     </div>
+                  )}
 
+                  {currentMeta.apiSecretLabel && (
                     <div>
-                      <label className="block text-xs font-medium text-slate-700 mb-1">
-                        Shipment Creation Endpoint (Optional)
+                      <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                        {currentMeta.apiSecretLabel}
                       </label>
-                      <input
-                        type="text"
-                        value={currentChannel.shipmentEndpoint || ''}
-                        onChange={(e) => handleFieldChange('shipmentEndpoint', e.target.value)}
-                        placeholder="/api/v1/shipments/create"
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 font-mono transition"
-                      />
+                      <div className="relative">
+                        <input
+                          type={showApiSecret ? 'text' : 'password'}
+                          value={currentChannel.apiSecret || ''}
+                          onChange={(e) => handleFieldChange('apiSecret', e.target.value)}
+                          placeholder={currentMeta.apiSecretPlaceholder}
+                          autoComplete="off"
+                          className="w-full h-9 px-3 pr-9 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 font-mono transition"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowApiSecret(!showApiSecret)}
+                          aria-label={showApiSecret ? 'Hide API secret' : 'Show API secret'}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer p-0.5"
+                        >
+                          {showApiSecret ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
                     </div>
+                  )}
 
-                    <div>
-                      <label className="block text-xs font-medium text-slate-700 mb-1">
-                        Custom Headers (JSON)
-                      </label>
-                      <input
-                        type="text"
-                        value={currentChannel.customHeaders || ''}
-                        onChange={(e) => handleFieldChange('customHeaders', e.target.value)}
-                        placeholder='{"X-Merchant-Id": "123"}'
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 font-mono transition"
-                      />
-                    </div>
-                  </>
-                )}
+                  {/* Custom Courier Extra Fields */}
+                  {currentChannel.provider === 'custom' && (
+                    <>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                          Authentication Type
+                        </label>
+                        <select
+                          value={currentChannel.authType || 'Bearer'}
+                          onChange={(e) => handleFieldChange('authType', e.target.value)}
+                          className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
+                        >
+                          <option value="Bearer">Bearer Token (Authorization: Bearer ...)</option>
+                          <option value="ApiKeyHeader">API Key Header (x-api-key)</option>
+                          <option value="BasicAuth">Basic Auth</option>
+                          <option value="Custom">Custom Headers Only</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                          AWB Generation Endpoint (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          value={currentChannel.awbEndpoint || ''}
+                          onChange={(e) => handleFieldChange('awbEndpoint', e.target.value)}
+                          placeholder="/api/v1/generate-awb"
+                          className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 font-mono transition"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                          Shipment Creation Endpoint (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          value={currentChannel.shipmentEndpoint || ''}
+                          onChange={(e) => handleFieldChange('shipmentEndpoint', e.target.value)}
+                          placeholder="/api/v1/shipments/create"
+                          className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 font-mono transition"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                          Custom Headers (JSON)
+                        </label>
+                        <input
+                          type="text"
+                          value={currentChannel.customHeaders || ''}
+                          onChange={(e) => handleFieldChange('customHeaders', e.target.value)}
+                          placeholder='{"X-Merchant-Id": "123"}'
+                          className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 font-mono transition"
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Group 2: Tracking & Shipping Preferences */}
+              <div className="space-y-3 pt-4 border-t border-slate-100">
+                <h4 className="text-xs font-semibold text-slate-700">Tracking &amp; Shipping</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="md:col-span-2">
+                    <label className="flex items-center gap-1.5 text-xs font-medium text-slate-700 mb-1.5">
+                      <span>Tracking URL Template</span>
+                      <IntegrationInfoTip text="Use {{awb}} as the placeholder for the airway bill number." />
+                    </label>
+                    <input
+                      type="text"
+                      value={currentChannel.trackingUrlTemplate || currentMeta.trackingUrlTemplate}
+                      onChange={(e) => handleFieldChange('trackingUrlTemplate', e.target.value)}
+                      placeholder="https://.../track/{{awb}}"
+                      className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 font-mono transition"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                      Default Shipping Service
+                    </label>
+                    <select
+                      value={currentChannel.shippingMode || 'Surface'}
+                      onChange={(e) => handleFieldChange('shippingMode', e.target.value)}
+                      className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
+                    >
+                      <option value="Surface">Surface Logistics (Economical)</option>
+                      <option value="Express">Express Air (Priority 24-48h)</option>
+                      <option value="Standard">Standard Courier</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                      API Environment
+                    </label>
+                    <select
+                      value={currentChannel.environment || 'production'}
+                      onChange={(e) => handleFieldChange('environment', e.target.value)}
+                      className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
+                    >
+                      <option value="production">Live Production</option>
+                      <option value="staging">Sandbox / Staging</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                      COD Remittance Cycle
+                    </label>
+                    <select
+                      value={currentChannel.codRemittanceCycle || 'T+2'}
+                      onChange={(e) => handleFieldChange('codRemittanceCycle', e.target.value)}
+                      className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
+                    >
+                      <option value="T+2">T+2 Daily Remittance</option>
+                      <option value="Weekly">Weekly Friday Remittance</option>
+                      <option value="Bi-Weekly">Bi-Weekly Remittance</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Group 3: Pickup / Warehouse */}
+              <div className="space-y-3 pt-4 border-t border-slate-100">
+                <h4 className="text-xs font-semibold text-slate-700">Pickup Warehouse</h4>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                      Warehouse Hub Name
+                    </label>
+                    <input
+                      type="text"
+                      value={currentChannel.warehouseName || 'REDMODE B2C'}
+                      onChange={(e) => handleFieldChange('warehouseName', e.target.value)}
+                      className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                      Pickup Pincode
+                    </label>
+                    <input
+                      type="text"
+                      value={currentChannel.pickupPincode || '250002'}
+                      onChange={(e) => handleFieldChange('pickupPincode', e.target.value)}
+                      maxLength={6}
+                      className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                      Rider Contact Phone
+                    </label>
+                    <input
+                      type="text"
+                      value={currentChannel.pickupPhone || '7302797464'}
+                      onChange={(e) => handleFieldChange('pickupPhone', e.target.value)}
+                      maxLength={10}
+                      className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
+                    />
+                  </div>
+
+                  <div className="md:col-span-3">
+                    <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                      Full Warehouse Address
+                    </label>
+                    <input
+                      type="text"
+                      value={
+                        currentChannel.pickupAddress ||
+                        '1807 , ZAKIR HUSSAIN COLONY MEERUT NEAR MADINA MASJID , Meerut, Uttar Pradesh ,India 250002'
+                      }
+                      onChange={(e) => handleFieldChange('pickupAddress', e.target.value)}
+                      className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
+                    />
+                  </div>
+                </div>
               </div>
             </div>
 
-            {/* Group 2: Tracking */}
-            <div className="space-y-3 pt-3 border-t border-slate-100">
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                Tracking
-              </h4>
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Tracking URL Template
-                </label>
-                <input
-                  type="text"
-                  value={currentChannel.trackingUrlTemplate || currentMeta.trackingUrlTemplate}
-                  onChange={(e) => handleFieldChange('trackingUrlTemplate', e.target.value)}
-                  placeholder="https://.../track/{{awb}}"
-                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 font-mono transition"
+            {/* Consistent Bottom-Right Action Row */}
+            <div className="pt-4 border-t border-slate-100 space-y-3">
+              <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => handleDeleteClick(currentChannel)}
+                  className="inline-flex items-center gap-1.5 text-rose-600 hover:text-rose-700 text-xs font-medium transition cursor-pointer self-start sm:self-auto"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Delete Courier</span>
+                </button>
+
+                <div className="flex items-center justify-end gap-2.5 flex-wrap">
+                  <TestConnectionButton
+                    state={testButtonState}
+                    onClick={handleTestConnection}
+                  />
+                  <SaveChangesButton
+                    state={saveButtonState}
+                    onClick={handleSaveChanges}
+                  />
+                </div>
+              </div>
+
+              {saveError && (
+                <InlineActionFeedback
+                  type="error"
+                  message={saveError}
+                  onDismiss={() => setSaveError(null)}
                 />
-                <p className="text-[11px] text-slate-400 mt-1">
-                  Use {'{{awb}}'} as the placeholder for the airway bill number.
-                </p>
-              </div>
-            </div>
+              )}
 
-            {/* Group 3: Pickup / Warehouse */}
-            <div className="space-y-3 pt-3 border-t border-slate-100">
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                Pickup / Warehouse
-              </h4>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Warehouse Hub Name
-                  </label>
-                  <input
-                    type="text"
-                    value={currentChannel.warehouseName || 'REDMODE B2C'}
-                    onChange={(e) => handleFieldChange('warehouseName', e.target.value)}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition"
-                  />
-                </div>
+              {testResult && !testResult.success && (
+                <InlineActionFeedback
+                  type="error"
+                  message={testResult.message}
+                  onDismiss={() => setTestResult(null)}
+                />
+              )}
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Pickup Pincode
-                  </label>
-                  <input
-                    type="text"
-                    value={currentChannel.pickupPincode || '250002'}
-                    onChange={(e) => handleFieldChange('pickupPincode', e.target.value)}
-                    maxLength={6}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Rider Contact Phone
-                  </label>
-                  <input
-                    type="text"
-                    value={currentChannel.pickupPhone || '7302797464'}
-                    onChange={(e) => handleFieldChange('pickupPhone', e.target.value)}
-                    maxLength={10}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition"
-                  />
-                </div>
-
-                <div className="md:col-span-3">
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Full Warehouse Address
-                  </label>
-                  <input
-                    type="text"
-                    value={
-                      currentChannel.pickupAddress ||
-                      '1807 , ZAKIR HUSSAIN COLONY MEERUT NEAR MADINA MASJID , Meerut, Uttar Pradesh ,India 250002'
-                    }
-                    onChange={(e) => handleFieldChange('pickupAddress', e.target.value)}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition"
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* Group 4: Shipping Preferences */}
-            <div className="space-y-3 pt-3 border-t border-slate-100">
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                Shipping
-              </h4>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Default Shipping Service
-                  </label>
-                  <select
-                    value={currentChannel.shippingMode || 'Surface'}
-                    onChange={(e) => handleFieldChange('shippingMode', e.target.value)}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition"
-                  >
-                    <option value="Surface">Surface Logistics (Economical)</option>
-                    <option value="Express">Express Air (Priority 24-48h)</option>
-                    <option value="Standard">Standard Courier</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    API Environment
-                  </label>
-                  <select
-                    value={currentChannel.environment || 'production'}
-                    onChange={(e) => handleFieldChange('environment', e.target.value)}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition"
-                  >
-                    <option value="production">Live Production</option>
-                    <option value="staging">Sandbox / Staging</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    COD Remittance Cycle
-                  </label>
-                  <select
-                    value={currentChannel.codRemittanceCycle || 'T+2'}
-                    onChange={(e) => handleFieldChange('codRemittanceCycle', e.target.value)}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition"
-                  >
-                    <option value="T+2">T+2 Daily Remittance</option>
-                    <option value="Weekly">Weekly Friday Remittance</option>
-                    <option value="Bi-Weekly">Bi-Weekly Remittance</option>
-                  </select>
-                </div>
-              </div>
+              {testResult && testResult.success && (
+                <InlineActionFeedback
+                  type="success"
+                  message={testResult.message}
+                  onDismiss={() => setTestResult(null)}
+                />
+              )}
             </div>
           </div>
-
-          {/* Test connection feedback (Bottom, right above the Test Connection button) */}
-          {isTesting && (
-            <div className="p-3 rounded-lg text-xs bg-slate-50 text-slate-700 border border-slate-200 flex items-center gap-2 font-medium">
-              <span className="w-2 h-2 rounded-full bg-slate-900 animate-ping shrink-0" />
-              <span>Connecting to {currentChannel.name} API server and verifying credentials...</span>
-            </div>
-          )}
-          {testResult && (
-            <div
-              className={`p-3.5 rounded-lg text-xs flex items-start justify-between gap-3 ${
-                testResult.success
-                  ? 'bg-emerald-50 text-emerald-900 border border-emerald-200 font-medium'
-                  : 'bg-rose-50 text-rose-900 border border-rose-200 font-medium'
-              }`}
-            >
-              <div className="flex items-start gap-2">
-                {testResult.success ? (
-                  <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                ) : (
-                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                )}
-                <span>{testResult.message}</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setTestResult(null)}
-                className="text-slate-500 hover:text-slate-800 p-0.5 cursor-pointer shrink-0"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
-
-          {/* Bottom Actions */}
-          <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleTestConnection}
-                disabled={isTesting}
-                className="px-3.5 py-2 border border-slate-300 hover:border-slate-900 bg-white text-slate-800 text-xs font-semibold rounded-lg transition cursor-pointer disabled:opacity-50"
-              >
-                {isTesting ? 'Testing Connection...' : 'Test Connection'}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleDeleteClick(currentChannel)}
-                className="px-3 py-2 text-rose-600 hover:text-rose-700 text-xs font-medium transition cursor-pointer"
-              >
-                Delete Courier
-              </button>
-            </div>
-
-            <button
-              type="button"
-              onClick={handleSaveChanges}
-              className="px-4 py-2 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 self-end sm:self-auto"
-            >
-              <Check className="w-3.5 h-3.5" />
-              <span>Save Changes</span>
-            </button>
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* 4. SCHEDULE DELHIVERY PICKUP SECTION */}
       {currentChannel && currentChannel.provider === 'delhivery' && (
@@ -1190,28 +1134,28 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
             <div>
               <h4 className="text-sm font-semibold text-slate-900">Schedule Delhivery Pickup</h4>
               <p className="text-xs text-slate-500 mt-0.5">
-                Request a Delhivery rider pickup for manifested RTD parcels at warehouse <strong>{currentChannel.warehouseName || 'REDMODE B2C'}</strong>.
+                Request a rider pickup for manifested parcels at warehouse <strong>{currentChannel.warehouseName || 'REDMODE B2C'}</strong>.
               </p>
             </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Pickup Date</label>
+              <label className="block text-xs font-medium text-slate-700 mb-1.5">Pickup Date</label>
               <input
                 type="date"
                 value={pickupDate}
                 onChange={(e) => setPickupDate(e.target.value)}
-                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900"
+                className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Time Slot</label>
+              <label className="block text-xs font-medium text-slate-700 mb-1.5">Time Slot</label>
               <select
                 value={pickupTime}
                 onChange={(e) => setPickupTime(e.target.value)}
-                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900"
+                className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
               >
                 <option value="11:00:00">Morning (11:00 AM - 02:00 PM)</option>
                 <option value="14:00:00">Afternoon (02:00 PM - 05:00 PM)</option>
@@ -1220,14 +1164,14 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Expected Packages</label>
+              <label className="block text-xs font-medium text-slate-700 mb-1.5">Expected Packages</label>
               <input
                 type="number"
                 min={1}
                 max={500}
                 value={expectedPackages}
                 onChange={(e) => setExpectedPackages(Math.max(1, Number(e.target.value) || 1))}
-                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900"
+                className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
               />
             </div>
 
@@ -1235,55 +1179,44 @@ export const UniversalLogisticsPanel: React.FC<UniversalLogisticsPanelProps> = (
               type="button"
               onClick={handleSchedulePickup}
               disabled={isSchedulingPickup}
-              className="px-4 py-2 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer disabled:opacity-50"
+              className="h-9 px-4 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer disabled:opacity-50"
             >
               {isSchedulingPickup ? 'Requesting Pickup...' : 'Request Pickup Now'}
             </button>
           </div>
 
           {pickupResult && (
-            <div
-              className={`p-3 rounded-lg text-xs flex items-start justify-between gap-2 ${
-                pickupResult.success
-                  ? 'bg-emerald-50 text-emerald-900 border border-emerald-200 font-medium'
-                  : 'bg-rose-50 text-rose-900 border border-rose-200 font-medium'
-              }`}
-            >
-              <span>{pickupResult.message}</span>
-              <button
-                type="button"
-                onClick={() => setPickupResult(null)}
-                className="text-slate-500 hover:text-slate-800 cursor-pointer shrink-0"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
+            <InlineActionFeedback
+              type={pickupResult.success ? 'success' : 'error'}
+              message={pickupResult.message}
+              onDismiss={() => setPickupResult(null)}
+            />
           )}
         </div>
       )}
 
       {/* 5. WEBHOOK COMPACT SECTION */}
-      <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-2">
-        <h4 className="text-sm font-semibold text-slate-900">Webhook Endpoint</h4>
+      <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-2.5">
+        <div className="flex items-center gap-1.5">
+          <h4 className="text-sm font-semibold text-slate-900">Webhook Endpoint</h4>
+          <IntegrationInfoTip text="Configure this URL in your courier partner dashboard to receive real-time shipment status updates." />
+        </div>
         <div className="flex items-center gap-2 max-w-2xl">
           <input
             type="text"
             readOnly
             value={webhookUrl}
-            className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-700 select-all"
+            className="flex-1 h-9 px-3 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-700 select-all"
           />
           <button
             type="button"
             onClick={handleCopyWebhook}
-            className="px-3.5 py-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 text-xs font-medium rounded-lg transition cursor-pointer shrink-0 flex items-center gap-1.5"
+            className="h-9 px-3.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 text-xs font-medium rounded-lg transition cursor-pointer shrink-0 inline-flex items-center gap-1.5"
           >
             {webhookCopied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
             <span>{webhookCopied ? 'Copied' : 'Copy'}</span>
           </button>
         </div>
-        <p className="text-xs text-slate-500">
-          Use this webhook in your courier partner dashboard to receive shipment status updates.
-        </p>
       </div>
 
       {/* MODAL 1: ADD COURIER PARTNER */}

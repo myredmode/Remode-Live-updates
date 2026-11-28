@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   CreditCard,
   Plus,
@@ -9,10 +9,18 @@ import {
   AlertTriangle,
   X,
   Copy,
-  Globe,
 } from 'lucide-react';
 import { useStore } from '../../context/StoreContext';
 import { PaymentGatewayConfig, PaymentGatewayProvider, PaymentMarketAudience } from '../../types';
+import {
+  IntegrationStatusIndicator,
+  SaveChangesButton,
+  TestConnectionButton,
+  InlineActionFeedback,
+  SaveButtonState,
+  TestButtonState,
+  IntegrationConnectionStatus,
+} from './IntegrationActionControls';
 
 interface UniversalPaymentPanelProps {
   onSaveNotification?: (msg: string) => void;
@@ -199,9 +207,22 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
   const [isAddGatewayOpen, setIsAddGatewayOpen] = useState<boolean>(false);
   const [gatewayToDelete, setGatewayToDelete] = useState<PaymentGatewayConfig | null>(null);
   const [isTesting, setIsTesting] = useState<boolean>(false);
+  const [testButtonState, setTestButtonState] = useState<TestButtonState>('idle');
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [saveButtonState, setSaveButtonState] = useState<SaveButtonState>('idle');
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [notification, setNotification] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
   const [webhookCopied, setWebhookCopied] = useState<boolean>(false);
+
+  const saveTimerRef = useRef<number | null>(null);
+  const testTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+      if (testTimerRef.current) window.clearTimeout(testTimerRef.current);
+    };
+  }, []);
 
   // Sync state if settings change externally (preserving empty arrays & explicit deactivated IDs)
   useEffect(() => {
@@ -385,7 +406,11 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
   };
 
   // Save changes
-  const handleSaveChanges = () => {
+  const handleSaveChanges = async () => {
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    setSaveButtonState('saving');
+    setSaveError(null);
+
     const cleaned = gateways.map((g) => ({
       ...g,
       name: (g.name || '').trim() || g.name,
@@ -395,41 +420,49 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
       merchantName: (g.merchantName || 'REDMODE').trim(),
     }));
     setGateways(cleaned);
-    updatePaymentGateways(cleaned, activeDomesticId, activeInternationalId);
-    setNotification({
-      type: 'success',
-      text: 'Payment gateway settings saved successfully.',
-    });
-    if (onSaveNotification) {
-      onSaveNotification('Payment gateway settings saved successfully.');
+
+    const result = await updatePaymentGateways(cleaned, activeDomesticId, activeInternationalId);
+    if (result?.success !== false) {
+      setSaveButtonState('saved');
+      saveTimerRef.current = window.setTimeout(() => {
+        setSaveButtonState('idle');
+      }, 2000);
+    } else {
+      setSaveButtonState('error');
+      setSaveError(result?.error || 'Failed to save payment gateway settings. Please try again.');
     }
-    setTimeout(() => setNotification(null), 3500);
   };
 
   // Test connection
   const handleTestConnection = async () => {
     if (!currentGateway) return;
+    if (testTimerRef.current) window.clearTimeout(testTimerRef.current);
 
     const cleanKey = cleanPaymentCredential(currentGateway.apiKey);
     const cleanSecret = cleanPaymentCredential(currentGateway.apiSecret);
 
     if (!cleanKey) {
+      setTestButtonState('failed');
       setTestResult({
         success: false,
         message: `Please enter your ${currentMeta.apiKeyLabel} before testing connection.`,
       });
+      testTimerRef.current = window.setTimeout(() => setTestButtonState('idle'), 2000);
       return;
     }
 
     if (currentGateway.provider !== 'upi_qr' && !cleanSecret) {
+      setTestButtonState('failed');
       setTestResult({
         success: false,
         message: `Please enter your ${currentMeta.apiSecretLabel} before testing connection.`,
       });
+      testTimerRef.current = window.setTimeout(() => setTestButtonState('idle'), 2000);
       return;
     }
 
     setIsTesting(true);
+    setTestButtonState('testing');
     setTestResult(null);
 
     const parseSafeJson = async (res: Response) => {
@@ -452,6 +485,9 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
     };
 
     try {
+      let ok = false;
+      let msg = '';
+
       if (currentGateway.provider === 'razorpay') {
         const res = await fetch('/api/payment/razorpay/test-keys', {
           method: 'POST',
@@ -463,13 +499,10 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
           }),
         });
         const data = await parseSafeJson(res);
-        setIsTesting(false);
-        setTestResult({
-          success: Boolean(res.ok && data?.success),
-          message:
-            data?.message ||
-            (res.ok ? 'Razorpay connection verified successfully!' : `Razorpay test failed (HTTP ${res.status}). Check Key ID and Secret.`),
-        });
+        ok = Boolean(res.ok && data?.success);
+        msg =
+          data?.message ||
+          (ok ? 'Razorpay connection verified successfully.' : `Razorpay test failed (HTTP ${res.status}). Check Key ID and Secret.`);
       } else if (currentGateway.provider === 'paypal') {
         const res = await fetch('/api/payment/paypal/test-keys', {
           method: 'POST',
@@ -482,13 +515,10 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
           }),
         });
         const data = await parseSafeJson(res);
-        setIsTesting(false);
-        setTestResult({
-          success: Boolean(res.ok && data?.success),
-          message:
-            data?.message ||
-            (res.ok ? 'PayPal Express International gateway verified successfully!' : `PayPal test failed (HTTP ${res.status}). Check Client ID and Secret.`),
-        });
+        ok = Boolean(res.ok && data?.success);
+        msg =
+          data?.message ||
+          (ok ? 'PayPal Express International gateway verified successfully.' : `PayPal test failed (HTTP ${res.status}). Check Client ID and Secret.`);
       } else {
         const res = await fetch('/api/payment/gateway/test', {
           method: 'POST',
@@ -502,20 +532,26 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
           }),
         });
         const data = await parseSafeJson(res);
-        setIsTesting(false);
-        setTestResult({
-          success: Boolean(res.ok && data?.success),
-          message:
-            data?.message ||
-            (res.ok ? `${currentGateway.name} validated successfully.` : `Gateway validation failed (HTTP ${res.status}).`),
-        });
+        ok = Boolean(res.ok && data?.success);
+        msg =
+          data?.message ||
+          (ok ? `${currentGateway.name} validated successfully.` : `Gateway validation failed (HTTP ${res.status}).`);
       }
+
+      setIsTesting(false);
+      setTestButtonState(ok ? 'connected' : 'failed');
+      setTestResult({ success: ok, message: msg });
     } catch (err: any) {
       setIsTesting(false);
+      setTestButtonState('failed');
       setTestResult({
         success: false,
         message: `Connection test failed for ${currentGateway.name}: ${err?.message || 'Unable to reach gateway endpoint.'}`,
       });
+    } finally {
+      testTimerRef.current = window.setTimeout(() => {
+        setTestButtonState('idle');
+      }, 2000);
     }
   };
 
@@ -553,46 +589,49 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  const getGatewayStatus = (g: PaymentGatewayConfig): { status: IntegrationConnectionStatus; label: string } => {
+    const isActive = isGatewayActive(g);
+    const isConfigured = Boolean(g.apiKey && g.apiKey.trim().length > 0);
+    if (g.id === currentGateway?.id) {
+      if (saveButtonState === 'saving') return { status: 'saving', label: 'Saving' };
+      if (isTesting || testButtonState === 'testing') return { status: 'testing', label: 'Testing' };
+      if (testResult && !testResult.success) return { status: 'error', label: 'Error' };
+      if (testResult && testResult.success) return { status: 'connected', label: 'Connected' };
+    }
+    if (isActive && isConfigured) return { status: 'connected', label: 'Connected' };
+    if (isActive) return { status: 'connected', label: 'Active' };
+    if (g.enabled === false) return { status: 'disconnected', label: 'Disconnected' };
+    if (!isConfigured) return { status: 'setup', label: 'Needs Setup' };
+    return { status: 'inactive', label: 'Inactive' };
+  };
+
   return (
-    <div className="space-y-6 text-slate-800">
-      {/* Toast Notification */}
+    <div className="space-y-5 text-slate-800">
+      {/* Important Status Notice (add / delete / errors) */}
       {notification && (
-        <div
-          className={`p-3.5 rounded-lg border text-[14px] flex items-center justify-between transition-all ${
-            notification.type === 'success'
-              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-              : notification.type === 'error'
-              ? 'bg-rose-50 border-rose-200 text-rose-900'
-              : 'bg-slate-50 border-slate-200 text-slate-900'
-          }`}
-        >
-          <span>{notification.text}</span>
-          <button
-            type="button"
-            onClick={() => setNotification(null)}
-            className="text-slate-500 hover:text-slate-800 p-1 cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+        <InlineActionFeedback
+          type={notification.type === 'error' ? 'error' : 'success'}
+          message={notification.text}
+          onDismiss={() => setNotification(null)}
+        />
       )}
 
-      {/* 1. PAYMENT GATEWAYS LIST SECTION (Exact match to Courier Channels) */}
+      {/* 1. PAYMENT GATEWAYS LIST SECTION */}
       <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
-            <h3 className="text-base font-semibold text-slate-900">Payment Gateways</h3>
+            <h3 className="text-sm font-semibold text-slate-900">Payment Gateways</h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              Add and manage your payment partners. Domestic orders route to Razorpay (UPI &amp; Cards), and export orders route to PayPal.
+              Manage domestic (India) and international export payment providers.
             </p>
           </div>
 
           <button
             type="button"
             onClick={() => setIsAddGatewayOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer self-start sm:self-auto"
+            className="h-9 inline-flex items-center gap-1.5 px-3.5 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer self-start sm:self-auto whitespace-nowrap"
           >
-            <Plus className="w-4 h-4" />
+            <Plus className="w-3.5 h-3.5" />
             <span>Add Gateway</span>
           </button>
         </div>
@@ -606,7 +645,7 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
             <button
               type="button"
               onClick={() => setIsAddGatewayOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer"
+              className="h-9 inline-flex items-center gap-1.5 px-3.5 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Add Gateway</span>
@@ -617,7 +656,7 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
             {gateways.map((g) => {
               const isActive = isGatewayActive(g);
               const isSelected = g.id === selectedGatewayId;
-              const isConfigured = Boolean(g.apiKey && g.apiKey.trim().length > 0);
+              const badge = getGatewayStatus(g);
 
               return (
                 <div
@@ -625,6 +664,9 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
                   onClick={() => {
                     setSelectedGatewayId(g.id);
                     setTestResult(null);
+                    setSaveError(null);
+                    setTestButtonState('idle');
+                    setSaveButtonState('idle');
                   }}
                   className={`p-3.5 rounded-lg border transition cursor-pointer flex flex-col justify-between ${
                     isSelected
@@ -632,49 +674,34 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
                       : 'border-slate-200 hover:border-slate-300 bg-white'
                   }`}
                 >
-                  <div>
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <div className="w-7 h-7 rounded bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
-                          {g.provider === 'paypal' ? (
-                            <span className="font-black text-xs text-[#003087]">PP</span>
-                          ) : g.provider === 'razorpay' ? (
-                            <span className="font-mono font-bold text-[10px] text-[#0c2340]">rzp</span>
-                          ) : (
-                            <CreditCard className="w-3.5 h-3.5" />
-                          )}
-                        </div>
-                        <div>
-                          <h4 className="text-sm font-semibold text-slate-900 line-clamp-1">{g.name}</h4>
-                          <p className="text-[11px] text-slate-400 capitalize">
-                            {g.targetMarket === 'international' ? 'PayPal • Export (Global)' : `${g.provider} • Domestic (India)`}
-                          </p>
-                        </div>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-7 h-7 rounded-md bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
+                        {g.provider === 'paypal' ? (
+                          <span className="font-black text-xs text-[#003087]">PP</span>
+                        ) : g.provider === 'razorpay' ? (
+                          <span className="font-mono font-bold text-[10px] text-[#0c2340]">rzp</span>
+                        ) : (
+                          <CreditCard className="w-3.5 h-3.5" />
+                        )}
                       </div>
-
-                      {/* Status Badge */}
-                      {isActive ? (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 shrink-0">
-                          ACTIVE
-                        </span>
-                      ) : g.enabled === false ? (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-rose-50 text-rose-700 border border-rose-200 shrink-0">
-                          DEACTIVATED
-                        </span>
-                      ) : !isConfigured ? (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-200 shrink-0">
-                          NEEDS SETUP
-                        </span>
-                      ) : (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-medium text-slate-500 bg-slate-100 shrink-0">
-                          INACTIVE
-                        </span>
-                      )}
+                      <div className="min-w-0">
+                        <h4 className="text-xs font-semibold text-slate-900 truncate">{g.name}</h4>
+                        <p className="text-[11px] text-slate-500 capitalize truncate">
+                          {g.targetMarket === 'international'
+                            ? 'Export (Global)'
+                            : g.targetMarket === 'both'
+                            ? 'Domestic & Export'
+                            : 'Domestic (India)'}
+                        </p>
+                      </div>
                     </div>
+
+                    <IntegrationStatusIndicator status={badge.status} label={badge.label} />
                   </div>
 
                   {/* Card Actions */}
-                  <div className="pt-3 mt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+                  <div className="pt-2.5 mt-3 border-t border-slate-100 flex items-center justify-between text-xs">
                     <div className="flex items-center gap-3">
                       {isActive ? (
                         <button
@@ -683,7 +710,7 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
                             e.stopPropagation();
                             handleDeactivate(g);
                           }}
-                          className="text-amber-700 hover:text-amber-900 font-semibold cursor-pointer"
+                          className="text-amber-700 hover:text-amber-900 font-medium cursor-pointer"
                         >
                           Deactivate
                         </button>
@@ -694,7 +721,7 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
                             e.stopPropagation();
                             handleMakeActive(g);
                           }}
-                          className="text-emerald-700 hover:text-emerald-900 font-semibold cursor-pointer"
+                          className="text-emerald-700 hover:text-emerald-900 font-medium cursor-pointer"
                         >
                           Activate
                         </button>
@@ -705,10 +732,11 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
                           e.stopPropagation();
                           setSelectedGatewayId(g.id);
                           setTestResult(null);
+                          setSaveError(null);
                         }}
                         className="text-slate-600 hover:text-slate-900 cursor-pointer"
                       >
-                        Edit
+                        Configure
                       </button>
                     </div>
 
@@ -718,7 +746,7 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
                         e.stopPropagation();
                         setGatewayToDelete(g);
                       }}
-                      className="text-slate-400 hover:text-rose-600 cursor-pointer p-1"
+                      className="text-slate-400 hover:text-rose-600 cursor-pointer p-1 rounded"
                       title="Delete Gateway"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -731,106 +759,77 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
         )}
       </div>
 
-      {/* 2. GATEWAY CONFIGURATION SECTION (Exact match to Courier Configuration) */}
-      {currentGateway && (
-        <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-5">
-          {/* Header */}
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-4 border-b border-slate-100">
-            <div className="flex items-center gap-2.5">
-              <h3 className="text-base font-semibold text-slate-900">{currentGateway.name}</h3>
-              {isGatewayActive(currentGateway) ? (
-                <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                  ACTIVE
-                </span>
-              ) : currentGateway.enabled === false ? (
-                <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-rose-50 text-rose-700 border border-rose-200">
-                  DEACTIVATED
-                </span>
-              ) : (
-                <span className="px-2 py-0.5 rounded text-[11px] font-medium text-slate-500 bg-slate-100">
-                  INACTIVE
-                </span>
-              )}
+      {/* 2. SELECTED GATEWAY CONFIGURATION SECTION */}
+      {currentGateway && (() => {
+        const headerBadge = getGatewayStatus(currentGateway);
+        return (
+          <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-5">
+            {/* Compact Integration Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-4 border-b border-slate-100">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="text-sm font-semibold text-slate-900">{currentGateway.name}</h3>
+                  <IntegrationStatusIndicator status={headerBadge.status} label={headerBadge.label} />
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {currentMeta.label} · {currentGateway.mode === 'live' ? 'Live Production' : 'Test / Sandbox'}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0 self-start sm:self-center">
+                {isGatewayActive(currentGateway) ? (
+                  <button
+                    type="button"
+                    onClick={() => handleDeactivate(currentGateway)}
+                    className="h-8 px-3 border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-medium rounded-lg transition cursor-pointer whitespace-nowrap"
+                  >
+                    Deactivate
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleMakeActive(currentGateway)}
+                    className="h-8 px-3 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-medium rounded-lg transition cursor-pointer whitespace-nowrap"
+                  >
+                    Activate
+                  </button>
+                )}
+              </div>
             </div>
 
-            <div className="flex items-center gap-2 self-start sm:self-auto">
-              {isGatewayActive(currentGateway) ? (
-                <button
-                  type="button"
-                  onClick={() => handleDeactivate(currentGateway)}
-                  className="px-3 py-1.5 border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-medium rounded-lg transition cursor-pointer"
-                >
-                  Deactivate
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => handleMakeActive(currentGateway)}
-                  className="px-3 py-1.5 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer"
-                >
-                  Activate
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Test connection feedback banner */}
-          {testResult && (
-            <div
-              className={`p-3 rounded-lg text-xs flex items-center justify-between ${
-                testResult.success
-                  ? 'bg-emerald-50 text-emerald-900 border border-emerald-200'
-                  : 'bg-rose-50 text-rose-900 border border-rose-200'
-              }`}
-            >
-              <span>{testResult.message}</span>
-              <button
-                type="button"
-                onClick={() => setTestResult(null)}
-                className="text-slate-500 hover:text-slate-800 p-0.5 cursor-pointer"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
-
-          {/* Form Groups */}
-          <div className="space-y-5">
-            {/* Group 1: General & API Credentials */}
+            {/* Form Groups */}
             <div className="space-y-3">
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                API Credentials
-              </h4>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+              <h4 className="text-xs font-semibold text-slate-700">API Credentials</h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Gateway / Channel Display Name
+                  <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                    Gateway Display Name
                   </label>
                   <input
                     type="text"
                     value={currentGateway.name}
                     onChange={(e) => handleFieldChange('name', e.target.value)}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition"
+                    className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Target Market / Audience
+                  <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                    Target Market
                   </label>
                   <select
                     value={currentGateway.targetMarket}
                     onChange={(e) => handleFieldChange('targetMarket', e.target.value as PaymentMarketAudience)}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition cursor-pointer"
+                    className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition cursor-pointer"
                   >
-                    <option value="domestic">🇮🇳 Domestic Only (India Buyers - UPI &amp; Cards)</option>
-                    <option value="international">🌐 International Only (Export / Non-Indian Buyers)</option>
-                    <option value="both">🌍 Global (Both Domestic &amp; Export)</option>
+                    <option value="domestic">Domestic Only (India — UPI &amp; Cards)</option>
+                    <option value="international">International Only (Export Buyers)</option>
+                    <option value="both">Global (Domestic &amp; Export)</option>
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                  <label className="block text-xs font-medium text-slate-700 mb-1.5">
                     {currentMeta.apiKeyLabel}
                   </label>
                   <input
@@ -838,12 +837,12 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
                     value={currentGateway.apiKey}
                     onChange={(e) => handleFieldChange('apiKey', e.target.value)}
                     placeholder={currentMeta.apiKeyPlaceholder}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 font-mono transition"
+                    className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 font-mono transition"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                  <label className="block text-xs font-medium text-slate-700 mb-1.5">
                     {currentMeta.apiSecretLabel}
                   </label>
                   <div className="relative">
@@ -852,12 +851,14 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
                       value={currentGateway.apiSecret || ''}
                       onChange={(e) => handleFieldChange('apiSecret', e.target.value)}
                       placeholder={currentMeta.apiSecretPlaceholder}
-                      className="w-full px-3 py-2 pr-9 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 font-mono transition"
+                      autoComplete="off"
+                      className="w-full h-9 px-3 pr-9 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 font-mono transition"
                     />
                     <button
                       type="button"
                       onClick={() => setShowSecret(!showSecret)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                      aria-label={showSecret ? 'Hide secret' : 'Show secret'}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer p-0.5"
                     >
                       {showSecret ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                     </button>
@@ -865,25 +866,25 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Merchant Name on Modal
+                  <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                    Merchant Name on Checkout
                   </label>
                   <input
                     type="text"
                     value={currentGateway.merchantName || 'REDMODE'}
                     onChange={(e) => handleFieldChange('merchantName', e.target.value)}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition"
+                    className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                  <label className="block text-xs font-medium text-slate-700 mb-1.5">
                     Environment Mode
                   </label>
                   <select
                     value={currentGateway.mode}
                     onChange={(e) => handleFieldChange('mode', e.target.value as 'test' | 'live')}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition cursor-pointer"
+                    className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition cursor-pointer"
                   >
                     <option value="test">Test / Sandbox Mode</option>
                     <option value="live">Production Live</option>
@@ -891,79 +892,97 @@ export const UniversalPaymentPanel: React.FC<UniversalPaymentPanelProps> = ({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                  <label className="block text-xs font-medium text-slate-700 mb-1.5">
                     Settlement Currency
                   </label>
                   <select
                     value={currentGateway.currency || 'INR'}
                     onChange={(e) => handleFieldChange('currency', e.target.value)}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 transition cursor-pointer"
+                    className="w-full h-9 px-3 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900/10 transition cursor-pointer"
                   >
-                    <option value="INR">INR (₹) - Indian Rupee</option>
-                    <option value="USD">USD ($) - US Dollar (Export)</option>
-                    <option value="EUR">EUR (€) - Euro (Export)</option>
-                    <option value="GBP">GBP (£) - British Pound</option>
-                    <option value="AED">AED (د.إ) - UAE Dirham</option>
+                    <option value="INR">INR (₹) — Indian Rupee</option>
+                    <option value="USD">USD ($) — US Dollar (Export)</option>
+                    <option value="EUR">EUR (€) — Euro (Export)</option>
+                    <option value="GBP">GBP (£) — British Pound</option>
+                    <option value="AED">AED (د.إ) — UAE Dirham</option>
                   </select>
                 </div>
               </div>
             </div>
-          </div>
 
-          {/* Bottom Actions */}
-          <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleTestConnection}
-                disabled={isTesting}
-                className="px-3.5 py-2 border border-slate-300 hover:border-slate-400 bg-white text-slate-800 text-xs font-medium rounded-lg transition cursor-pointer disabled:opacity-50"
-              >
-                {isTesting ? 'Testing...' : 'Test Connection'}
-              </button>
+            {/* Consistent Bottom-Right Action Row */}
+            <div className="pt-4 border-t border-slate-100 space-y-3">
+              <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => setGatewayToDelete(currentGateway)}
+                  className="inline-flex items-center gap-1.5 text-rose-600 hover:text-rose-700 text-xs font-medium transition cursor-pointer self-start sm:self-auto"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Delete Gateway</span>
+                </button>
 
-              <button
-                type="button"
-                onClick={() => setGatewayToDelete(currentGateway)}
-                className="px-3 py-2 text-rose-600 hover:text-rose-700 text-xs font-medium transition cursor-pointer"
-              >
-                Delete Gateway
-              </button>
+                <div className="flex items-center justify-end gap-2.5 flex-wrap">
+                  <TestConnectionButton
+                    state={testButtonState}
+                    onClick={handleTestConnection}
+                  />
+                  <SaveChangesButton
+                    state={saveButtonState}
+                    onClick={handleSaveChanges}
+                  />
+                </div>
+              </div>
+
+              {saveError && (
+                <InlineActionFeedback
+                  type="error"
+                  message={saveError}
+                  onDismiss={() => setSaveError(null)}
+                />
+              )}
+
+              {testResult && !testResult.success && (
+                <InlineActionFeedback
+                  type="error"
+                  message={testResult.message}
+                  onDismiss={() => setTestResult(null)}
+                />
+              )}
+
+              {testResult && testResult.success && (
+                <InlineActionFeedback
+                  type="success"
+                  message={testResult.message}
+                  onDismiss={() => setTestResult(null)}
+                />
+              )}
             </div>
-
-            <button
-              type="button"
-              onClick={handleSaveChanges}
-              className="px-4 py-2 bg-slate-900 hover:bg-black text-white text-xs font-medium rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 self-end sm:self-auto"
-            >
-              <Check className="w-3.5 h-3.5" />
-              <span>Save Changes</span>
-            </button>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
-      {/* 3. WEBHOOK COMPACT SECTION (Exact match to Courier Webhook) */}
-      <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-2">
+      {/* 3. WEBHOOK COMPACT SECTION */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-2.5">
         <h4 className="text-sm font-semibold text-slate-900">Webhook / Callback URL</h4>
         <div className="flex items-center gap-2 max-w-2xl">
           <input
             type="text"
             readOnly
             value={webhookUrl}
-            className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-700 select-all"
+            className="flex-1 min-w-0 h-9 px-3 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-700 select-all"
           />
           <button
             type="button"
             onClick={handleCopyWebhook}
-            className="px-3.5 py-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 text-xs font-medium rounded-lg transition cursor-pointer shrink-0 flex items-center gap-1.5"
+            className="h-9 px-3.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 text-xs font-medium rounded-lg transition cursor-pointer shrink-0 flex items-center gap-1.5"
           >
             {webhookCopied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
             <span>{webhookCopied ? 'Copied' : 'Copy'}</span>
           </button>
         </div>
         <p className="text-xs text-slate-500">
-          Use this webhook in your payment partner dashboard (Razorpay / PayPal) to receive automated payment confirmation callbacks.
+          Add this callback URL in your payment gateway dashboard to receive automated payment confirmations.
         </p>
       </div>
 

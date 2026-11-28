@@ -294,11 +294,13 @@ function getAdminAuthToken(): string {
   }
 }
 
-function syncIntegrationsToServer(settingsObj: Partial<StoreSettings>): void {
+async function syncIntegrationsToServer(
+  settingsObj: Partial<StoreSettings>
+): Promise<{ success: boolean; error?: string }> {
   const adminToken = getAdminAuthToken();
-  if (!adminToken) return;
+  if (!adminToken) return { success: true };
   try {
-    fetch('/api/admin/integrations-config', {
+    const res = await fetch('/api/admin/integrations-config', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -320,8 +322,21 @@ function syncIntegrationsToServer(settingsObj: Partial<StoreSettings>): void {
         smsSettings: settingsObj.smsSettings,
         deletedSmsGatewayIds: settingsObj.deletedSmsGatewayIds,
       }),
-    }).catch(() => {});
-  } catch {}
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || data?.success === false) {
+      return {
+        success: false,
+        error: data?.message || `Failed to save settings (HTTP ${res.status}).`,
+      };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err?.message || 'Network error while saving configuration.',
+    };
+  }
 }
 
 /**
@@ -952,14 +967,21 @@ interface StoreContextType {
     mode?: 'Surface' | 'Express'
   ) => { success: boolean; awb: string; courier: string; message: string };
   updateDelhiverySettings: (settings: Partial<DelhiverySettings>) => void;
-  updateShippingChannels: (channels: ShippingChannelConfig[], activeChannelId?: string) => void;
+  updateShippingChannels: (
+    channels: ShippingChannelConfig[],
+    activeChannelId?: string
+  ) => Promise<{ success: boolean; error?: string }>;
   updatePaymentGateways: (
     gateways: PaymentGatewayConfig[],
     activeDomesticId?: string,
     activeInternationalId?: string
-  ) => void;
-  updateWhatsAppSettings: (settings: Partial<WhatsAppSettings>) => void;
-  updateSmsSettings: (settings: Partial<SmsIntegrationSettings>) => void;
+  ) => Promise<{ success: boolean; error?: string }>;
+  updateWhatsAppSettings: (
+    settings: Partial<WhatsAppSettings> & { __delete?: boolean }
+  ) => Promise<{ success: boolean; error?: string }>;
+  updateSmsSettings: (
+    settings: Partial<SmsIntegrationSettings>
+  ) => Promise<{ success: boolean; error?: string }>;
 
   // Shipmozo Official API Actions
   shipmozoConfigured: boolean;
@@ -7190,75 +7212,84 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   };
 
-  const updateShippingChannels = (channels: ShippingChannelConfig[], activeChannelId?: string) => {
-    setSettings((prev) => {
-      const targetActiveId =
-        activeChannelId !== undefined ? activeChannelId : prev.activeShippingChannelId || '';
+  const updateShippingChannels = (
+    channels: ShippingChannelConfig[],
+    activeChannelId?: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      let syncTriggered = false;
+      setSettings((prev) => {
+        const targetActiveId =
+          activeChannelId !== undefined ? activeChannelId : prev.activeShippingChannelId || '';
 
-      const updatedChannels = channels.map((c) => ({
-        ...c,
-        apiKey: cleanIntegrationCredential(c.apiKey),
-        apiSecret: cleanIntegrationCredential(c.apiSecret),
-        clientId: (c.clientId || '').trim(),
-        warehouseName: (c.warehouseName || '').trim(),
-        pickupPincode: (c.pickupPincode || '').trim(),
-        isPrimary: Boolean(targetActiveId && c.id === targetActiveId),
-        enabled: targetActiveId && c.id === targetActiveId ? true : c.enabled,
-      }));
+        const updatedChannels = channels.map((c) => ({
+          ...c,
+          apiKey: cleanIntegrationCredential(c.apiKey),
+          apiSecret: cleanIntegrationCredential(c.apiSecret),
+          clientId: (c.clientId || '').trim(),
+          warehouseName: (c.warehouseName || '').trim(),
+          pickupPincode: (c.pickupPincode || '').trim(),
+          isPrimary: Boolean(targetActiveId && c.id === targetActiveId),
+          enabled: targetActiveId && c.id === targetActiveId ? true : c.enabled,
+        }));
 
-      // Track permanently deleted courier IDs (and un-mark any newly re-added IDs)
-      const currentIds = new Set(updatedChannels.map((c) => c.id));
-      const prevIds = (prev.shippingChannels || []).map((c) => c.id);
-      const newlyDeleted = prevIds.filter((id) => !currentIds.has(id));
-      const nextDeletedShippingIds = Array.from(
-        new Set([...(prev.deletedShippingChannelIds || []), ...newlyDeleted])
-      ).filter((id) => !currentIds.has(id));
+        // Track permanently deleted courier IDs (and un-mark any newly re-added IDs)
+        const currentIds = new Set(updatedChannels.map((c) => c.id));
+        const prevIds = (prev.shippingChannels || []).map((c) => c.id);
+        const newlyDeleted = prevIds.filter((id) => !currentIds.has(id));
+        const nextDeletedShippingIds = Array.from(
+          new Set([...(prev.deletedShippingChannelIds || []), ...newlyDeleted])
+        ).filter((id) => !currentIds.has(id));
 
-      const activeChannel = targetActiveId
-        ? updatedChannels.find((c) => c.id === targetActiveId)
-        : undefined;
+        const activeChannel = targetActiveId
+          ? updatedChannels.find((c) => c.id === targetActiveId)
+          : undefined;
 
-      // Keep delhiverySettings in sync if Delhivery exists, or clear if deleted
-      const delhiveryCh = updatedChannels.find((c) => c.provider === 'delhivery');
-      const syncChannel = activeChannel?.provider === 'delhivery' ? activeChannel : delhiveryCh;
-      const updatedDelhivery = syncChannel
-        ? {
-            ...prev.delhiverySettings,
-            enabled: Boolean(activeChannel?.id === syncChannel.id && syncChannel.enabled !== false),
-            apiToken: syncChannel.apiKey,
-            clientName: syncChannel.clientId || prev.delhiverySettings?.clientName || 'Redmode',
-            warehouseName: syncChannel.warehouseName || prev.delhiverySettings?.warehouseName || 'REDMODE B2C',
-            pickupPincode: syncChannel.pickupPincode || prev.delhiverySettings?.pickupPincode || '250002',
-            pickupAddress: syncChannel.pickupAddress || prev.delhiverySettings?.pickupAddress || '',
-            pickupPhone: syncChannel.pickupPhone || prev.delhiverySettings?.pickupPhone || '7302797464',
-            environment: (syncChannel.environment || 'production') as 'production' | 'staging',
-            defaultShippingMode: (syncChannel.shippingMode === 'Express' ? 'Express' : 'Surface') as 'Surface' | 'Express',
-            codRemittanceCycle: (syncChannel.codRemittanceCycle || 'T+2') as 'T+2' | 'Weekly' | 'Bi-Weekly',
-            autoGenerateLabel: true,
-          }
-        : {
-            ...(prev.delhiverySettings || INITIAL_SETTINGS.delhiverySettings!),
-            enabled: false,
-            apiToken: '',
-          };
+        // Keep delhiverySettings in sync if Delhivery exists, or clear if deleted
+        const delhiveryCh = updatedChannels.find((c) => c.provider === 'delhivery');
+        const syncChannel = activeChannel?.provider === 'delhivery' ? activeChannel : delhiveryCh;
+        const updatedDelhivery = syncChannel
+          ? {
+              ...prev.delhiverySettings,
+              enabled: Boolean(activeChannel?.id === syncChannel.id && syncChannel.enabled !== false),
+              apiToken: syncChannel.apiKey,
+              clientName: syncChannel.clientId || prev.delhiverySettings?.clientName || 'Redmode',
+              warehouseName: syncChannel.warehouseName || prev.delhiverySettings?.warehouseName || 'REDMODE B2C',
+              pickupPincode: syncChannel.pickupPincode || prev.delhiverySettings?.pickupPincode || '250002',
+              pickupAddress: syncChannel.pickupAddress || prev.delhiverySettings?.pickupAddress || '',
+              pickupPhone: syncChannel.pickupPhone || prev.delhiverySettings?.pickupPhone || '7302797464',
+              environment: (syncChannel.environment || 'production') as 'production' | 'staging',
+              defaultShippingMode: (syncChannel.shippingMode === 'Express' ? 'Express' : 'Surface') as 'Surface' | 'Express',
+              codRemittanceCycle: (syncChannel.codRemittanceCycle || 'T+2') as 'T+2' | 'Weekly' | 'Bi-Weekly',
+              autoGenerateLabel: true,
+            }
+          : {
+              ...(prev.delhiverySettings || INITIAL_SETTINGS.delhiverySettings!),
+              enabled: false,
+              apiToken: '',
+            };
 
-      const updated: StoreSettings = {
-        ...prev,
-        shippingChannels: updatedChannels,
-        activeShippingChannelId: targetActiveId,
-        deletedShippingChannelIds: nextDeletedShippingIds,
-        delhiverySettings: updatedDelhivery,
-      };
-      try {
-        localStorage.setItem('redmode_settings', JSON.stringify(updated));
-      } catch (e) {
-        console.warn('Failed to save settings:', e);
-      }
-      try {
-        setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
-      } catch {}
-      syncIntegrationsToServer(updated);
-      return updated;
+        const updated: StoreSettings = {
+          ...prev,
+          shippingChannels: updatedChannels,
+          activeShippingChannelId: targetActiveId,
+          deletedShippingChannelIds: nextDeletedShippingIds,
+          delhiverySettings: updatedDelhivery,
+        };
+        try {
+          localStorage.setItem('redmode_settings', JSON.stringify(updated));
+        } catch (e) {
+          console.warn('Failed to save settings:', e);
+        }
+        try {
+          setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
+        } catch {}
+        if (!syncTriggered) {
+          syncTriggered = true;
+          syncIntegrationsToServer(updated).then(resolve);
+        }
+        return updated;
+      });
     });
   };
 
@@ -7266,226 +7297,274 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     gateways: PaymentGatewayConfig[],
     activeDomesticId?: string,
     activeInternationalId?: string
-  ) => {
-    setSettings((prev) => {
-      const targetDomesticId =
-        activeDomesticId !== undefined
-          ? activeDomesticId
-          : prev.activePaymentGatewayId || '';
+  ): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      let syncTriggered = false;
+      setSettings((prev) => {
+        const targetDomesticId =
+          activeDomesticId !== undefined
+            ? activeDomesticId
+            : prev.activePaymentGatewayId || '';
 
-      const targetInternationalId =
-        activeInternationalId !== undefined
-          ? activeInternationalId
-          : prev.activeInternationalGatewayId || '';
+        const targetInternationalId =
+          activeInternationalId !== undefined
+            ? activeInternationalId
+            : prev.activeInternationalGatewayId || '';
 
-      const updatedGateways = gateways.map((g) => ({
-        ...g,
-        apiKey: cleanIntegrationCredential(g.apiKey),
-        apiSecret: cleanIntegrationCredential(g.apiSecret),
-        webhookSecret: cleanIntegrationCredential(g.webhookSecret),
-        merchantName: (g.merchantName || 'REDMODE').trim(),
-        isPrimary: Boolean(targetDomesticId && g.id === targetDomesticId),
-      }));
+        const updatedGateways = gateways.map((g) => ({
+          ...g,
+          apiKey: cleanIntegrationCredential(g.apiKey),
+          apiSecret: cleanIntegrationCredential(g.apiSecret),
+          webhookSecret: cleanIntegrationCredential(g.webhookSecret),
+          merchantName: (g.merchantName || 'REDMODE').trim(),
+          isPrimary: Boolean(targetDomesticId && g.id === targetDomesticId),
+        }));
 
-      // Track permanently deleted gateway IDs (and un-mark any re-added IDs)
-      const currentIds = new Set(updatedGateways.map((g) => g.id));
-      const prevIds = (prev.paymentGateways || []).map((g) => g.id);
-      const newlyDeleted = prevIds.filter((id) => !currentIds.has(id));
-      const nextDeletedPaymentIds = Array.from(
-        new Set([...(prev.deletedPaymentGatewayIds || []), ...newlyDeleted])
-      ).filter((id) => !currentIds.has(id));
+        // Track permanently deleted gateway IDs (and un-mark any re-added IDs)
+        const currentIds = new Set(updatedGateways.map((g) => g.id));
+        const prevIds = (prev.paymentGateways || []).map((g) => g.id);
+        const newlyDeleted = prevIds.filter((id) => !currentIds.has(id));
+        const nextDeletedPaymentIds = Array.from(
+          new Set([...(prev.deletedPaymentGatewayIds || []), ...newlyDeleted])
+        ).filter((id) => !currentIds.has(id));
 
-      // Keep razorpaySettings in sync (or clear if Razorpay gateway was deleted)
-      const activeRazorpay =
-        updatedGateways.find((g) => g.provider === 'razorpay' && g.id === targetDomesticId && g.enabled) ||
-        updatedGateways.find((g) => g.provider === 'razorpay');
+        // Keep razorpaySettings in sync (or clear if Razorpay gateway was deleted)
+        const activeRazorpay =
+          updatedGateways.find((g) => g.provider === 'razorpay' && g.id === targetDomesticId && g.enabled) ||
+          updatedGateways.find((g) => g.provider === 'razorpay');
 
-      const updatedRazorpaySettings = activeRazorpay
-        ? {
-            enabled: activeRazorpay.enabled,
-            keyId: activeRazorpay.apiKey,
-            keySecret: activeRazorpay.apiSecret || '',
-            merchantName: activeRazorpay.merchantName || 'REDMODE',
-            themeColor: activeRazorpay.themeColor || '#111827',
-            mode: (activeRazorpay.apiKey.startsWith('rzp_live') ? 'live' : activeRazorpay.mode) as
-              | 'test'
-              | 'live',
-          }
-        : {
-            ...(prev.razorpaySettings || INITIAL_SETTINGS.razorpaySettings!),
-            enabled: false,
-            keyId: '',
-            keySecret: '',
-          };
+        const updatedRazorpaySettings = activeRazorpay
+          ? {
+              enabled: activeRazorpay.enabled,
+              keyId: activeRazorpay.apiKey,
+              keySecret: activeRazorpay.apiSecret || '',
+              merchantName: activeRazorpay.merchantName || 'REDMODE',
+              themeColor: activeRazorpay.themeColor || '#111827',
+              mode: (activeRazorpay.apiKey.startsWith('rzp_live') ? 'live' : activeRazorpay.mode) as
+                | 'test'
+                | 'live',
+            }
+          : {
+              ...(prev.razorpaySettings || INITIAL_SETTINGS.razorpaySettings!),
+              enabled: false,
+              keyId: '',
+              keySecret: '',
+            };
 
-      const updated: StoreSettings = {
-        ...prev,
-        paymentGateways: updatedGateways,
-        activePaymentGatewayId: targetDomesticId,
-        activeInternationalGatewayId: targetInternationalId,
-        deletedPaymentGatewayIds: nextDeletedPaymentIds,
-        razorpaySettings: updatedRazorpaySettings,
-      };
+        const updated: StoreSettings = {
+          ...prev,
+          paymentGateways: updatedGateways,
+          activePaymentGatewayId: targetDomesticId,
+          activeInternationalGatewayId: targetInternationalId,
+          deletedPaymentGatewayIds: nextDeletedPaymentIds,
+          razorpaySettings: updatedRazorpaySettings,
+        };
 
-      try {
-        localStorage.setItem('redmode_settings', JSON.stringify(updated));
-      } catch (e) {
-        console.warn('Failed to save payment gateway settings:', e);
-      }
-      try {
-        setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
-      } catch {}
-      syncIntegrationsToServer(updated);
-      return updated;
+        try {
+          localStorage.setItem('redmode_settings', JSON.stringify(updated));
+        } catch (e) {
+          console.warn('Failed to save payment gateway settings:', e);
+        }
+        try {
+          setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
+        } catch {}
+        if (!syncTriggered) {
+          syncTriggered = true;
+          syncIntegrationsToServer(updated).then(resolve);
+        }
+        return updated;
+      });
     });
   };
 
-  const updateWhatsAppSettings = (newWhatsApp: Partial<WhatsAppSettings> & { __delete?: boolean }) => {
-    setSettings((prev) => {
-      const isDeleting = Boolean(newWhatsApp.__delete);
-      const { __delete: _ignored, ...cleanFields } = newWhatsApp as any;
-      const current = prev.whatsappSettings || INITIAL_SETTINGS.whatsappSettings!;
-      const wasEnabled = current.enabled !== false;
-      const nextEnabled = isDeleting
-        ? false
-        : cleanFields.enabled !== undefined
-        ? Boolean(cleanFields.enabled)
-        : wasEnabled;
-      const mergedWhatsApp: WhatsAppSettings = isDeleting
-        ? {
-            ...current,
-            enabled: false,
-            provider: 'meta_cloud_api',
-            accessToken: '',
-            phoneNumberId: '',
-            wabaId: '',
-            phoneNumber: '',
-            webhookVerifyToken: '',
-          }
-        : {
-            ...current,
-            ...cleanFields,
-            enabled: nextEnabled,
-            automationEnabledAt:
-              !wasEnabled && nextEnabled
-                ? new Date().toISOString()
-                : cleanFields.automationEnabledAt || current.automationEnabledAt,
-            accessToken: cleanIntegrationCredential(
-              cleanFields.accessToken !== undefined ? cleanFields.accessToken : current.accessToken
-            ),
-            phoneNumberId: (
-              cleanFields.phoneNumberId !== undefined ? cleanFields.phoneNumberId : current.phoneNumberId || ''
-            ).trim(),
-            wabaId: (cleanFields.wabaId !== undefined ? cleanFields.wabaId : current.wabaId || '').trim(),
-          };
-
-      // Cross-sync Meta WhatsApp credentials with smsSettings.meta_whatsapp (if it exists)
-      const currentSms = prev.smsSettings || INITIAL_SETTINGS.smsSettings!;
-      const syncedGateways = Array.isArray(currentSms.gateways)
-        ? currentSms.gateways.map((g) =>
-            g.provider === 'meta_whatsapp'
-              ? {
-                  ...g,
-                  phoneNumberId: isDeleting ? '' : mergedWhatsApp.phoneNumberId || g.phoneNumberId,
-                  wabaId: isDeleting ? '' : mergedWhatsApp.wabaId || g.wabaId,
-                  accessToken: isDeleting ? '' : mergedWhatsApp.accessToken || g.accessToken,
-                }
-              : g
-          )
-        : currentSms.gateways;
-      const updated: StoreSettings = {
-        ...prev,
-        whatsappSettings: mergedWhatsApp,
-        whatsappIntegrationDeleted: isDeleting
-          ? true
-          : Boolean(mergedWhatsApp.enabled || mergedWhatsApp.accessToken)
+  const updateWhatsAppSettings = (
+    newWhatsApp: Partial<WhatsAppSettings> & { __delete?: boolean }
+  ): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      let syncTriggered = false;
+      setSettings((prev) => {
+        const isDeleting = Boolean(newWhatsApp.__delete);
+        const { __delete: _ignored, ...cleanFields } = newWhatsApp as any;
+        const current = prev.whatsappSettings || INITIAL_SETTINGS.whatsappSettings!;
+        const wasEnabled = current.enabled !== false;
+        const nextEnabled = isDeleting
           ? false
-          : prev.whatsappIntegrationDeleted,
-        smsSettings: {
-          ...currentSms,
-          gateways: syncedGateways,
-        },
-      };
-      try {
-        localStorage.setItem('redmode_settings', JSON.stringify(updated));
-      } catch (e) {
-        console.warn('Failed to save settings:', e);
-      }
-      try {
-        setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
-      } catch {}
-      syncIntegrationsToServer(updated);
-      return updated;
+          : cleanFields.enabled !== undefined
+          ? Boolean(cleanFields.enabled)
+          : wasEnabled;
+        const mergedWhatsApp: WhatsAppSettings = isDeleting
+          ? {
+              ...current,
+              enabled: false,
+              provider: 'meta_cloud_api',
+              accessToken: '',
+              phoneNumberId: '',
+              wabaId: '',
+              phoneNumber: '',
+              webhookVerifyToken: '',
+            }
+          : {
+              ...current,
+              ...cleanFields,
+              enabled: nextEnabled,
+              automationEnabledAt:
+                !wasEnabled && nextEnabled
+                  ? new Date().toISOString()
+                  : cleanFields.automationEnabledAt || current.automationEnabledAt,
+              accessToken: cleanIntegrationCredential(
+                cleanFields.accessToken !== undefined ? cleanFields.accessToken : current.accessToken
+              ),
+              phoneNumberId: (
+                cleanFields.phoneNumberId !== undefined ? cleanFields.phoneNumberId : current.phoneNumberId || ''
+              ).trim(),
+              wabaId: (cleanFields.wabaId !== undefined ? cleanFields.wabaId : current.wabaId || '').trim(),
+            };
+
+        // Cross-sync Meta WhatsApp credentials with smsSettings.meta_whatsapp (if it exists)
+        const currentSms = prev.smsSettings || INITIAL_SETTINGS.smsSettings!;
+        const syncedGateways = Array.isArray(currentSms.gateways)
+          ? currentSms.gateways.map((g) =>
+              g.provider === 'meta_whatsapp'
+                ? {
+                    ...g,
+                    phoneNumberId: isDeleting ? '' : mergedWhatsApp.phoneNumberId || g.phoneNumberId,
+                    wabaId: isDeleting ? '' : mergedWhatsApp.wabaId || g.wabaId,
+                    accessToken: isDeleting ? '' : mergedWhatsApp.accessToken || g.accessToken,
+                  }
+                : g
+            )
+          : currentSms.gateways;
+        const updated: StoreSettings = {
+          ...prev,
+          whatsappSettings: mergedWhatsApp,
+          whatsappIntegrationDeleted: isDeleting
+            ? true
+            : Boolean(mergedWhatsApp.enabled || mergedWhatsApp.accessToken)
+            ? false
+            : prev.whatsappIntegrationDeleted,
+          smsSettings: {
+            ...currentSms,
+            gateways: syncedGateways,
+          },
+        };
+        try {
+          localStorage.setItem('redmode_settings', JSON.stringify(updated));
+        } catch (e) {
+          console.warn('Failed to save settings:', e);
+        }
+        try {
+          setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
+        } catch {}
+        if (!syncTriggered) {
+          syncTriggered = true;
+          syncIntegrationsToServer(updated).then(resolve);
+        }
+        return updated;
+      });
     });
   };
 
-  const updateSmsSettings = (newSms: Partial<SmsIntegrationSettings>) => {
-    setSettings((prev) => {
-      const current = prev.smsSettings || INITIAL_SETTINGS.smsSettings!;
-      const nextGateways = Array.isArray(newSms.gateways)
-        ? newSms.gateways.map((g) => ({
-            ...g,
-            apiKey: cleanIntegrationCredential(g.apiKey),
-            accessToken: cleanIntegrationCredential(g.accessToken),
-            phoneNumberId: (g.phoneNumberId || '').trim(),
-            wabaId: (g.wabaId || '').trim(),
-          }))
-        : current.gateways;
+  const updateSmsSettings = (
+    newSms: Partial<SmsIntegrationSettings>
+  ): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      let syncTriggered = false;
+      setSettings((prev) => {
+        const current = prev.smsSettings || INITIAL_SETTINGS.smsSettings!;
+        const nextGateways = Array.isArray(newSms.gateways)
+          ? newSms.gateways.map((g) => ({
+              ...g,
+              apiKey: cleanIntegrationCredential(g.apiKey),
+              accessToken: cleanIntegrationCredential(g.accessToken),
+              phoneNumberId: (g.phoneNumberId || '').trim(),
+              wabaId: (g.wabaId || '').trim(),
+            }))
+          : current.gateways;
 
-      // Track permanently deleted SMS/OTP gateway IDs
-      const currentIds = new Set(nextGateways.map((g) => g.id));
-      const prevIds = (current.gateways || []).map((g) => g.id);
-      const newlyDeleted = prevIds.filter((id) => !currentIds.has(id));
-      const nextDeletedSmsIds = Array.from(
-        new Set([...(prev.deletedSmsGatewayIds || []), ...newlyDeleted])
-      ).filter((id) => !currentIds.has(id));
+        // Track permanently deleted SMS/OTP gateway IDs
+        const currentIds = new Set(nextGateways.map((g) => g.id));
+        const prevIds = (current.gateways || []).map((g) => g.id);
+        const newlyDeleted = prevIds.filter((id) => !currentIds.has(id));
+        const nextDeletedSmsIds = Array.from(
+          new Set([...(prev.deletedSmsGatewayIds || []), ...newlyDeleted])
+        ).filter((id) => !currentIds.has(id));
 
-      const updatedSms: SmsIntegrationSettings = {
-        ...current,
-        ...newSms,
-        gateways: nextGateways,
-      };
-      // Cross-sync Meta WhatsApp credentials back to whatsappSettings (only if meta_whatsapp exists & has values)
-      const metaGw = updatedSms.gateways?.find((g) => g.provider === 'meta_whatsapp');
-      const currentWa = prev.whatsappSettings || INITIAL_SETTINGS.whatsappSettings!;
-      const syncedWa = metaGw
-        ? {
-            ...currentWa,
-            phoneNumberId: metaGw.phoneNumberId || currentWa.phoneNumberId,
-            wabaId: metaGw.wabaId || currentWa.wabaId,
-            accessToken: metaGw.accessToken || currentWa.accessToken,
-          }
-        : currentWa;
+        const updatedSms: SmsIntegrationSettings = {
+          ...current,
+          ...newSms,
+          gateways: nextGateways,
+        };
+        // Cross-sync Meta WhatsApp credentials back to whatsappSettings (only if meta_whatsapp exists & has values)
+        const metaGw = updatedSms.gateways?.find((g) => g.provider === 'meta_whatsapp');
+        const currentWa = prev.whatsappSettings || INITIAL_SETTINGS.whatsappSettings!;
+        const syncedWa = metaGw
+          ? {
+              ...currentWa,
+              phoneNumberId: metaGw.phoneNumberId || currentWa.phoneNumberId,
+              wabaId: metaGw.wabaId || currentWa.wabaId,
+              accessToken: metaGw.accessToken || currentWa.accessToken,
+            }
+          : currentWa;
 
-      const updated: StoreSettings = {
-        ...prev,
-        smsSettings: updatedSms,
-        deletedSmsGatewayIds: nextDeletedSmsIds,
-        whatsappSettings: syncedWa,
-      };
-      try {
-        localStorage.setItem('redmode_settings', JSON.stringify(updated));
-      } catch (e) {
-        console.warn('Failed to save settings:', e);
-      }
-      try {
-        setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
-      } catch {}
-      syncIntegrationsToServer(updated);
+        const updated: StoreSettings = {
+          ...prev,
+          smsSettings: updatedSms,
+          deletedSmsGatewayIds: nextDeletedSmsIds,
+          whatsappSettings: syncedWa,
+        };
+        try {
+          localStorage.setItem('redmode_settings', JSON.stringify(updated));
+        } catch (e) {
+          console.warn('Failed to save settings:', e);
+        }
+        try {
+          setDoc(doc(db, 'settings', 'store_settings'), sanitizeSettingsForPublicFirestore(updated), { merge: true }).catch(() => {});
+        } catch {}
 
-      // Sync active credentials to backend using verified Admin Session Token
-      const adminToken = getAdminAuthToken();
-      fetch('/api/admin/sms-settings', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
-        },
-        credentials: 'include',
-        body: JSON.stringify(updatedSms),
-      }).catch((err) => console.warn('Sync to /api/admin/sms-settings failed:', err));
+        if (!syncTriggered) {
+          syncTriggered = true;
+          const adminToken = getAdminAuthToken();
+          const smsPostPromise: Promise<{ success: boolean; error?: string }> = adminToken
+            ? fetch('/api/admin/sms-settings', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${adminToken}`,
+                },
+                credentials: 'include',
+                body: JSON.stringify(updatedSms),
+              })
+                .then(async (res) => {
+                  const data = await res.json().catch(() => null);
+                  if (!res.ok || data?.success === false) {
+                    return {
+                      success: false,
+                      error: data?.message || `Failed to save SMS settings (HTTP ${res.status}).`,
+                    };
+                  }
+                  return { success: true };
+                })
+                .catch((err: any) => ({
+                  success: false,
+                  error: err?.message || 'Network error while saving SMS settings.',
+                }))
+            : Promise.resolve({ success: true });
 
-      return updated;
+          Promise.all([syncIntegrationsToServer(updated), smsPostPromise]).then(
+            ([configRes, smsRes]) => {
+              if (!configRes.success) {
+                resolve(configRes);
+              } else if (!smsRes.success) {
+                resolve(smsRes);
+              } else {
+                resolve({ success: true });
+              }
+            }
+          );
+        }
+
+        return updated;
+      });
     });
   };
 
